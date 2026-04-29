@@ -9,60 +9,64 @@ import (
 
 type singLogger struct{}
 
+func logArgs(fn func(format string, v ...any), args ...any) {
+	fn("%s", fmt.Sprint(args...))
+}
+
 func (l singLogger) TraceContext(ctx context.Context, args ...any) {
-	Debugln(fmt.Sprint(args...))
+	logArgs(Debugln, args...)
 }
 
 func (l singLogger) DebugContext(ctx context.Context, args ...any) {
-	Debugln(fmt.Sprint(args...))
+	logArgs(Debugln, args...)
 }
 
 func (l singLogger) InfoContext(ctx context.Context, args ...any) {
-	Infoln(fmt.Sprint(args...))
+	logArgs(Infoln, args...)
 }
 
 func (l singLogger) WarnContext(ctx context.Context, args ...any) {
-	Warnln(fmt.Sprint(args...))
+	logArgs(Warnln, args...)
 }
 
 func (l singLogger) ErrorContext(ctx context.Context, args ...any) {
-	Errorln(fmt.Sprint(args...))
+	logArgs(Errorln, args...)
 }
 
 func (l singLogger) FatalContext(ctx context.Context, args ...any) {
-	Fatalln(fmt.Sprint(args...))
+	logArgs(Fatalln, args...)
 }
 
 func (l singLogger) PanicContext(ctx context.Context, args ...any) {
-	Fatalln(fmt.Sprint(args...))
+	logArgs(Fatalln, args...)
 }
 
 func (l singLogger) Trace(args ...any) {
-	Debugln(fmt.Sprint(args...))
+	logArgs(Debugln, args...)
 }
 
 func (l singLogger) Debug(args ...any) {
-	Debugln(fmt.Sprint(args...))
+	logArgs(Debugln, args...)
 }
 
 func (l singLogger) Info(args ...any) {
-	Infoln(fmt.Sprint(args...))
+	logArgs(Infoln, args...)
 }
 
 func (l singLogger) Warn(args ...any) {
-	Warnln(fmt.Sprint(args...))
+	logArgs(Warnln, args...)
 }
 
 func (l singLogger) Error(args ...any) {
-	Errorln(fmt.Sprint(args...))
+	logArgs(Errorln, args...)
 }
 
 func (l singLogger) Fatal(args ...any) {
-	Fatalln(fmt.Sprint(args...))
+	logArgs(Fatalln, args...)
 }
 
 func (l singLogger) Panic(args ...any) {
-	Fatalln(fmt.Sprint(args...))
+	logArgs(Fatalln, args...)
 }
 
 type singInfoToDebugLogger struct {
@@ -70,11 +74,11 @@ type singInfoToDebugLogger struct {
 }
 
 func (l singInfoToDebugLogger) InfoContext(ctx context.Context, args ...any) {
-	Debugln(fmt.Sprint(args...))
+	logArgs(Debugln, args...)
 }
 
 func (l singInfoToDebugLogger) Info(args ...any) {
-	Debugln(fmt.Sprint(args...))
+	logArgs(Debugln, args...)
 }
 
 var SingLogger L.ContextLogger = singLogger{}
