@@ -22,13 +22,14 @@ var errV4InvalidRecord = errors.New("invalid snell v4 record")
 
 type v4Conn struct {
 	net.Conn
-	cipher shadowaead.Cipher
-	reader *v4Reader
-	writer *v4Writer
+	cipher   shadowaead.Cipher
+	identity []byte
+	reader   *v4Reader
+	writer   *v4Writer
 }
 
-func newV4Conn(conn net.Conn, streamCipher shadowaead.Cipher) *v4Conn {
-	return &v4Conn{Conn: conn, cipher: streamCipher}
+func newV4Conn(conn net.Conn, streamCipher shadowaead.Cipher, identity []byte) *v4Conn {
+	return &v4Conn{Conn: conn, cipher: streamCipher, identity: append([]byte(nil), identity...)}
 }
 
 func (conn *v4Conn) initReader() error {
@@ -62,7 +63,14 @@ func (conn *v4Conn) initWriter() error {
 	if err != nil {
 		return err
 	}
-	if _, err = conn.Conn.Write(salt); err != nil {
+	header := salt
+	if len(conn.identity) == IdentityHeaderLength {
+		header = make([]byte, 0, len(salt)+len(identityWireMagic)+IdentityHeaderLength)
+		header = append(header, salt...)
+		header = append(header, identityWireMagic...)
+		header = append(header, conn.identity...)
+	}
+	if _, err = conn.Conn.Write(header); err != nil {
 		return err
 	}
 	conn.writer = &v4Writer{writer: conn.Conn, aead: aead}
