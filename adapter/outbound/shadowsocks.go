@@ -54,8 +54,10 @@ type ShadowSocksOption struct {
 }
 
 type simpleObfsOption struct {
-	Mode string `obfs:"mode,omitempty"`
-	Host string `obfs:"host,omitempty"`
+	Mode           string `obfs:"mode,omitempty"`
+	Host           string `obfs:"host,omitempty"`
+	Password       string `obfs:"password,omitempty"`
+	SkipCertVerify bool   `obfs:"skip-cert-verify,omitempty"`
 }
 
 type v2rayObfsOption struct {

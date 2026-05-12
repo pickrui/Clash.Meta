@@ -5,12 +5,18 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"time"
 
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/structure"
+	"github.com/metacubex/mihomo/component/proxydialer"
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/transport/anytls"
 	obfs "github.com/metacubex/mihomo/transport/simple-obfs"
 	"github.com/metacubex/mihomo/transport/snell"
+	"github.com/metacubex/mihomo/transport/vmess"
+
+	M "github.com/metacubex/sing/common/metadata"
 )
 
 type Snell struct {
@@ -19,6 +25,7 @@ type Snell struct {
 	psk        []byte
 	pool       *snell.Pool
 	obfsOption *simpleObfsOption
+	anyTLS     *anytls.Client
 	identity   bool
 	reuse      bool
 	version    int
@@ -100,9 +107,9 @@ func (s *Snell) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn
 		return NewConn(c, s), err
 	}
 
-	c, err := s.dialer.DialContext(ctx, "tcp", s.addr)
+	c, err := s.dialSnellTransport(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("%s connect error: %w", s.addr, err)
+		return nil, err
 	}
 
 	defer func(c net.Conn) {
@@ -118,7 +125,7 @@ func (s *Snell) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 	if err = s.ResolveUDP(ctx, metadata); err != nil {
 		return nil, err
 	}
-	c, err := s.dialer.DialContext(ctx, "tcp", s.addr)
+	c, err := s.dialSnellTransport(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -131,6 +138,17 @@ func (s *Snell) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 
 	pc := snell.PacketConn(c)
 	return newPacketConn(pc, s), nil
+}
+
+func (s *Snell) dialSnellTransport(ctx context.Context) (net.Conn, error) {
+	if s.anyTLS != nil {
+		return s.anyTLS.CreateRawStream(ctx)
+	}
+	c, err := s.dialer.DialContext(ctx, "tcp", s.addr)
+	if err != nil {
+		return nil, fmt.Errorf("%s connect error: %w", s.addr, err)
+	}
+	return c, nil
 }
 
 // SupportUOT implements C.ProxyAdapter
@@ -157,16 +175,21 @@ func NewSnell(option SnellOption) (*Snell, error) {
 	psk := []byte(option.Psk)
 
 	decoder := structure.NewDecoder(structure.Option{TagName: "obfs", WeaklyTypedInput: true})
-	obfsOption := &simpleObfsOption{Host: "bing.com"}
+	obfsOption := &simpleObfsOption{}
 	if err := decoder.Decode(option.ObfsOpts, obfsOption); err != nil {
 		return nil, fmt.Errorf("snell %s initialize obfs error: %w", addr, err)
 	}
+	if obfsOption.Host == "" && (obfsOption.Mode == "tls" || obfsOption.Mode == "http") {
+		obfsOption.Host = "bing.com"
+	}
 
 	switch obfsOption.Mode {
-	case "tls", "http", "":
-		break
+	case "tls", "http", "anytls", "":
 	default:
 		return nil, fmt.Errorf("snell %s obfs mode error: %s", addr, obfsOption.Mode)
+	}
+	if obfsOption.Mode == "anytls" && obfsOption.Password == "" {
+		return nil, fmt.Errorf("snell %s anytls password is empty", addr)
 	}
 
 	// backward compatible
@@ -205,10 +228,28 @@ func NewSnell(option SnellOption) (*Snell, error) {
 		version:    option.Version,
 	}
 	s.dialer = option.NewDialer(s.DialOptions())
+	if obfsOption.Mode == "anytls" {
+		singDialer := proxydialer.NewSingDialer(s.dialer)
+		tlsConfig := &vmess.TLSConfig{
+			Host:           obfsOption.Host,
+			SkipCertVerify: obfsOption.SkipCertVerify,
+		}
+		if tlsConfig.Host == "" {
+			tlsConfig.Host = option.Server
+		}
+		s.anyTLS = anytls.NewClient(context.TODO(), anytls.ClientConfig{
+			Password:                 obfsOption.Password,
+			Server:                   M.ParseSocksaddrHostPort(option.Server, uint16(option.Port)),
+			Dialer:                   singDialer,
+			TLSConfig:                tlsConfig,
+			IdleSessionCheckInterval: 30 * time.Second,
+			IdleSessionTimeout:       30 * time.Second,
+		})
+	}
 
 	if reuse {
 		s.pool = snell.NewPool(func(ctx context.Context) (*snell.Snell, error) {
-			c, err := s.dialer.DialContext(ctx, "tcp", addr)
+			c, err := s.dialSnellTransport(ctx)
 			if err != nil {
 				return nil, err
 			}
@@ -217,4 +258,11 @@ func NewSnell(option SnellOption) (*Snell, error) {
 		})
 	}
 	return s, nil
+}
+
+func (s *Snell) Close() error {
+	if s.anyTLS != nil {
+		return s.anyTLS.Close()
+	}
+	return s.Base.Close()
 }

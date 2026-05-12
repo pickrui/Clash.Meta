@@ -63,6 +63,10 @@ func (c *Client) CreateProxy(ctx context.Context, destination M.Socksaddr) (net.
 	return conn, nil
 }
 
+func (c *Client) CreateRawStream(ctx context.Context) (net.Conn, error) {
+	return c.sessionClient.CreateStream(ctx)
+}
+
 func (c *Client) createOutboundTLSConnection(ctx context.Context) (net.Conn, error) {
 	conn, err := c.dialer.DialContext(ctx, N.NetworkTCP, c.server)
 	if err != nil {
