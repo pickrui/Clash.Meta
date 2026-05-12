@@ -394,13 +394,15 @@ proxies: # socks5
     # ip-version: dual
 
   # Snell
-  # Beware that there's currently no UDP support yet
+  # UDP requires version 3 or 4
   - name: "snell"
     type: snell
     server: server
     port: 44046
     psk: yourpsk
-    # version: 2
+    # version: 4
+    # reuse: true
+    # udp: true
     # obfs-opts:
     # mode: http # or tls
     # host: bing.com

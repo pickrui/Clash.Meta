@@ -2,7 +2,10 @@ package snell
 
 import (
 	"context"
+	"io"
 	"net"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/component/pool"
@@ -23,7 +26,7 @@ func (p *Pool) GetContext(ctx context.Context) (net.Conn, error) {
 		return nil, err
 	}
 
-	return &PoolConn{elm, p}, nil
+	return &PoolConn{Snell: elm, pool: p}, nil
 }
 
 func (p *Pool) Put(conn *Snell) {
@@ -32,12 +35,22 @@ func (p *Pool) Put(conn *Snell) {
 		return
 	}
 
+	p.put(conn)
+}
+
+func (p *Pool) put(conn *Snell) {
 	p.pool.Put(conn)
 }
 
 type PoolConn struct {
 	*Snell
-	pool *Pool
+	pool           *Pool
+	readClosed     atomic.Bool
+	writeClosed    atomic.Bool
+	closeOnce      sync.Once
+	closeErr       error
+	closeWriteOnce sync.Once
+	closeWriteErr  error
 }
 
 func (pc *PoolConn) Read(b []byte) (int, error) {
@@ -52,6 +65,8 @@ func (pc *PoolConn) Read(b []byte) (int, error) {
 			pc.Snell.reply = false
 			return pc.Snell.Read(b)
 		}
+		pc.readClosed.Store(true)
+		return n, io.EOF
 	}
 	return n, err
 }
@@ -60,12 +75,39 @@ func (pc *PoolConn) Write(b []byte) (int, error) {
 	return pc.Snell.Write(b)
 }
 
+func (pc *PoolConn) CloseWrite() error {
+	pc.closeWriteOnce.Do(func() {
+		_, pc.closeWriteErr = pc.Snell.Write(endSignal)
+		if pc.closeWriteErr == nil {
+			pc.writeClosed.Store(true)
+		}
+	})
+	return pc.closeWriteErr
+}
+
 func (pc *PoolConn) Close() error {
-	// mihomo use SetReadDeadline to break bidirectional copy between client and server.
-	// reset it before reuse connection to avoid io timeout error.
-	_ = pc.Snell.Conn.SetReadDeadline(time.Time{})
-	pc.pool.Put(pc.Snell)
-	return nil
+	pc.closeOnce.Do(func() {
+		// mihomo use SetReadDeadline to break bidirectional copy between client and server.
+		// reset it before reuse connection to avoid io timeout error.
+		_ = pc.Snell.Conn.SetReadDeadline(time.Time{})
+
+		if !pc.writeClosed.Load() {
+			if err := pc.CloseWrite(); err != nil {
+				pc.closeErr = err
+				_ = pc.Snell.Close()
+				return
+			}
+		}
+
+		if !pc.readClosed.Load() {
+			_ = pc.Snell.Close()
+			return
+		}
+
+		pc.Snell.reply = false
+		pc.pool.put(pc.Snell)
+	})
+	return pc.closeErr
 }
 
 func NewPool(factory func(context.Context) (*Snell, error)) *Pool {

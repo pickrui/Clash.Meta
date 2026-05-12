@@ -17,6 +17,7 @@ const (
 	Version1            = 1
 	Version2            = 2
 	Version3            = 3
+	Version4            = 4
 	DefaultSnellVersion = Version1
 
 	// max packet length
@@ -46,47 +47,63 @@ type Snell struct {
 }
 
 func (s *Snell) Read(b []byte) (int, error) {
-	if s.reply {
-		return s.Conn.Read(b)
+	if !s.reply {
+		if err := s.readTunnelReply(); err != nil {
+			return 0, err
+		}
 	}
+	return s.Conn.Read(b)
+}
 
+func (s *Snell) readTunnelReply() error {
+	if s.reply {
+		return nil
+	}
 	s.reply = true
 	if _, err := io.ReadFull(s.Conn, s.buffer[:]); err != nil {
-		return 0, err
+		return err
 	}
 
 	if s.buffer[0] == CommandTunnel {
-		return s.Conn.Read(b)
+		return nil
 	} else if s.buffer[0] != CommandError {
-		return 0, errors.New("command not support")
+		return errors.New("command not support")
 	}
 
 	// CommandError
 	// 1 byte error code
 	if _, err := io.ReadFull(s.Conn, s.buffer[:]); err != nil {
-		return 0, err
+		return err
 	}
 	errcode := int(s.buffer[0])
 
 	// 1 byte error message length
 	if _, err := io.ReadFull(s.Conn, s.buffer[:]); err != nil {
-		return 0, err
+		return err
 	}
 	length := int(s.buffer[0])
 	msg := make([]byte, length)
 
 	if _, err := io.ReadFull(s.Conn, msg); err != nil {
-		return 0, err
+		return err
 	}
 
-	return 0, fmt.Errorf("server reported code: %d, message: %s", errcode, string(msg))
+	return fmt.Errorf("server reported code: %d, message: %s", errcode, string(msg))
 }
 
-func WriteHeader(conn net.Conn, host string, port uint, version int) error {
+func ReadTunnelReply(conn net.Conn) error {
+	snellConn, ok := conn.(*Snell)
+	if !ok {
+		return nil
+	}
+	return snellConn.readTunnelReply()
+}
+
+func WriteHeader(conn net.Conn, host string, port uint, version int, reuse bool) error {
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
 	buf.WriteByte(Version)
-	if version == Version2 {
+	if version == Version2 || (version == Version4 && reuse) {
 		buf.WriteByte(CommandConnectV2)
 	} else {
 		buf.WriteByte(CommandConnect)
@@ -117,7 +134,6 @@ func WriteUDPHeader(conn net.Conn, version int) error {
 	return err
 }
 
-// HalfClose works only on version2
 func HalfClose(conn net.Conn) error {
 	if _, err := conn.Write(endSignal); err != nil {
 		return err
@@ -135,6 +151,9 @@ func StreamConn(conn net.Conn, psk []byte, version int) *Snell {
 		cipher = NewAES128GCM(psk)
 	} else {
 		cipher = NewChacha20Poly1305(psk)
+	}
+	if version == Version4 {
+		return &Snell{Conn: newV4Conn(conn, cipher)}
 	}
 	return &Snell{Conn: shadowaead.NewConn(conn, cipher)}
 }
