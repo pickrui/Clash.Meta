@@ -406,6 +406,15 @@ proxies: # socks5
     # obfs-opts:
     # mode: http # or tls
     # host: bing.com
+    # obfs-opts:
+    #   mode: ech-tls
+    #   sni: tunnel.example.com
+    #   path: /ws-tunnel-CHANGE-ME
+    #   ech-config: ECH_CONFIG_LIST_BASE64
+    #   # ech-config-file: ./ech.config_list
+    #   # ca-file: ./ca.pem
+    #   # insecure: false
+    #   # client-fingerprint: chrome
 
   # Shadowsocks
   # cipher支持:
