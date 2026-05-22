@@ -193,6 +193,10 @@ func hasSnellShadowTLSOption(option SnellOption) bool {
 		option.ShadowTLSALPN != nil
 }
 
+func requiresSnellV4Identity(obfsMode string, shadowTLSOption *shadowtls.ShadowTLSOption) bool {
+	return obfsMode == "anytls" || isSnellECHTLSMode(obfsMode) || shadowTLSOption != nil
+}
+
 func snellStreamConn(c net.Conn, option streamOption) *snell.Snell {
 	switch option.obfsOption.Mode {
 	case "tls":
@@ -224,12 +228,14 @@ func (s *Snell) writeHeaderContext(ctx context.Context, c net.Conn, metadata *C.
 		if err = snell.WriteUDPHeader(c, s.version); err != nil {
 			return err
 		}
-		if s.version == snell.Version4 {
-			return snell.ReadTunnelReply(c)
+		if s.version >= snell.Version4 {
+			if sc, ok := c.(*snell.Snell); ok {
+				return sc.ReadReply()
+			}
 		}
 		return nil
 	}
-	err = snell.WriteHeader(c, metadata.String(), uint(metadata.DstPort), s.version, s.reuse)
+	err = snell.WriteHeaderWithReuse(c, metadata.String(), uint(metadata.DstPort), s.version, s.reuse)
 	return
 }
 
@@ -369,13 +375,17 @@ func NewSnell(option SnellOption) (*Snell, error) {
 
 	// backward compatible
 	if option.Version == 0 {
-		if isSnellECHTLSMode(obfsOption.Mode) || shadowTLSOption != nil {
+		if requiresSnellV4Identity(obfsOption.Mode, shadowTLSOption) {
 			option.Version = snell.Version4
 		} else {
 			option.Version = snell.DefaultSnellVersion
 		}
 	}
-	if (isSnellECHTLSMode(obfsOption.Mode) || shadowTLSOption != nil) && option.Version == snell.Version4 {
+	if option.Version == snell.Version5 {
+		// Snell v5 servers are backward-compatible with v4 clients.
+		option.Version = snell.Version4
+	}
+	if requiresSnellV4Identity(obfsOption.Mode, shadowTLSOption) && option.Version == snell.Version4 {
 		option.Identity = true
 	}
 	switch option.Version {

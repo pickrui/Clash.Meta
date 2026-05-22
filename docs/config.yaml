@@ -394,13 +394,14 @@ proxies: # socks5
     # ip-version: dual
 
   # Snell
-  # UDP requires version 3 or 4
+  # UDP requires version 3/4/5
   - name: "snell"
     type: snell
     server: server
     port: 44046
     psk: yourpsk
-    # version: 4
+    # version: 4 # support 1/2/3/4/5
+    # identity: true # automatically enabled for anytls/ech-tls/shadow-tls v4
     # reuse: true
     # udp: true
     # obfs-opts:

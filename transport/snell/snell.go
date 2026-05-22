@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
 
 	"github.com/metacubex/blake3"
@@ -19,6 +20,7 @@ const (
 	Version2            = 2
 	Version3            = 3
 	Version4            = 4
+	Version5            = 5
 	DefaultSnellVersion = Version1
 
 	// max packet length
@@ -46,6 +48,10 @@ const (
 
 var endSignal = []byte{}
 
+type packetFrameWriter interface {
+	WritePacketFrame([]byte) (int, error)
+}
+
 type Snell struct {
 	net.Conn
 	buffer [1]byte
@@ -53,22 +59,20 @@ type Snell struct {
 }
 
 func (s *Snell) Read(b []byte) (int, error) {
-	if !s.reply {
-		if err := s.readTunnelReply(); err != nil {
-			return 0, err
-		}
+	if err := s.ReadReply(); err != nil {
+		return 0, err
 	}
 	return s.Conn.Read(b)
 }
 
-func (s *Snell) readTunnelReply() error {
+func (s *Snell) ReadReply() error {
 	if s.reply {
 		return nil
 	}
-	s.reply = true
 	if _, err := io.ReadFull(s.Conn, s.buffer[:]); err != nil {
 		return err
 	}
+	s.reply = true
 
 	if s.buffer[0] == CommandTunnel {
 		return nil
@@ -102,14 +106,18 @@ func ReadTunnelReply(conn net.Conn) error {
 	if !ok {
 		return nil
 	}
-	return snellConn.readTunnelReply()
+	return snellConn.ReadReply()
 }
 
-func WriteHeader(conn net.Conn, host string, port uint, version int, reuse bool) error {
+func WriteHeader(conn net.Conn, host string, port uint, version int) error {
+	return WriteHeaderWithReuse(conn, host, port, version, false)
+}
+
+func WriteHeaderWithReuse(conn net.Conn, host string, port uint, version int, reuse bool) error {
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
 	buf.WriteByte(Version)
-	if version == Version2 || (version == Version4 && reuse) {
+	if version == Version2 || (version >= Version4 && reuse) {
 		buf.WriteByte(CommandConnectV2)
 	} else {
 		buf.WriteByte(CommandConnect)
@@ -183,6 +191,13 @@ func PacketConn(conn net.Conn) net.PacketConn {
 	}
 }
 
+func (s *Snell) WritePacketFrame(b []byte) (int, error) {
+	if fw, ok := s.Conn.(packetFrameWriter); ok {
+		return fw.WritePacketFrame(b)
+	}
+	return s.Conn.Write(b)
+}
+
 func writePacket(w io.Writer, socks5Addr, payload []byte) (int, error) {
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
@@ -193,16 +208,35 @@ func writePacket(w io.Writer, socks5Addr, payload []byte) (int, error) {
 	switch socks5Addr[0] {
 	case socks5.AtypDomainName:
 		hostLen := socks5Addr[1]
+		if len(socks5Addr) < 1+1+int(hostLen)+2 {
+			return 0, errors.New("snell UDP address invalid")
+		}
 		buf.Write(socks5Addr[1 : 1+1+hostLen+2])
 	case socks5.AtypIPv4:
+		if len(socks5Addr) < 1+net.IPv4len+2 {
+			return 0, errors.New("snell UDP address invalid")
+		}
 		buf.Write([]byte{0x00, 0x04})
 		buf.Write(socks5Addr[1 : 1+net.IPv4len+2])
 	case socks5.AtypIPv6:
+		if len(socks5Addr) < 1+net.IPv6len+2 {
+			return 0, errors.New("snell UDP address invalid")
+		}
 		buf.Write([]byte{0x00, 0x06})
 		buf.Write(socks5Addr[1 : 1+net.IPv6len+2])
+	default:
+		return 0, errors.New("snell UDP address invalid")
 	}
 
 	buf.Write(payload)
+	if fw, ok := w.(packetFrameWriter); ok {
+		_, err := fw.WritePacketFrame(buf.Bytes())
+		if err != nil {
+			return 0, err
+		}
+		return len(payload), nil
+	}
+
 	_, err := w.Write(buf.Bytes())
 	if err != nil {
 		return 0, err
@@ -211,30 +245,124 @@ func writePacket(w io.Writer, socks5Addr, payload []byte) (int, error) {
 }
 
 func WritePacket(w io.Writer, socks5Addr, payload []byte) (int, error) {
-	if len(payload) <= maxLength {
+	maxPayloadLength := maxLength - UdpRequestHeaderLength(socks5Addr)
+	if maxPayloadLength <= 0 {
+		return 0, errors.New("snell UDP address too large")
+	}
+	if len(payload) <= maxPayloadLength {
 		return writePacket(w, socks5Addr, payload)
 	}
+	return 0, errors.New("snell UDP payload too large")
+}
 
-	offset := 0
-	total := len(payload)
-	for {
-		cursor := offset + maxLength
-		if cursor > total {
-			cursor = total
-		}
+func WritePacketResponse(w io.Writer, addr net.Addr, payload []byte) (int, error) {
+	buf := pool.GetBuffer()
+	defer pool.PutBuffer(buf)
 
-		n, err := writePacket(w, socks5Addr, payload[offset:cursor])
-		if err != nil {
-			return offset + n, err
-		}
-
-		offset = cursor
-		if offset == total {
-			break
-		}
+	socks5Addr := socks5.ParseAddrToSocksAddr(addr)
+	if len(socks5Addr) == 0 {
+		return 0, errors.New("snell UDP response address invalid")
 	}
+	switch socks5Addr[0] {
+	case socks5.AtypIPv4:
+		if len(socks5Addr) < 1+net.IPv4len+2 {
+			return 0, errors.New("snell UDP response address invalid")
+		}
+		buf.WriteByte(0x04)
+		buf.Write(socks5Addr[1 : 1+net.IPv4len+2])
+	case socks5.AtypIPv6:
+		if len(socks5Addr) < 1+net.IPv6len+2 {
+			return 0, errors.New("snell UDP response address invalid")
+		}
+		buf.WriteByte(0x06)
+		buf.Write(socks5Addr[1 : 1+net.IPv6len+2])
+	default:
+		return 0, errors.New("snell UDP response address invalid")
+	}
+	buf.Write(payload)
 
-	return total, nil
+	var err error
+	if fw, ok := w.(packetFrameWriter); ok {
+		_, err = fw.WritePacketFrame(buf.Bytes())
+	} else {
+		_, err = w.Write(buf.Bytes())
+	}
+	if err != nil {
+		return 0, err
+	}
+	return len(payload), nil
+}
+
+type UDPRequest struct {
+	Host    string
+	Ip      netip.Addr
+	Port    uint16
+	Payload []byte
+}
+
+func ParseUDPRequest(packet []byte) (UDPRequest, error) {
+	if len(packet) < 2 || packet[0] != CommondUDPForward {
+		return UDPRequest{}, errors.New("snell invalid UDP request")
+	}
+	if hostLen := int(packet[1]); hostLen != 0 {
+		if len(packet) < 2+hostLen+2 {
+			return UDPRequest{}, errors.New("snell invalid UDP domain request")
+		}
+		offset := 2 + hostLen
+		return UDPRequest{
+			Host:    string(packet[2:offset]),
+			Port:    binary.BigEndian.Uint16(packet[offset : offset+2]),
+			Payload: packet[offset+2:],
+		}, nil
+	}
+	if len(packet) < 3 {
+		return UDPRequest{}, errors.New("snell invalid UDP IP request")
+	}
+	switch packet[2] {
+	case 0x04:
+		if len(packet) < 3+net.IPv4len+2 {
+			return UDPRequest{}, errors.New("snell invalid UDP IPv4 request")
+		}
+		offset := 3 + net.IPv4len
+		ip, _ := netip.AddrFromSlice(packet[3:offset])
+		return UDPRequest{
+			Ip:      ip.Unmap(),
+			Port:    binary.BigEndian.Uint16(packet[offset : offset+2]),
+			Payload: packet[offset+2:],
+		}, nil
+	case 0x06:
+		if len(packet) < 3+net.IPv6len+2 {
+			return UDPRequest{}, errors.New("snell invalid UDP IPv6 request")
+		}
+		offset := 3 + net.IPv6len
+		ip, _ := netip.AddrFromSlice(packet[3:offset])
+		return UDPRequest{
+			Ip:      ip.Unmap(),
+			Port:    binary.BigEndian.Uint16(packet[offset : offset+2]),
+			Payload: packet[offset+2:],
+		}, nil
+	default:
+		return UDPRequest{}, errors.New("snell invalid UDP address type")
+	}
+}
+
+func UdpRequestHeaderLength(socks5Addr []byte) int {
+	if len(socks5Addr) == 0 {
+		return maxLength + 1
+	}
+	switch socks5Addr[0] {
+	case socks5.AtypDomainName:
+		if len(socks5Addr) < 2 {
+			return maxLength + 1
+		}
+		return 1 + 1 + int(socks5Addr[1]) + 2
+	case socks5.AtypIPv4:
+		return 1 + 2 + net.IPv4len + 2
+	case socks5.AtypIPv6:
+		return 1 + 2 + net.IPv6len + 2
+	default:
+		return maxLength + 1
+	}
 }
 
 func ReadPacket(r io.Reader, payload []byte) (net.Addr, int, error) {
@@ -296,6 +424,15 @@ type packetConn struct {
 	net.Conn
 	rMux sync.Mutex
 	wMux sync.Mutex
+}
+
+func (pc *packetConn) WritePacketFrame(b []byte) (int, error) {
+	if s, ok := pc.Conn.(*Snell); ok {
+		if fw, ok := s.Conn.(packetFrameWriter); ok {
+			return fw.WritePacketFrame(b)
+		}
+	}
+	return pc.Conn.Write(b)
 }
 
 func (pc *packetConn) WriteTo(b []byte, addr net.Addr) (int, error) {

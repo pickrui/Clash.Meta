@@ -30,7 +30,7 @@ func TestPoolConnReusesAfterBothSidesHalfClosed(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := WriteHeader(conn, "example.com", 80, Version4, true); err != nil {
+		if err := WriteHeaderWithReuse(conn, "example.com", 80, Version4, true); err != nil {
 			t.Fatal(err)
 		}
 		if err := conn.(interface{ CloseWrite() error }).CloseWrite(); err != nil {
@@ -77,7 +77,7 @@ func TestPoolConnClosesBeforeServerHalfClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteHeader(conn, "example.com", 80, Version4, true); err != nil {
+	if err := WriteHeaderWithReuse(conn, "example.com", 80, Version4, true); err != nil {
 		t.Fatal(err)
 	}
 	if err := conn.(interface{ CloseWrite() error }).CloseWrite(); err != nil {

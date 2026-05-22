@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 
 	"github.com/metacubex/mihomo/transport/shadowsocks/shadowaead"
 )
@@ -26,6 +27,8 @@ type v4Conn struct {
 	identity []byte
 	reader   *v4Reader
 	writer   *v4Writer
+	readMu   sync.Mutex
+	writeMu  sync.Mutex
 }
 
 func newV4Conn(conn net.Conn, streamCipher shadowaead.Cipher, identity []byte) *v4Conn {
@@ -46,6 +49,9 @@ func (conn *v4Conn) initReader() error {
 }
 
 func (conn *v4Conn) Read(payload []byte) (int, error) {
+	conn.readMu.Lock()
+	defer conn.readMu.Unlock()
+
 	if conn.reader == nil {
 		if err := conn.initReader(); err != nil {
 			return 0, err
@@ -78,12 +84,33 @@ func (conn *v4Conn) initWriter() error {
 }
 
 func (conn *v4Conn) Write(payload []byte) (int, error) {
+	conn.writeMu.Lock()
+	defer conn.writeMu.Unlock()
+
 	if conn.writer == nil {
 		if err := conn.initWriter(); err != nil {
 			return 0, err
 		}
 	}
 	return conn.writer.Write(payload)
+}
+
+func (conn *v4Conn) WritePacketFrame(payload []byte) (int, error) {
+	if len(payload) > maxLength {
+		return 0, errors.New("snell v4 frame too large")
+	}
+	conn.writeMu.Lock()
+	defer conn.writeMu.Unlock()
+
+	if conn.writer == nil {
+		if err := conn.initWriter(); err != nil {
+			return 0, err
+		}
+	}
+	if err := conn.writer.writeRecord(payload); err != nil {
+		return 0, err
+	}
+	return len(payload), nil
 }
 
 type v4Reader struct {
@@ -159,10 +186,9 @@ func (writer *v4Writer) Write(payload []byte) (int, error) {
 		return 0, writer.writeRecord(nil)
 	}
 
-	chunkSize := writer.maxRecordPayloadSize()
 	written := 0
 	for written < len(payload) {
-		end := written + chunkSize
+		end := written + writer.maxRecordPayloadSize()
 		if end > len(payload) {
 			end = len(payload)
 		}
@@ -216,8 +242,7 @@ func (writer *v4Writer) writeRecord(payload []byte) error {
 		writer.seenBytes += payloadSize
 	}
 
-	_, err := writer.writer.Write(frame)
-	return err
+	return writeFull(writer.writer, frame)
 }
 
 func randomV4PaddingSize(payloadSize, tagSize int) int {
@@ -283,4 +308,18 @@ func incrementV4Nonce(nonce []byte) {
 			return
 		}
 	}
+}
+
+func writeFull(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		p = p[n:]
+	}
+	return nil
 }
