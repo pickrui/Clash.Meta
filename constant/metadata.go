@@ -42,6 +42,7 @@ const (
 	SUDOKU
 	TRUSTTUNNEL
 	INNER
+	SNELL
 )
 
 type AddrType byte
@@ -120,6 +121,8 @@ func (t Type) String() string {
 		return "TrustTunnel"
 	case INNER:
 		return "Inner"
+	case SNELL:
+		return "Snell"
 	default:
 		return "Unknown"
 	}
@@ -166,6 +169,8 @@ func ParseType(t string) (*Type, error) {
 		res = TRUSTTUNNEL
 	case "INNER":
 		res = INNER
+	case "SNELL":
+		res = SNELL
 	default:
 		return nil, fmt.Errorf("unknown type: %s", t)
 	}

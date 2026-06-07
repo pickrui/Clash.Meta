@@ -1,6 +1,7 @@
 package snell
 
 import (
+	"bufio"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
@@ -44,7 +45,7 @@ func (conn *v4Conn) initReader() error {
 	if err != nil {
 		return err
 	}
-	conn.reader = &v4Reader{reader: conn.Conn, aead: aead}
+	conn.reader = &v4Reader{reader: bufio.NewReaderSize(conn.Conn, 64*1024), aead: aead}
 	return nil
 }
 
@@ -76,7 +77,7 @@ func (conn *v4Conn) initWriter() error {
 		header = append(header, identityWireMagic...)
 		header = append(header, conn.identity...)
 	}
-	if _, err = conn.Conn.Write(header); err != nil {
+	if err = writeFull(conn.Conn, header); err != nil {
 		return err
 	}
 	conn.writer = &v4Writer{writer: conn.Conn, aead: aead}

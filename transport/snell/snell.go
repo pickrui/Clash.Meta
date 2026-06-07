@@ -131,11 +131,7 @@ func WriteHeaderWithReuse(conn net.Conn, host string, port uint, version int, re
 	buf.WriteString(host)
 	binary.Write(buf, binary.BigEndian, uint16(port))
 
-	if _, err := conn.Write(buf.Bytes()); err != nil {
-		return err
-	}
-
-	return nil
+	return writeFull(conn, buf.Bytes())
 }
 
 func WriteUDPHeader(conn net.Conn, version int) error {
@@ -144,8 +140,7 @@ func WriteUDPHeader(conn net.Conn, version int) error {
 	}
 
 	// version, command, clientID length
-	_, err := conn.Write([]byte{Version, CommandUDP, 0x00})
-	return err
+	return writeFull(conn, []byte{Version, CommandUDP, 0x00})
 }
 
 func HalfClose(conn net.Conn) error {
@@ -172,6 +167,15 @@ func StreamConn(conn net.Conn, psk []byte, version int) *Snell {
 	return streamConn(conn, psk, version, nil)
 }
 
+func ServerStreamConn(conn net.Conn, psk []byte, version int) *Snell {
+	if version == Version5 {
+		version = Version4
+	}
+	stream := StreamConn(conn, psk, version)
+	stream.reply = true
+	return stream
+}
+
 func streamConn(conn net.Conn, psk []byte, version int, identity []byte) *Snell {
 	var cipher shadowaead.Cipher
 	if version != Version1 {
@@ -195,7 +199,10 @@ func (s *Snell) WritePacketFrame(b []byte) (int, error) {
 	if fw, ok := s.Conn.(packetFrameWriter); ok {
 		return fw.WritePacketFrame(b)
 	}
-	return s.Conn.Write(b)
+	if err := writeFull(s.Conn, b); err != nil {
+		return 0, err
+	}
+	return len(b), nil
 }
 
 func writePacket(w io.Writer, socks5Addr, payload []byte) (int, error) {
@@ -237,8 +244,7 @@ func writePacket(w io.Writer, socks5Addr, payload []byte) (int, error) {
 		return len(payload), nil
 	}
 
-	_, err := w.Write(buf.Bytes())
-	if err != nil {
+	if err := writeFull(w, buf.Bytes()); err != nil {
 		return 0, err
 	}
 	return len(payload), nil
@@ -285,7 +291,7 @@ func WritePacketResponse(w io.Writer, addr net.Addr, payload []byte) (int, error
 	if fw, ok := w.(packetFrameWriter); ok {
 		_, err = fw.WritePacketFrame(buf.Bytes())
 	} else {
-		_, err = w.Write(buf.Bytes())
+		err = writeFull(w, buf.Bytes())
 	}
 	if err != nil {
 		return 0, err
@@ -432,7 +438,10 @@ func (pc *packetConn) WritePacketFrame(b []byte) (int, error) {
 			return fw.WritePacketFrame(b)
 		}
 	}
-	return pc.Conn.Write(b)
+	if err := writeFull(pc.Conn, b); err != nil {
+		return 0, err
+	}
+	return len(b), nil
 }
 
 func (pc *packetConn) WriteTo(b []byte, addr net.Addr) (int, error) {

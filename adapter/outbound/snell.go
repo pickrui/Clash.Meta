@@ -242,16 +242,21 @@ func (s *Snell) writeHeaderContext(ctx context.Context, c net.Conn, metadata *C.
 // DialContext implements C.ProxyAdapter
 func (s *Snell) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
 	if s.pool != nil {
-		c, err := s.pool.Get()
-		if err != nil {
-			return nil, err
-		}
+		for attempts := 0; attempts < 2; attempts++ {
+			c, getErr := s.pool.GetContext(ctx)
+			if getErr != nil {
+				return nil, getErr
+			}
 
-		if err = s.writeHeaderContext(ctx, c, metadata); err != nil {
-			_ = c.Close()
-			return nil, err
+			if err = s.writeHeaderContext(ctx, c, metadata); err != nil {
+				_ = c.Close()
+				continue
+			}
+			if pc, ok := c.(*snell.PoolConn); ok {
+				pc.MarkReusable()
+			}
+			return NewConn(c, s), nil
 		}
-		return NewConn(c, s), err
 	}
 
 	c, err := s.dialSnellTransport(ctx)
@@ -282,6 +287,10 @@ func (s *Snell) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 	}(c)
 
 	c, err = s.StreamConnContext(ctx, c, metadata)
+	if err != nil {
+		_ = c.Close()
+		return nil, err
+	}
 
 	pc := snell.PacketConn(c)
 	return newPacketConn(pc, s), nil
