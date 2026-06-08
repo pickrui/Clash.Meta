@@ -432,9 +432,13 @@ func NewSnell(option SnellOption) (*Snell, error) {
 	s.dialer = option.NewDialer(s.DialOptions())
 	if obfsOption.Mode == "anytls" {
 		singDialer := proxydialer.NewSingDialer(s.dialer)
+		// Carry the uTLS client-fingerprint from obfs-opts into the AnyTLS outer
+		// handshake, matching the ech-tls leg (both are obfs-opts modes). An empty
+		// value still falls back to the global fingerprint inside GetFingerprint.
 		tlsConfig := &vmess.TLSConfig{
-			Host:           obfsOption.Host,
-			SkipCertVerify: obfsOption.SkipCertVerify,
+			Host:              obfsOption.Host,
+			SkipCertVerify:    obfsOption.SkipCertVerify,
+			ClientFingerprint: obfsOption.ClientFingerprint,
 		}
 		if tlsConfig.Host == "" {
 			tlsConfig.Host = option.Server
