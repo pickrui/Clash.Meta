@@ -14,6 +14,8 @@ import (
 	"github.com/gofrs/uuid/v5"
 )
 
+var MetadataProcessor func(*C.Metadata)
+
 type Tracker interface {
 	ID() string
 	Close() error
@@ -118,6 +120,9 @@ func (tt *tcpTracker) Upstream() any {
 
 func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *tcpTracker {
 	metadata.RemoteDst = conn.RemoteDestination()
+	if MetadataProcessor != nil {
+		MetadataProcessor(metadata)
+	}
 
 	tt := &tcpTracker{
 		Conn:    conn,
@@ -210,6 +215,9 @@ func (ut *udpTracker) Upstream() any {
 
 func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *udpTracker {
 	metadata.RemoteDst = conn.RemoteDestination()
+	if MetadataProcessor != nil {
+		MetadataProcessor(metadata)
+	}
 
 	ut := &udpTracker{
 		PacketConn: conn,

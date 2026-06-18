@@ -38,12 +38,6 @@ var (
 	pipeServer *http.Server
 
 	embedMode = false
-
-	// LogPayloadProcessor, if set, post-processes each log payload before it is
-	// streamed over the external-controller /logs endpoint. FlClash injects its
-	// node-address masking here so that enabling external-controller does not
-	// leak real node addresses through the log stream.
-	LogPayloadProcessor func(payload string) string
 )
 
 func SetEmbedMode(embed bool) {
@@ -530,9 +524,6 @@ func getLogs(w http.ResponseWriter, r *http.Request) {
 		buf.Reset()
 
 		payload := logM.Payload
-		if LogPayloadProcessor != nil {
-			payload = LogPayloadProcessor(payload)
-		}
 
 		if !isStructured {
 			if err := json.NewEncoder(buf).Encode(Log{
