@@ -15,6 +15,7 @@ import (
 	"github.com/metacubex/mihomo/component/ech"
 	"github.com/metacubex/mihomo/component/ech/echparser"
 	"github.com/metacubex/mihomo/component/proxydialer"
+	tlsC "github.com/metacubex/mihomo/component/tls"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/transport/anytls"
 	obfs "github.com/metacubex/mihomo/transport/simple-obfs"
@@ -102,6 +103,28 @@ func snellECHTLSHost(obfsOption *snellObfsOption, server string) string {
 		return obfsOption.Host
 	}
 	return server
+}
+
+// defaultSnellECHTLSClientFingerprint shapes the Snell ECH-TLS ClientHello as a
+// browser by default; without it the leg leaks the recognizable Go standard-library
+// fingerprint, unlike the BoringSSL-based shadowsocks/ech-tls-tunnel reference whose
+// unshaped hello already looks browser-like.
+const defaultSnellECHTLSClientFingerprint = "chrome"
+
+// resolveSnellECHTLSClientFingerprint resolves the ECH-TLS uTLS fingerprint in order:
+// obfs-opts "client-fingerprint" > proxy "client-fingerprint" > global fingerprint
+// (returns "" so GetFingerprint applies it) > "chrome" default.
+func resolveSnellECHTLSClientFingerprint(obfsOption *snellObfsOption, option SnellOption) string {
+	if obfsOption.ClientFingerprint != "" {
+		return obfsOption.ClientFingerprint
+	}
+	if option.ClientFingerprint != "" {
+		return option.ClientFingerprint
+	}
+	if tlsC.GetGlobalFingerprint() != "" {
+		return ""
+	}
+	return defaultSnellECHTLSClientFingerprint
 }
 
 func snellECHTLSConfig(obfsOption *snellObfsOption) (*ech.Config, error) {
@@ -466,7 +489,7 @@ func NewSnell(option SnellOption) (*Snell, error) {
 			ECHConfig:         echConfig,
 			SkipCertVerify:    obfsOption.SkipCertVerify,
 			CAFile:            obfsOption.CAFile,
-			ClientFingerprint: obfsOption.ClientFingerprint,
+			ClientFingerprint: resolveSnellECHTLSClientFingerprint(obfsOption, option),
 			Fingerprint:       obfsOption.Fingerprint,
 			Certificate:       obfsOption.Certificate,
 			PrivateKey:        obfsOption.PrivateKey,
