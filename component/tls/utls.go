@@ -40,6 +40,9 @@ func NewListener(inner net.Listener, config *Config) net.Listener {
 }
 
 func GetFingerprint(clientFingerprint string) (UClientHelloID, bool) {
+	if len(clientFingerprint) == 0 {
+		clientFingerprint = globalFingerprint
+	}
 	if len(clientFingerprint) == 0 || clientFingerprint == "none" {
 		return UClientHelloID{}, false
 	}
@@ -57,6 +60,16 @@ func GetFingerprint(clientFingerprint string) (UClientHelloID, bool) {
 		log.Warnln("wrong clientFingerprint:%s", clientFingerprint)
 		return UClientHelloID{}, false
 	}
+}
+
+var globalFingerprint string
+
+func SetGlobalFingerprint(fingerprint string) {
+	globalFingerprint = fingerprint
+}
+
+func GetGlobalFingerprint() string {
+	return globalFingerprint
 }
 
 var randomFingerprint = once.OnceValue(func() UClientHelloID {

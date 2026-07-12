@@ -28,13 +28,22 @@ const (
 
 type v4Conn struct {
 	net.Conn
-	psk []byte
-	r   *v4Reader
-	w   *v4Writer
+	psk      []byte
+	identity []byte
+	r        *v4Reader
+	w        *v4Writer
 }
 
 func newV4Conn(conn net.Conn, psk []byte) *v4Conn {
-	return &v4Conn{Conn: conn, psk: psk}
+	return newV4ConnWithIdentity(conn, psk, nil)
+}
+
+func newV4ConnWithIdentity(conn net.Conn, psk, identity []byte) *v4Conn {
+	return &v4Conn{
+		Conn:     conn,
+		psk:      psk,
+		identity: append([]byte(nil), identity...),
+	}
 }
 
 func (c *v4Conn) initReader() error {
@@ -52,7 +61,7 @@ func (c *v4Conn) initReader() error {
 }
 
 func (c *v4Conn) initWriter() error {
-	w, err := newV4Writer(c.Conn, c.psk)
+	w, err := newV4WriterWithIdentity(c.Conn, c.psk, c.identity)
 	if err != nil {
 		return err
 	}
@@ -231,6 +240,7 @@ type v4Writer struct {
 	aead                 cipher.AEAD
 	nonce                [v4NonceSize]byte
 	salt                 [v4SaltSize]byte
+	identity             []byte
 	saltSent             bool
 	initialPaddingLength uint16
 	payloadLimit         uint16
@@ -239,6 +249,10 @@ type v4Writer struct {
 }
 
 func newV4Writer(w io.Writer, psk []byte) (*v4Writer, error) {
+	return newV4WriterWithIdentity(w, psk, nil)
+}
+
+func newV4WriterWithIdentity(w io.Writer, psk, identity []byte) (*v4Writer, error) {
 	var salt [v4SaltSize]byte
 	if _, err := io.ReadFull(cryptorand.Reader, salt[:]); err != nil {
 		return nil, err
@@ -256,6 +270,7 @@ func newV4Writer(w io.Writer, psk []byte) (*v4Writer, error) {
 		Writer:               w,
 		aead:                 aead,
 		salt:                 salt,
+		identity:             append([]byte(nil), identity...),
 		initialPaddingLength: uint16(v4InitialPaddingMin + paddingDelta),
 	}, nil
 }
@@ -348,6 +363,10 @@ func (w *v4Writer) writeFrame(payload []byte, paddingLength int) error {
 	frame := make([]byte, 0, frameLength)
 	if !w.saltSent {
 		frame = append(frame, w.salt[:]...)
+		if len(w.identity) == IdentityHeaderLength {
+			frame = append(frame, identityWireMagic...)
+			frame = append(frame, w.identity...)
+		}
 		w.saltSent = true
 	}
 	frame = append(frame, headerCipher...)

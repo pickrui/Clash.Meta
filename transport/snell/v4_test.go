@@ -208,6 +208,33 @@ func TestSnellV4WriterDefersSaltUntilFirstFrame(t *testing.T) {
 	}
 }
 
+func TestSnellV4IdentityFollowsSalt(t *testing.T) {
+	var raw bytes.Buffer
+	psk := []byte("password")
+	identity := IdentityHeaderFromPSK(psk)
+	writer, err := newV4WriterWithIdentity(&raw, psk, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+
+	data := raw.Bytes()
+	headerStart := v4SaltSize
+	headerEnd := headerStart + len(identityWireMagic)
+	identityEnd := headerEnd + IdentityHeaderLength
+	if len(data) < identityEnd {
+		t.Fatalf("identity frame too short: %d", len(data))
+	}
+	if string(data[headerStart:headerEnd]) != identityWireMagic {
+		t.Fatalf("identity magic mismatch: %q", data[headerStart:headerEnd])
+	}
+	if !bytes.Equal(data[headerEnd:identityEnd], identity) {
+		t.Fatal("identity value mismatch")
+	}
+}
+
 func TestSnellV4PayloadLimitMatchesServer(t *testing.T) {
 	writer, err := newV4Writer(io.Discard, []byte("password"))
 	if err != nil {

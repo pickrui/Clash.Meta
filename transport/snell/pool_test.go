@@ -14,8 +14,9 @@ import (
 func TestPoolConnCloseIsIdempotent(t *testing.T) {
 	rawConn := &recordingConn{}
 	pooledConn := &Snell{Conn: rawConn}
+	factoryConn := &Snell{Conn: &recordingConn{}}
 	pool := NewPool(func(context.Context) (*Snell, error) {
-		return nil, errors.New("factory should not be called")
+		return factoryConn, nil
 	})
 	conn := &PoolConn{Snell: pooledConn, pool: pool}
 
@@ -26,16 +27,16 @@ func TestPoolConnCloseIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if rawConn.writes != 1 {
-		t.Fatalf("close should send one half-close record, got %d", rawConn.writes)
+	if rawConn.writes != 0 || !rawConn.closed {
+		t.Fatal("unused connection should close without pooling")
 	}
 
 	got, err := pool.pool.Get()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != pooledConn {
-		t.Fatal("pooled connection mismatch")
+	if got.conn != factoryConn || got.conn == pooledConn {
+		t.Fatal("closed connection was returned to the pool")
 	}
 }
 
@@ -47,6 +48,10 @@ func TestPoolConnCloseWriteDoesNotReturnConnectionToPool(t *testing.T) {
 		return factoryConn, nil
 	})
 	conn := &PoolConn{Snell: pooledConn, pool: pool}
+	if _, err := conn.Write([]byte("request")); err != nil {
+		t.Fatal(err)
+	}
+	conn.MarkReusable()
 
 	if err := conn.CloseWrite(); err != nil {
 		t.Fatal(err)
@@ -56,11 +61,11 @@ func TestPoolConnCloseWriteDoesNotReturnConnectionToPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != factoryConn {
+	if got.conn != factoryConn {
 		t.Fatal("CloseWrite should not put the active connection back into the pool")
 	}
-	if rawConn.writes != 1 {
-		t.Fatalf("CloseWrite should send one half-close record, got %d", rawConn.writes)
+	if rawConn.writes != 2 {
+		t.Fatalf("request and CloseWrite should produce two writes, got %d", rawConn.writes)
 	}
 	if !pooledConn.reply {
 		t.Fatal("CloseWrite should not reset reply while the read side may still be active")
@@ -73,11 +78,11 @@ func TestPoolConnCloseWriteDoesNotReturnConnectionToPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != pooledConn {
+	if got.conn != pooledConn {
 		t.Fatal("Close should return the connection to the pool after CloseWrite")
 	}
-	if rawConn.writes != 1 {
-		t.Fatalf("Close after CloseWrite should not send another half-close record, got %d", rawConn.writes)
+	if rawConn.writes != 2 {
+		t.Fatalf("Close after CloseWrite should not write again, got %d", rawConn.writes)
 	}
 	if pooledConn.reply {
 		t.Fatal("Close should reset reply before returning the connection to the pool")

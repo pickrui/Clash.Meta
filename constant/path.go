@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/constant/features"
@@ -15,11 +16,16 @@ import (
 const Name = "mihomo"
 
 var (
-	GeositeName   = "GeoSite.dat"
-	GeoipName     = "GeoIP.dat"
-	ASNName       = "ASN.mmdb"
-	BundleMRSName = "BundleMRS.7z"
+	GeositeName        = "GeoSite.dat"
+	GeoipName          = "GeoIP.dat"
+	ASNName            = "ASN.mmdb"
+	BundleMRSName      = "BundleMRS.7z"
+	forceSafePathCheck atomic.Bool
 )
+
+func SetForceSafePathCheck(force bool) bool {
+	return forceSafePathCheck.Swap(force)
+}
 
 // Path is used to get the configuration path
 //
@@ -86,11 +92,16 @@ func (p *path) Resolve(path string) string {
 
 // IsSafePath return true if path is a subpath of homedir (or in the SAFE_PATHS environment variable)
 func (p *path) IsSafePath(path string) bool {
-	if p.allowUnsafePath || features.Android {
+	force := forceSafePathCheck.Load()
+	if !force && (p.allowUnsafePath || features.Android) {
 		return true
 	}
 	path = p.Resolve(path)
-	for _, safePath := range p.SafePaths() {
+	safePaths := []string{p.homeDir}
+	if !force {
+		safePaths = p.SafePaths()
+	}
+	for _, safePath := range safePaths {
 		if rel, err := filepath.Rel(safePath, path); err == nil {
 			if filepath.IsLocal(rel) {
 				return true

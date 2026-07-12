@@ -1,6 +1,6 @@
 module github.com/metacubex/mihomo
 
-go 1.20
+go 1.26
 
 require (
 	github.com/bahlo/generic-list-go v0.2.0
@@ -26,7 +26,7 @@ require (
 	github.com/metacubex/kcp-go v0.0.0-20260105040817-550693377604
 	github.com/metacubex/mhurl v0.1.0
 	github.com/metacubex/mlkem v0.1.0
-	github.com/metacubex/quic-go v0.59.1-0.20260520020949-fcd18c7b6ace
+	github.com/metacubex/quic-go v0.59.1-0.20260606115121-0662b57ad5bf
 	github.com/metacubex/randv2 v0.2.0
 	github.com/metacubex/restls-client-go v0.1.7
 	github.com/metacubex/sevenzip v1.6.4
@@ -43,8 +43,8 @@ require (
 	github.com/metacubex/ssh v0.1.0
 	github.com/metacubex/tailscale v0.0.0-20260520011538-f23132fac4b7
 	github.com/metacubex/tfo-go v0.0.0-20251130171125-413e892ac443
-	github.com/metacubex/tls v0.1.6
-	github.com/metacubex/utls v1.8.4
+	github.com/metacubex/tls v0.1.7
+	github.com/metacubex/utls v1.8.7
 	github.com/metacubex/wireguard-go v0.0.0-20250820062549-a6cecdd7f57f
 	github.com/mroth/weightedrand/v2 v2.1.0
 	github.com/openacid/low v0.1.21

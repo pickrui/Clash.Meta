@@ -12,10 +12,14 @@ import (
 	"github.com/metacubex/mihomo/transport/anytls/padding"
 	"github.com/metacubex/mihomo/transport/anytls/session"
 	"github.com/metacubex/mihomo/transport/vmess"
+	"github.com/metacubex/tls"
+	utls "github.com/metacubex/utls"
 
 	M "github.com/metacubex/sing/common/metadata"
 	N "github.com/metacubex/sing/common/network"
 )
+
+const clientSessionCacheCapacity = 32
 
 type ClientConfig struct {
 	Password                 string
@@ -40,7 +44,7 @@ func NewClient(ctx context.Context, config ClientConfig) *Client {
 	pw := sha256.Sum256([]byte(config.Password))
 	c := &Client{
 		passwordSha256: pw[:],
-		tlsConfig:      config.TLSConfig,
+		tlsConfig:      cloneTLSConfigWithSessionCache(config.TLSConfig),
 		dialer:         config.Dialer,
 		server:         config.Server,
 	}
@@ -48,6 +52,21 @@ func NewClient(ctx context.Context, config ClientConfig) *Client {
 	padding.UpdatePaddingScheme(padding.DefaultPaddingScheme, &c.padding)
 	c.sessionClient = session.NewClient(ctx, c.createOutboundTLSConnection, &c.padding, config.IdleSessionCheckInterval, config.IdleSessionTimeout, config.MinIdleSession)
 	return c
+}
+
+func cloneTLSConfigWithSessionCache(config *vmess.TLSConfig) *vmess.TLSConfig {
+	if config == nil {
+		return nil
+	}
+
+	clone := *config
+	if clone.ClientSessionCache == nil {
+		clone.ClientSessionCache = tls.NewLRUClientSessionCache(clientSessionCacheCapacity)
+	}
+	if clone.UClientSessionCache == nil {
+		clone.UClientSessionCache = utls.NewLRUClientSessionCache(clientSessionCacheCapacity)
+	}
+	return &clone
 }
 
 func (c *Client) CreateProxy(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {

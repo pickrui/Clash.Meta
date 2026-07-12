@@ -91,6 +91,17 @@ func (sd *Dispatcher) UDPSniff(packet C.PacketAdapter, packetSender C.PacketSend
 						continue
 					}
 
+					// Protocol detected but no domain extracted (e.g. STUN)
+					if host == "" {
+						metadata.SniffProtocol = current.Protocol()
+						log.Debugln("[Sniffer] Sniff %s [%s]-->[%s] protocol [%s] detected (no domain)",
+							metadata.NetWork,
+							metadata.SourceDetail(),
+							metadata.RemoteAddress(),
+							current.Protocol())
+						return packetSender
+					}
+
 					replaceDomain(metadata, host)
 					return packetSender
 				}
@@ -296,6 +307,8 @@ func NewSniffer(name sniffer.Type, snifferConfig SnifferConfig) (sniffer.Sniffer
 		return NewHTTPSniffer(snifferConfig)
 	case sniffer.QUIC:
 		return NewQuicSniffer(snifferConfig)
+	case sniffer.STUN:
+		return NewSTUNSniffer(snifferConfig)
 	default:
 		return nil, ErrorUnsupportedSniffer
 	}

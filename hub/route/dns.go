@@ -13,6 +13,8 @@ import (
 	"github.com/samber/lo"
 )
 
+var DNSQueryObfuscated func(name string) bool
+
 func dnsRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/query", queryDNS)
@@ -76,6 +78,12 @@ func queryDNS(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(resp.Extra) > 0 {
 		responseData["Additional"] = lo.Map(resp.Extra, rr2Json)
+	}
+
+	if DNSQueryObfuscated != nil && DNSQueryObfuscated(name) {
+		responseData["Answer"] = []string{"***"}
+		responseData["Authority"] = []string{"***"}
+		responseData["Additional"] = []string{"***"}
 	}
 
 	render.JSON(w, r, responseData)

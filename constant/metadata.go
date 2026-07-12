@@ -210,7 +210,8 @@ type Metadata struct {
 	RawSrcAddr net.Addr `json:"-"`
 	RawDstAddr net.Addr `json:"-"`
 	// Only domain rule
-	SniffHost string `json:"sniffHost"`
+	SniffHost     string `json:"sniffHost"`
+	SniffProtocol string `json:"sniffProtocol,omitempty"`
 }
 
 func (m *Metadata) RemoteAddress() string {
@@ -297,8 +298,13 @@ func (m *Metadata) UDPAddr() *net.UDPAddr {
 	return net.UDPAddrFromAddrPort(m.AddrPort())
 }
 
+var MetadataStringMasker func(host string) string
+
 func (m *Metadata) String() string {
 	if m.Host != "" {
+		if MetadataStringMasker != nil {
+			return MetadataStringMasker(m.Host)
+		}
 		return m.Host
 	} else if m.DstIP.IsValid() {
 		return m.DstIP.String()

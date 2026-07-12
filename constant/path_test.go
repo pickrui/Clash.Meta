@@ -1,8 +1,9 @@
 package constant
 
 import (
-	"github.com/stretchr/testify/assert"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestPath(t *testing.T) {
@@ -38,4 +39,16 @@ func TestPath(t *testing.T) {
 	assert.True(t, (&path{}).IsSafePath("./mykey/../key1.key"))
 	assert.False(t, (&path{}).IsSafePath("./mykey/../../key1.key"))
 
+}
+
+func TestForceSafePathCheckIgnoresExtraSafePaths(t *testing.T) {
+	path := &path{
+		homeDir:   "/validator/home",
+		safePaths: []string{"/source/home"},
+	}
+	previous := SetForceSafePathCheck(true)
+	t.Cleanup(func() { SetForceSafePathCheck(previous) })
+
+	assert.True(t, path.IsSafePath("/validator/home/key.pem"))
+	assert.False(t, path.IsSafePath("/source/home/key.pem"))
 }
