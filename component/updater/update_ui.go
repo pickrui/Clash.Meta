@@ -11,7 +11,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 
@@ -260,23 +259,6 @@ func extract(data []byte, dest string) error {
 	default:
 		return fmt.Errorf("unknown or unsupported file type")
 	}
-}
-
-func cleanTarPath(path string) string {
-	// remove prefix ./ or ../
-	path = strings.TrimPrefix(path, "./")
-	path = strings.TrimPrefix(path, "../")
-
-	// normalize path
-	path = filepath.Clean(path)
-
-	// transfer delimiters to system std
-	path = filepath.FromSlash(path)
-
-	// remove prefix path delimiters
-	path = strings.TrimPrefix(path, string(os.PathSeparator))
-
-	return path
 }
 
 func cleanup(root string) error {

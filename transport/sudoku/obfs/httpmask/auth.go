@@ -131,19 +131,6 @@ func (a *tunnelAuth) sign(mode TunnelMode, method, path string, ts int64) [16]by
 	return out
 }
 
-type httpHeaderSetter = http.Header
-
-func applyTunnelAuthHeader(h httpHeaderSetter, auth *tunnelAuth, mode TunnelMode, method, path string) {
-	if auth == nil || h == nil {
-		return
-	}
-	token := auth.token(mode, method, path, time.Now())
-	if token == "" {
-		return
-	}
-	h.Set(tunnelAuthHeaderKey, tunnelAuthHeaderPrefix+token)
-}
-
 func applyTunnelAuth(req *http.Request, auth *tunnelAuth, mode TunnelMode, method, path string) {
 	if auth == nil || req == nil {
 		return

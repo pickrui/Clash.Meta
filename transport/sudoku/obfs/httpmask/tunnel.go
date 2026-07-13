@@ -228,14 +228,6 @@ func canonicalHeaderHost(urlHost, scheme string) string {
 	return host
 }
 
-func parseTunnelToken(body []byte) (string, error) {
-	resp, err := parseAuthorizeResponse(body)
-	if err != nil {
-		return "", err
-	}
-	return resp.token, nil
-}
-
 type httpClientTarget struct {
 	scheme     string
 	urlHost    string
@@ -2024,11 +2016,6 @@ func writeSimpleHTTPResponse(w io.Writer, code int, body string) error {
 		fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 			code, http.StatusText(code), len(body), body))
 	return err
-}
-
-func writeTokenHTTPResponse(w io.Writer, token string) error {
-	token = strings.TrimRight(token, "\r\n")
-	return writeTokenHTTPResponseWithEarlyData(w, token, nil)
 }
 
 func writeTokenHTTPResponseWithEarlyData(w io.Writer, token string, earlyPayload []byte) error {

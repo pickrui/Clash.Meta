@@ -3,7 +3,6 @@ package updater
 import (
 	"context"
 	"io"
-	"os"
 	"time"
 
 	mihomoHttp "github.com/metacubex/mihomo/component/http"
@@ -23,8 +22,4 @@ func downloadForBytes(url string) ([]byte, error) {
 	defer resp.Body.Close()
 
 	return io.ReadAll(resp.Body)
-}
-
-func saveFile(bytes []byte, path string) error {
-	return os.WriteFile(path, bytes, 0o644)
 }

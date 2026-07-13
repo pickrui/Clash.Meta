@@ -17,20 +17,6 @@ var matcherTypeMap = map[Domain_Type]strmatcher.Type{
 	Domain_Full:   strmatcher.Full,
 }
 
-func domainToMatcher(domain *Domain) (strmatcher.Matcher, error) {
-	matcherType, f := matcherTypeMap[domain.Type]
-	if !f {
-		return nil, fmt.Errorf("unsupported domain type %v", domain.Type)
-	}
-
-	matcher, err := matcherType.New(domain.Value)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create domain matcher, base error: %s", err.Error())
-	}
-
-	return matcher, nil
-}
-
 type DomainMatcher interface {
 	ApplyDomain(string) bool
 	Count() int

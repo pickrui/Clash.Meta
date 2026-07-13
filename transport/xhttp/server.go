@@ -497,17 +497,6 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-func splitNonEmpty(s string) []string {
-	raw := strings.Split(s, "/")
-	out := make([]string, 0, len(raw))
-	for _, v := range raw {
-		if v != "" {
-			out = append(out, v)
-		}
-	}
-	return out
-}
-
 func equalHost(a, b string) bool {
 	a = strings.ToLower(a)
 	b = strings.ToLower(b)

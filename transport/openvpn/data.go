@@ -419,10 +419,6 @@ func (d *DataChannel) fillCBCIV(iv []byte) error {
 	return nil
 }
 
-func dataChannelHMAC(newHash func() hash.Hash, key, data []byte) []byte {
-	return dataChannelHMACAppend(newHash, key, data, nil)
-}
-
 func dataChannelHMACAppend(newHash func() hash.Hash, key, data, dst []byte) []byte {
 	mac := hmac.New(newHash, key)
 	_, _ = mac.Write(data)
@@ -435,19 +431,6 @@ func (d *DataChannel) hmacAppend(pool *sync.Pool, data, dst []byte) []byte {
 	mac.Reset()
 	_, _ = mac.Write(data)
 	return mac.Sum(dst)
-}
-
-func pkcs7Pad(plain []byte, blockSize int) []byte {
-	padding := blockSize - len(plain)%blockSize
-	if padding == 0 {
-		padding = blockSize
-	}
-	out := make([]byte, len(plain)+padding)
-	copy(out, plain)
-	for i := len(plain); i < len(out); i++ {
-		out[i] = byte(padding)
-	}
-	return out
 }
 
 func pkcs7Unpad(padded []byte, blockSize int) ([]byte, error) {
