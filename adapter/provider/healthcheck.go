@@ -71,7 +71,9 @@ func (hc *HealthCheck) process() {
 }
 
 func (hc *HealthCheck) setProxies(proxies []C.Proxy) {
-	hc.proxies = proxies
+	hc.mu.Lock()
+	hc.proxies = append([]C.Proxy(nil), proxies...)
+	hc.mu.Unlock()
 }
 
 func (hc *HealthCheck) registerHealthCheckTask(url string, expectedStatus utils.IntRanges[uint16], filter string, interval uint) {
@@ -130,24 +132,46 @@ func (hc *HealthCheck) touch() {
 }
 
 func (hc *HealthCheck) check() {
-	if len(hc.proxies) == 0 {
+	if healthCheckSuspended.Load() {
+		return
+	}
+	hc.mu.Lock()
+	proxies := append([]C.Proxy(nil), hc.proxies...)
+	extra := make(map[string]*extraOption, len(hc.extra))
+	for url, option := range hc.extra {
+		filters := make(map[string]struct{}, len(option.filters))
+		for filter := range option.filters {
+			filters[filter] = struct{}{}
+		}
+		extra[url] = &extraOption{
+			expectedStatus: option.expectedStatus,
+			filters:        filters,
+		}
+	}
+	url := hc.url
+	expectedStatus := hc.expectedStatus
+	hc.mu.Unlock()
+	if len(proxies) == 0 {
 		return
 	}
 
 	_, _, _ = hc.singleDo.Do(func() (struct{}, error) {
+		if healthCheckSuspended.Load() {
+			return struct{}{}, nil
+		}
 		id := utils.NewUUIDV4().String()
 		log.Debugln("Start New Health Checking {%s}", id)
 		b := new(errgroup.Group)
 		b.SetLimit(10)
 
 		// execute default health check
-		option := &extraOption{filters: nil, expectedStatus: hc.expectedStatus}
-		hc.execute(b, hc.url, id, option)
+		option := &extraOption{filters: nil, expectedStatus: expectedStatus}
+		hc.execute(b, proxies, url, id, option)
 
 		// execute extra health check
-		if len(hc.extra) != 0 {
-			for url, option := range hc.extra {
-				hc.execute(b, url, id, option)
+		if len(extra) != 0 {
+			for url, option := range extra {
+				hc.execute(b, proxies, url, id, option)
 			}
 		}
 		_ = b.Wait()
@@ -156,7 +180,7 @@ func (hc *HealthCheck) check() {
 	})
 }
 
-func (hc *HealthCheck) execute(b *errgroup.Group, url, uid string, option *extraOption) {
+func (hc *HealthCheck) execute(b *errgroup.Group, proxies []C.Proxy, url, uid string, option *extraOption) {
 	url = strings.TrimSpace(url)
 	if len(url) == 0 {
 		log.Debugln("Health Check has been skipped due to testUrl is empty, {%s}", uid)
@@ -177,7 +201,7 @@ func (hc *HealthCheck) execute(b *errgroup.Group, url, uid string, option *extra
 		}
 	}
 
-	for _, proxy := range hc.proxies {
+	for _, proxy := range proxies {
 		// skip proxies that do not require health check
 		if filterReg != nil {
 			if match, _ := filterReg.MatchString(proxy.Name()); !match {

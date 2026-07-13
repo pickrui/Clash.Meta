@@ -15,6 +15,7 @@ import (
 // Option is options of websocket obfs
 type Option struct {
 	Host                     string
+	ServerName               string
 	Port                     string
 	Path                     string
 	Headers                  map[string]string
@@ -33,6 +34,27 @@ type Option struct {
 
 // NewV2rayObfs return a HTTPObfs
 func NewV2rayObfs(ctx context.Context, conn net.Conn, option *Option) (net.Conn, error) {
+	config, err := newWebsocketConfig(option)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err = vmess.StreamWebsocketConn(ctx, conn, config)
+	if err != nil {
+		return nil, err
+	}
+
+	if option.Mux {
+		conn = NewMux(conn, MuxOption{
+			ID:   [2]byte{0, 0},
+			Host: "127.0.0.1",
+			Port: 0,
+		})
+	}
+	return conn, nil
+}
+
+func newWebsocketConfig(option *Option) (*vmess.WebsocketConfig, error) {
 	header := http.Header{}
 	for k, v := range option.Headers {
 		header.Add(k, v)
@@ -51,10 +73,17 @@ func NewV2rayObfs(ctx context.Context, conn net.Conn, option *Option) (net.Conn,
 
 	var err error
 	if option.TLS {
+		serverName := option.ServerName
+		if serverName == "" {
+			serverName = header.Get("Host")
+			if serverName == "" {
+				serverName = option.Host
+			}
+		}
 		config.TLS = true
 		config.TLSConfig, err = ca.GetTLSConfig(ca.Option{
 			TLSConfig: &tls.Config{
-				ServerName:         option.Host,
+				ServerName:         serverName,
 				InsecureSkipVerify: option.SkipCertVerify,
 				NextProtos:         []string{"http/1.1"},
 			},
@@ -71,23 +100,6 @@ func NewV2rayObfs(ctx context.Context, conn net.Conn, option *Option) (net.Conn,
 				return nil, err
 			}
 		}
-
-		if host := config.Headers.Get("Host"); host != "" {
-			config.TLSConfig.ServerName = host
-		}
 	}
-
-	conn, err = vmess.StreamWebsocketConn(ctx, conn, config)
-	if err != nil {
-		return nil, err
-	}
-
-	if option.Mux {
-		conn = NewMux(conn, MuxOption{
-			ID:   [2]byte{0, 0},
-			Host: "127.0.0.1",
-			Port: 0,
-		})
-	}
-	return conn, nil
+	return config, nil
 }

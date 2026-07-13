@@ -272,6 +272,12 @@ loop:
 			}
 			if res.error == nil {
 				if res.isPrimary {
+					if fallback.error == nil && fallback.Conn != nil {
+						fallbackConn := fallback.Conn
+						go func() {
+							_ = fallbackConn.Close()
+						}()
+					}
 					return res.Conn, nil
 				}
 				fallback = res

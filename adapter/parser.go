@@ -75,6 +75,7 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 		if err != nil {
 			break
 		}
+		_, snellOption.IdentityConfigured = mapping["identity"]
 		proxy, err = outbound.NewSnell(*snellOption)
 	case "trojan":
 		trojanOption := &outbound.TrojanOption{BasicOption: basicOption}

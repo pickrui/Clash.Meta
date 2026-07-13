@@ -60,7 +60,7 @@ func detectSTUN(b []byte) error {
 	}
 
 	msgLen := binary.BigEndian.Uint16(b[2:4])
-	if msgLen%4 != 0 {
+	if msgLen%4 != 0 || len(b) != stunHeaderSize+int(msgLen) {
 		return errNotSTUN
 	}
 

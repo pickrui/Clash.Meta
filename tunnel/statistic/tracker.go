@@ -16,6 +16,18 @@ import (
 
 var MetadataProcessor func(*C.Metadata)
 
+func trackerMetadata(metadata *C.Metadata, remoteDestination string) *C.Metadata {
+	if metadata == nil {
+		return nil
+	}
+	copy := *metadata
+	copy.RemoteDst = remoteDestination
+	if MetadataProcessor != nil {
+		MetadataProcessor(&copy)
+	}
+	return &copy
+}
+
 type Tracker interface {
 	ID() string
 	Close() error
@@ -119,18 +131,13 @@ func (tt *tcpTracker) Upstream() any {
 }
 
 func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *tcpTracker {
-	metadata.RemoteDst = conn.RemoteDestination()
-	if MetadataProcessor != nil {
-		MetadataProcessor(metadata)
-	}
-
 	tt := &tcpTracker{
 		Conn:    conn,
 		manager: manager,
 		TrackerInfo: &TrackerInfo{
 			UUID:          utils.NewUUIDV4(),
 			Start:         time.Now(),
-			Metadata:      metadata,
+			Metadata:      trackerMetadata(metadata, conn.RemoteDestination()),
 			Chain:         conn.Chains(),
 			ProviderChain: conn.ProviderChains(),
 			Rule:          "",
@@ -214,18 +221,13 @@ func (ut *udpTracker) Upstream() any {
 }
 
 func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *udpTracker {
-	metadata.RemoteDst = conn.RemoteDestination()
-	if MetadataProcessor != nil {
-		MetadataProcessor(metadata)
-	}
-
 	ut := &udpTracker{
 		PacketConn: conn,
 		manager:    manager,
 		TrackerInfo: &TrackerInfo{
 			UUID:          utils.NewUUIDV4(),
 			Start:         time.Now(),
-			Metadata:      metadata,
+			Metadata:      trackerMetadata(metadata, conn.RemoteDestination()),
 			Chain:         conn.Chains(),
 			ProviderChain: conn.ProviderChains(),
 			Rule:          "",

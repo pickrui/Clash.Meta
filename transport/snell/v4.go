@@ -307,7 +307,11 @@ func (w *v4Writer) nextPayloadLimit() uint16 {
 	var payloadLimit uint16
 	switch {
 	case w.lastWrite.IsZero():
-		payloadLimit = v4FrameSize - 55 - w.initialPaddingLength
+		identityLength := 0
+		if len(w.identity) == IdentityHeaderLength {
+			identityLength = len(identityWireMagic) + IdentityHeaderLength
+		}
+		payloadLimit = uint16(v4FrameSize - 55 - identityLength - int(w.initialPaddingLength))
 	case now.Sub(w.lastWrite) > 30*time.Second:
 		payloadLimit = v4FrameSize - 39
 	default:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"reflect"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/metacubex/mihomo/common/once"
@@ -41,7 +42,7 @@ func NewListener(inner net.Listener, config *Config) net.Listener {
 
 func GetFingerprint(clientFingerprint string) (UClientHelloID, bool) {
 	if len(clientFingerprint) == 0 {
-		clientFingerprint = globalFingerprint
+		clientFingerprint = GetGlobalFingerprint()
 	}
 	if len(clientFingerprint) == 0 || clientFingerprint == "none" {
 		return UClientHelloID{}, false
@@ -62,14 +63,19 @@ func GetFingerprint(clientFingerprint string) (UClientHelloID, bool) {
 	}
 }
 
-var globalFingerprint string
+var globalFingerprint atomic.Pointer[string]
 
 func SetGlobalFingerprint(fingerprint string) {
-	globalFingerprint = fingerprint
+	value := fingerprint
+	globalFingerprint.Store(&value)
 }
 
 func GetGlobalFingerprint() string {
-	return globalFingerprint
+	value := globalFingerprint.Load()
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 var randomFingerprint = once.OnceValue(func() UClientHelloID {

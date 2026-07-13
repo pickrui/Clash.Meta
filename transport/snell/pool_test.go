@@ -41,7 +41,7 @@ func TestPoolConnCloseIsIdempotent(t *testing.T) {
 }
 
 func TestPoolConnCloseWriteDoesNotReturnConnectionToPool(t *testing.T) {
-	rawConn := &recordingConn{}
+	rawConn := &recordingConn{readErr: shadowaead.ErrZeroChunk}
 	pooledConn := &Snell{Conn: rawConn, reply: true}
 	factoryConn := &Snell{Conn: &recordingConn{}}
 	pool := NewPool(func(context.Context) (*Snell, error) {
@@ -70,6 +70,9 @@ func TestPoolConnCloseWriteDoesNotReturnConnectionToPool(t *testing.T) {
 	if !pooledConn.reply {
 		t.Fatal("CloseWrite should not reset reply while the read side may still be active")
 	}
+	if _, err = conn.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected peer half-close before pooling, got %v", err)
+	}
 
 	if err = conn.Close(); err != nil {
 		t.Fatal(err)
@@ -89,6 +92,35 @@ func TestPoolConnCloseWriteDoesNotReturnConnectionToPool(t *testing.T) {
 	}
 }
 
+func TestPoolConnCloseWithoutPeerHalfCloseClosesRawConnection(t *testing.T) {
+	rawConn := &recordingConn{}
+	pooledConn := &Snell{Conn: rawConn}
+	factoryConn := &Snell{Conn: &recordingConn{}}
+	pool := NewPool(func(context.Context) (*Snell, error) {
+		return factoryConn, nil
+	})
+	conn := &PoolConn{Snell: pooledConn, pool: pool}
+
+	if _, err := conn.Write([]byte("request")); err != nil {
+		t.Fatal(err)
+	}
+	conn.MarkReusable()
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if !rawConn.closed {
+		t.Fatal("connection without peer half-close should close the raw connection")
+	}
+	got, err := pool.pool.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.conn != factoryConn {
+		t.Fatal("connection without peer half-close should not return to the pool")
+	}
+}
+
 func TestPoolConnReadZeroChunkReturnsEOF(t *testing.T) {
 	conn := &PoolConn{Snell: &Snell{Conn: zeroChunkConn{}, reply: true}}
 
@@ -102,11 +134,15 @@ func TestPoolConnReadZeroChunkReturnsEOF(t *testing.T) {
 }
 
 type recordingConn struct {
-	writes int
-	closed bool
+	writes  int
+	readErr error
+	closed  bool
 }
 
 func (c *recordingConn) Read([]byte) (int, error) {
+	if c.readErr != nil {
+		return 0, c.readErr
+	}
 	return 0, io.EOF
 }
 

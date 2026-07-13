@@ -166,19 +166,20 @@ func GetGeneral() *config.General {
 			ASN:     geodata.ASNUrl(),
 			GeoSite: geodata.GeoSiteUrl(),
 		},
-		GeoAutoUpdate:     updater.GeoAutoUpdate(),
-		GeoUpdateInterval: updater.GeoUpdateInterval(),
-		GeodataMode:       geodata.GeodataMode(),
-		GeodataLoader:     geodata.LoaderName(),
-		GeositeMatcher:    geodata.SiteMatcherName(),
-		TCPConcurrent:     dialer.GetTcpConcurrent(),
-		FindProcessMode:   tunnel.FindProcessMode(),
-		Sniffing:          tunnel.IsSniffing(),
-		GlobalUA:          mihomoHttp.UA(),
-		ETagSupport:       resource.ETag(),
-		KeepAliveInterval: int(keepalive.KeepAliveInterval() / time.Second),
-		KeepAliveIdle:     int(keepalive.KeepAliveIdle() / time.Second),
-		DisableKeepAlive:  keepalive.DisableKeepAlive(),
+		GeoAutoUpdate:           updater.GeoAutoUpdate(),
+		GeoUpdateInterval:       updater.GeoUpdateInterval(),
+		GeodataMode:             geodata.GeodataMode(),
+		GeodataLoader:           geodata.LoaderName(),
+		GeositeMatcher:          geodata.SiteMatcherName(),
+		TCPConcurrent:           dialer.GetTcpConcurrent(),
+		FindProcessMode:         tunnel.FindProcessMode(),
+		Sniffing:                tunnel.IsSniffing(),
+		GlobalClientFingerprint: tlsC.GetGlobalFingerprint(),
+		GlobalUA:                mihomoHttp.UA(),
+		ETagSupport:             resource.ETag(),
+		KeepAliveInterval:       int(keepalive.KeepAliveInterval() / time.Second),
+		KeepAliveIdle:           int(keepalive.KeepAliveIdle() / time.Second),
+		DisableKeepAlive:        keepalive.DisableKeepAlive(),
 	}
 
 	return general
@@ -314,6 +315,8 @@ func updateRules(rules []C.Rule, subRules map[string][]C.Rule, ruleProviders map
 }
 
 func loadProvider[T P.Provider](providers map[string]T) {
+	loadedHook := DefaultProviderLoadedHook
+	loadedNames := make(chan string, len(providers))
 	load := func(pv T) {
 		name := pv.Name()
 		if pv.VehicleType() == P.Compatible {
@@ -333,10 +336,8 @@ func loadProvider[T P.Provider](providers map[string]T) {
 					log.Warnln("initial rule provider %s error: %v", name, err)
 				}
 			}
-		} else {
-			if DefaultProviderLoadedHook != nil {
-				DefaultProviderLoadedHook(name)
-			}
+		} else if loadedHook != nil {
+			loadedNames <- name
 		}
 	}
 
@@ -352,6 +353,14 @@ func loadProvider[T P.Provider](providers map[string]T) {
 		}()
 	}
 	wg.Wait()
+	close(loadedNames)
+	if loadedHook != nil && len(loadedNames) > 0 {
+		go func() {
+			for name := range loadedNames {
+				loadedHook(name)
+			}
+		}()
+	}
 }
 
 func updateSniffer(snifferConfig *sniffer.Config) {

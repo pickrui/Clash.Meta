@@ -233,6 +233,9 @@ func TestSnellV4IdentityFollowsSalt(t *testing.T) {
 	if !bytes.Equal(data[headerEnd:identityEnd], identity) {
 		t.Fatal("identity value mismatch")
 	}
+	if raw.Len() > v4FrameSize {
+		t.Fatalf("identity first frame exceeds MTU budget: %d", raw.Len())
+	}
 }
 
 func TestSnellV4PayloadLimitMatchesServer(t *testing.T) {
@@ -256,6 +259,24 @@ func TestSnellV4PayloadLimitMatchesServer(t *testing.T) {
 	writer.lastWrite = time.Now().Add(-31 * time.Second)
 	if got, want := writer.nextPayloadLimit(), uint16(v4FrameSize-39); got != want {
 		t.Fatalf("reset payload limit mismatch: got %d want %d", got, want)
+	}
+}
+
+func TestSnellV4IdentityPayloadLimitIncludesHeader(t *testing.T) {
+	writer, err := newV4WriterWithIdentity(
+		io.Discard,
+		[]byte("password"),
+		IdentityHeaderFromPSK([]byte("password")),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := uint16(
+		v4FrameSize - 55 - len(identityWireMagic) - IdentityHeaderLength -
+			int(writer.initialPaddingLength),
+	)
+	if got := writer.nextPayloadLimit(); got != want {
+		t.Fatalf("identity payload limit mismatch: got %d want %d", got, want)
 	}
 }
 

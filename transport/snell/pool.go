@@ -61,6 +61,10 @@ func (p *Pool) put(conn *Snell, uses int) {
 	p.pool.Put(&pooledEntry{conn: conn, uses: uses})
 }
 
+func (p *Pool) Close() error {
+	return p.pool.Close()
+}
+
 type PoolConn struct {
 	*Snell
 	pool           *Pool
@@ -69,6 +73,7 @@ type PoolConn struct {
 	closeWriteErr  error
 	requestStarted atomic.Bool
 	reusableState  atomic.Int32
+	peerClosed     atomic.Bool
 	closeOnce      sync.Once
 	closeErr       error
 }
@@ -76,6 +81,7 @@ type PoolConn struct {
 func (pc *PoolConn) Read(b []byte) (int, error) {
 	n, err := pc.Snell.Read(b)
 	if err == shadowaead.ErrZeroChunk {
+		pc.peerClosed.Store(true)
 		return n, io.EOF
 	}
 	return n, err
@@ -116,6 +122,10 @@ func (pc *PoolConn) Close() error {
 
 		if err := pc.CloseWrite(); err != nil {
 			pc.closeErr = err
+			_ = pc.Snell.Close()
+			return
+		}
+		if !pc.peerClosed.Load() {
 			_ = pc.Snell.Close()
 			return
 		}

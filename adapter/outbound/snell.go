@@ -13,6 +13,7 @@ import (
 	"github.com/metacubex/mihomo/common/structure"
 	"github.com/metacubex/mihomo/component/ech"
 	"github.com/metacubex/mihomo/component/ech/echparser"
+	tlsC "github.com/metacubex/mihomo/component/tls"
 	C "github.com/metacubex/mihomo/constant"
 	obfs "github.com/metacubex/mihomo/transport/simple-obfs"
 	shadowtls "github.com/metacubex/mihomo/transport/sing-shadowtls"
@@ -35,15 +36,16 @@ type Snell struct {
 
 type SnellOption struct {
 	BasicOption
-	Name     string         `proxy:"name"`
-	Server   string         `proxy:"server"`
-	Port     int            `proxy:"port"`
-	Psk      string         `proxy:"psk"`
-	UDP      bool           `proxy:"udp,omitempty"`
-	Version  int            `proxy:"version,omitempty"`
-	Reuse    *bool          `proxy:"reuse,omitempty"`
-	Identity bool           `proxy:"identity,omitempty"`
-	ObfsOpts map[string]any `proxy:"obfs-opts,omitempty"`
+	Name               string         `proxy:"name"`
+	Server             string         `proxy:"server"`
+	Port               int            `proxy:"port"`
+	Psk                string         `proxy:"psk"`
+	UDP                bool           `proxy:"udp,omitempty"`
+	Version            int            `proxy:"version,omitempty"`
+	Reuse              *bool          `proxy:"reuse,omitempty"`
+	Identity           bool           `proxy:"identity,omitempty"`
+	IdentityConfigured bool           `proxy:"-"`
+	ObfsOpts           map[string]any `proxy:"obfs-opts,omitempty"`
 
 	ShadowTLSPassword       string   `proxy:"shadow-tls-password,omitempty"`
 	ShadowTLSSNI            string   `proxy:"shadow-tls-sni,omitempty"`
@@ -54,6 +56,13 @@ type SnellOption struct {
 	ShadowTLSPrivateKey     string   `proxy:"shadow-tls-private-key,omitempty"`
 	ShadowTLSALPN           []string `proxy:"shadow-tls-alpn,omitempty"`
 	ClientFingerprint       string   `proxy:"client-fingerprint,omitempty"`
+}
+
+func (s *Snell) Close() error {
+	if s.pool != nil {
+		return s.pool.Close()
+	}
+	return s.Base.Close()
 }
 
 type streamOption struct {
@@ -104,6 +113,9 @@ func resolveSnellClientFingerprint(obfsOption *snellObfsOption, option SnellOpti
 	}
 	if option.ClientFingerprint != "" {
 		return option.ClientFingerprint
+	}
+	if globalFingerprint := tlsC.GetGlobalFingerprint(); globalFingerprint != "" {
+		return globalFingerprint
 	}
 	return defaultSnellClientFingerprint
 }
@@ -390,8 +402,12 @@ func NewSnell(option SnellOption) (*Snell, error) {
 		// Snell v5 servers are backward-compatible with v4 clients.
 		option.Version = snell.Version4
 	}
+	identity := option.Identity
 	if requiresSnellV4Identity(obfsOption.Mode, shadowTLSOption) && option.Version == snell.Version4 {
-		option.Identity = true
+		if option.IdentityConfigured && !option.Identity {
+			return nil, fmt.Errorf("snell %s identity cannot be disabled with ech-tls or shadow-tls", addr)
+		}
+		identity = true
 	}
 	switch option.Version {
 	case snell.Version1, snell.Version2:
@@ -420,7 +436,7 @@ func NewSnell(option SnellOption) (*Snell, error) {
 		option:     &option,
 		psk:        psk,
 		obfsOption: obfsOption,
-		identity:   option.Identity,
+		identity:   identity,
 		version:    option.Version,
 		reuse:      reuse,
 		shadowTLS:  shadowTLSOption,
@@ -433,6 +449,7 @@ func NewSnell(option SnellOption) (*Snell, error) {
 		}
 		s.echTLS = &v2rayObfs.Option{
 			Host:              obfsOption.Host,
+			ServerName:        snellECHTLSHost(obfsOption, option.Server),
 			Port:              strconv.Itoa(option.Port),
 			Path:              obfsOption.Path,
 			Headers:           obfsOption.Headers,
@@ -459,7 +476,7 @@ func NewSnell(option SnellOption) (*Snell, error) {
 				version:    option.Version,
 				addr:       addr,
 				obfsOption: obfsOption,
-				identity:   option.Identity,
+				identity:   identity,
 			}), nil
 		})
 	}

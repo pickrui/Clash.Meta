@@ -1,6 +1,7 @@
 package common
 
 import (
+	"errors"
 	"strings"
 
 	C "github.com/metacubex/mihomo/constant"
@@ -29,6 +30,10 @@ func (s *SniffProtocolRule) Payload() string {
 }
 
 func NewSniffProtocol(protocol, adapter string) (*SniffProtocolRule, error) {
+	protocol = strings.TrimSpace(protocol)
+	if protocol == "" {
+		return nil, errors.New("sniff protocol cannot be empty")
+	}
 	return &SniffProtocolRule{
 		Base:     Base{},
 		protocol: strings.ToLower(protocol),
