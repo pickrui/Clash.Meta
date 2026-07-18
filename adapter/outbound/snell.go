@@ -18,7 +18,7 @@ import (
 	obfs "github.com/metacubex/mihomo/transport/simple-obfs"
 	shadowtls "github.com/metacubex/mihomo/transport/sing-shadowtls"
 	"github.com/metacubex/mihomo/transport/snell"
-	v2rayObfs "github.com/metacubex/mihomo/transport/v2ray-plugin"
+	"github.com/metacubex/mihomo/transport/vmess"
 )
 
 type Snell struct {
@@ -27,7 +27,7 @@ type Snell struct {
 	psk        []byte
 	pool       *snell.Pool
 	obfsOption *snellObfsOption
-	echTLS     *v2rayObfs.Option
+	echTLS     *vmess.TLSConfig
 	shadowTLS  *shadowtls.ShadowTLSOption
 	identity   bool
 	version    int
@@ -92,6 +92,7 @@ type snellObfsOption struct {
 }
 
 const defaultSnellClientFingerprint = "chrome"
+const snellECHTLSALPN = "h2"
 
 func isSnellECHTLSMode(mode string) bool {
 	return mode == "ech-tls"
@@ -316,12 +317,12 @@ func (s *Snell) dialSnellTransport(ctx context.Context) (net.Conn, error) {
 		return nil, fmt.Errorf("%s connect error: %w", s.addr, err)
 	}
 	if s.echTLS != nil {
-		obfsConn, err := v2rayObfs.NewV2rayObfs(ctx, c, s.echTLS)
+		tlsConn, err := vmess.StreamTLSConn(ctx, c, s.echTLS)
 		if err != nil {
 			_ = c.Close()
 			return nil, err
 		}
-		c = obfsConn
+		c = tlsConn
 	}
 	if s.shadowTLS != nil {
 		shadowConn, err := shadowtls.NewShadowTLS(ctx, c, s.shadowTLS)
@@ -379,10 +380,6 @@ func NewSnell(option SnellOption) (*Snell, error) {
 		obfsOption.Host = "bing.com"
 	}
 	if isSnellECHTLSMode(obfsOption.Mode) {
-		if obfsOption.Path == "" {
-			return nil, fmt.Errorf("snell %s ech-tls path is empty", addr)
-		}
-		obfsOption.TLS = true
 		obfsOption.Host = snellECHTLSHost(obfsOption, option.Server)
 		obfsOption.SkipCertVerify = obfsOption.SkipCertVerify || obfsOption.Insecure
 	}
@@ -447,20 +444,16 @@ func NewSnell(option SnellOption) (*Snell, error) {
 		if err != nil {
 			return nil, err
 		}
-		s.echTLS = &v2rayObfs.Option{
+		s.echTLS = &vmess.TLSConfig{
 			Host:              obfsOption.Host,
-			ServerName:        snellECHTLSHost(obfsOption, option.Server),
-			Port:              strconv.Itoa(option.Port),
-			Path:              obfsOption.Path,
-			Headers:           obfsOption.Headers,
-			TLS:               obfsOption.TLS,
-			ECHConfig:         echConfig,
 			SkipCertVerify:    obfsOption.SkipCertVerify,
 			CAFile:            obfsOption.CAFile,
 			ClientFingerprint: resolveSnellClientFingerprint(obfsOption, option),
-			Fingerprint:       obfsOption.Fingerprint,
+			FingerPrint:       obfsOption.Fingerprint,
 			Certificate:       obfsOption.Certificate,
 			PrivateKey:        obfsOption.PrivateKey,
+			NextProtos:        []string{snellECHTLSALPN},
+			ECH:               echConfig,
 		}
 	}
 
