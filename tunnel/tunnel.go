@@ -253,7 +253,11 @@ func Mode() TunnelMode {
 
 // SetMode change the mode of tunnel
 func SetMode(m TunnelMode) {
+	changed := mode != m
 	mode = m
+	if changed && ModeChangeHook != nil {
+		ModeChangeHook(m)
+	}
 }
 
 func FindProcessMode() process.FindProcessMode {

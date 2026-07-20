@@ -9,6 +9,8 @@ var (
 	allProxies = make(map[string]C.Proxy)
 )
 
+var ModeChangeHook func(TunnelMode)
+
 func AllProxies() map[string]C.Proxy {
 	return proxiesWithProviders()
 }
