@@ -488,6 +488,7 @@ func ReCreateMixed(port int, tunnel C.Tunnel) {
 	mixedUDPLister, err = socks.NewUDP(addr, tunnel)
 	if err != nil {
 		mixedListener.Close()
+		mixedListener = nil
 		return
 	}
 

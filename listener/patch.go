@@ -57,11 +57,6 @@ func StopListener() {
 		shadowSocksListener = nil
 	}
 
-	if shadowSocksListener != nil {
-		_ = shadowSocksListener.Close()
-		shadowSocksListener = nil
-	}
-
 	if vmessListener != nil {
 		_ = vmessListener.Close()
 		vmessListener = nil
