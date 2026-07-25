@@ -27,7 +27,7 @@ import (
 )
 
 type Listener struct {
-	closed    bool
+	closed    atomic.Bool
 	config    LC.AnyTLSServer
 	listeners []net.Listener
 	tlsConfig *tls.Config
@@ -35,7 +35,7 @@ type Listener struct {
 	padding   atomic.Pointer[padding.PaddingFactory]
 }
 
-func New(config LC.AnyTLSServer, tunnel C.Tunnel, additions ...inbound.Addition) (sl *Listener, err error) {
+func New(config LC.AnyTLSServer, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-ANYTLS"),
@@ -73,12 +73,21 @@ func New(config LC.AnyTLSServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		}
 		tlsConfig.ClientCAs = pool
 	}
+	if tlsConfig.GetCertificate == nil && !config.AllowInsecure {
+		return nil, errors.New("disallow using AnyTLS without certificates/allow-insecure config")
+	}
 
-	sl = &Listener{
+	sl := &Listener{
 		config:    config,
 		tlsConfig: tlsConfig,
 		userMap:   make(map[[32]byte]string),
 	}
+	owned := false
+	defer func() {
+		if !owned {
+			_ = sl.Close()
+		}
+	}()
 
 	for user, password := range config.Users {
 		sl.userMap[sha256.Sum256([]byte(password))] = user
@@ -110,18 +119,20 @@ func New(config LC.AnyTLSServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		if err != nil {
 			return nil, err
 		}
+		sl.listeners = append(sl.listeners, l)
 		if tlsConfig.GetCertificate != nil {
 			l = tls.NewListener(l, tlsConfig)
-		} else if !config.AllowInsecure {
-			return nil, errors.New("disallow using AnyTLS without certificates/allow-insecure config")
+			sl.listeners[len(sl.listeners)-1] = l
 		}
-		sl.listeners = append(sl.listeners, l)
+	}
 
+	for _, l := range sl.listeners {
+		l := l
 		go func() {
 			for {
 				c, err := l.Accept()
 				if err != nil {
-					if sl.closed {
+					if sl.closed.Load() {
 						break
 					}
 					continue
@@ -131,16 +142,17 @@ func New(config LC.AnyTLSServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		}()
 	}
 
+	owned = true
 	return sl, nil
 }
 
 func (l *Listener) Close() error {
-	l.closed = true
+	l.closed.Store(true)
 	var retErr error
 	for _, lis := range l.listeners {
 		err := lis.Close()
 		if err != nil {
-			retErr = err
+			retErr = errors.Join(retErr, err)
 		}
 	}
 	return retErr
