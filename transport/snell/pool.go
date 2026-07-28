@@ -14,7 +14,18 @@ import (
 
 type Pool struct {
 	pool           *pool.Pool[*pooledEntry]
+	factory        func(context.Context) (*Snell, error)
 	maxUsesPerConn int
+}
+
+func (p *Pool) Warm(ctx context.Context, count int) {
+	for range count {
+		conn, err := p.factory(ctx)
+		if err != nil {
+			return
+		}
+		p.put(conn, 0)
+	}
 }
 
 const (
@@ -140,7 +151,7 @@ func (pc *PoolConn) Close() error {
 }
 
 func NewPool(factory func(context.Context) (*Snell, error)) *Pool {
-	p := &Pool{maxUsesPerConn: defaultMaxUsesPerConn}
+	p := &Pool{factory: factory, maxUsesPerConn: defaultMaxUsesPerConn}
 	p.pool = pool.New[*pooledEntry](
 		func(ctx context.Context) (*pooledEntry, error) {
 			conn, err := factory(ctx)

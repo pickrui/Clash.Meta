@@ -1,6 +1,7 @@
 package snell
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -37,6 +38,18 @@ func TestPoolConnCloseIsIdempotent(t *testing.T) {
 	}
 	if got.conn != factoryConn || got.conn == pooledConn {
 		t.Fatal("closed connection was returned to the pool")
+	}
+}
+
+func TestWarmupAuthenticatesConnection(t *testing.T) {
+	rawConn := &bufferConn{}
+	rawConn.WriteByte(CommandPong)
+	conn := &Snell{Conn: rawConn}
+	if err := conn.Warmup(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := rawConn.Bytes(), []byte{Version, CommandPing, 0}; !bytes.Equal(got, want) {
+		t.Fatalf("warmup request = %x, want %x", got, want)
 	}
 }
 
