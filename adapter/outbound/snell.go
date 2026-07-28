@@ -536,17 +536,18 @@ func NewSnell(option SnellOption) (*Snell, error) {
 			nextProtos = append(nextProtos, snellECHTLSLegacyALPN)
 		}
 		s.echTLS = &vmess.TLSConfig{
-			Host:                obfsOption.Host,
-			SkipCertVerify:      obfsOption.SkipCertVerify,
-			CAFile:              obfsOption.CAFile,
-			ClientFingerprint:   resolveSnellClientFingerprint(obfsOption, option),
-			FingerPrint:         obfsOption.Fingerprint,
-			Certificate:         obfsOption.Certificate,
-			PrivateKey:          obfsOption.PrivateKey,
-			NextProtos:          nextProtos,
-			ECH:                 echConfig,
-			ClientSessionCache:  tls.NewLRUClientSessionCache(snellECHTLSSessionCacheCapacity),
-			UClientSessionCache: utls.NewLRUClientSessionCache(snellECHTLSSessionCacheCapacity),
+			Host:                 obfsOption.Host,
+			SkipCertVerify:       obfsOption.SkipCertVerify,
+			CAFile:               obfsOption.CAFile,
+			ClientFingerprint:    resolveSnellClientFingerprint(obfsOption, option),
+			FingerPrint:          obfsOption.Fingerprint,
+			Certificate:          obfsOption.Certificate,
+			PrivateKey:           obfsOption.PrivateKey,
+			NextProtos:           nextProtos,
+			ECH:                  echConfig,
+			ClientSessionCache:   tls.NewLRUClientSessionCache(snellECHTLSSessionCacheCapacity),
+			UClientSessionCache:  utls.NewLRUClientSessionCache(snellECHTLSSessionCacheCapacity),
+			DisableRenegotiation: true,
 		}
 	}
 
