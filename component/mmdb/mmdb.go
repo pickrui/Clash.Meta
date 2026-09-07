@@ -1,9 +1,11 @@
 package mmdb
 
 import (
+	"os"
+	"runtime"
 	"sync"
+	"sync/atomic"
 
-	mihomoOnce "github.com/metacubex/mihomo/common/once"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 
@@ -19,28 +21,36 @@ const (
 )
 
 var (
-	ipReader  IPReader
-	asnReader ASNReader
-	ipOnce    sync.Once
-	asnOnce   sync.Once
+	ipReader  atomic.Pointer[IPReader]
+	asnReader atomic.Pointer[ASNReader]
+	ipMu      sync.Mutex
+	asnMu     sync.Mutex
 )
 
 func LoadFromBytes(buffer []byte) {
-	ipOnce.Do(func() {
-		mmdb, err := maxminddb.FromBytes(buffer)
-		if err != nil {
-			log.Fatalln("Can't load mmdb: %s", err.Error())
-		}
-		ipReader = IPReader{Reader: mmdb}
-		switch mmdb.Metadata.DatabaseType {
-		case "sing-geoip":
-			ipReader.databaseType = typeSing
-		case "Meta-geoip0":
-			ipReader.databaseType = typeMetaV0
-		default:
-			ipReader.databaseType = typeMaxmind
-		}
-	})
+	ipMu.Lock()
+	defer ipMu.Unlock()
+	if ipReader.Load() != nil {
+		return
+	}
+	database, err := maxminddb.FromBytes(buffer)
+	if err != nil {
+		log.Fatalln("Can't load mmdb: %s", err.Error())
+	}
+	ipReader.Store(newIPReader(database))
+}
+
+func newIPReader(database *maxminddb.Reader) *IPReader {
+	reader := &IPReader{Reader: database}
+	switch database.Metadata.DatabaseType {
+	case "sing-geoip":
+		reader.databaseType = typeSing
+	case "Meta-geoip0":
+		reader.databaseType = typeMetaV0
+	default:
+		reader.databaseType = typeMaxmind
+	}
+	return reader
 }
 
 func Verify(path string) bool {
@@ -51,46 +61,73 @@ func Verify(path string) bool {
 	return err == nil
 }
 
+func openDatabase(path string) (*maxminddb.Reader, error) {
+	if runtime.GOOS != "windows" {
+		return maxminddb.Open(path)
+	}
+	// Windows can reject replacement while a memory-mapped view is alive. Keep
+	// the immutable database bytes instead so old readers do not pin the file.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return maxminddb.FromBytes(data)
+}
+
 func IPInstance() IPReader {
-	ipOnce.Do(func() {
+	if reader := ipReader.Load(); reader != nil {
+		return *reader
+	}
+	ipMu.Lock()
+	defer ipMu.Unlock()
+	reader := ipReader.Load()
+	if reader == nil {
 		mmdbPath := C.Path.MMDB()
 		log.Infoln("Load MMDB file: %s", mmdbPath)
-		mmdb, err := maxminddb.Open(mmdbPath)
+		mmdb, err := openDatabase(mmdbPath)
 		if err != nil {
 			log.Fatalln("Can't load MMDB: %s", err.Error())
 		}
-		ipReader = IPReader{Reader: mmdb}
-		switch mmdb.Metadata.DatabaseType {
-		case "sing-geoip":
-			ipReader.databaseType = typeSing
-		case "Meta-geoip0":
-			ipReader.databaseType = typeMetaV0
-		default:
-			ipReader.databaseType = typeMaxmind
-		}
-	})
+		reader = newIPReader(mmdb)
+		ipReader.Store(reader)
+	}
 
-	return ipReader
+	return *reader
 }
 
 func ASNInstance() ASNReader {
-	asnOnce.Do(func() {
+	if reader := asnReader.Load(); reader != nil {
+		return *reader
+	}
+	asnMu.Lock()
+	defer asnMu.Unlock()
+	reader := asnReader.Load()
+	if reader == nil {
 		ASNPath := C.Path.ASN()
 		log.Infoln("Load ASN file: %s", ASNPath)
-		asn, err := maxminddb.Open(ASNPath)
+		asn, err := openDatabase(ASNPath)
 		if err != nil {
 			log.Fatalln("Can't load ASN: %s", err.Error())
 		}
-		asnReader = ASNReader{Reader: asn}
-	})
+		reader = &ASNReader{Reader: asn}
+		asnReader.Store(reader)
+	}
 
-	return asnReader
+	return *reader
 }
 
+// ReloadIP invalidates the cached reader after the database file is atomically
+// replaced. Existing lookups retain the old mapping until their final reference
+// is released; maxminddb's finalizer then closes it.
 func ReloadIP() {
-	mihomoOnce.Reset(&ipOnce)
+	ipMu.Lock()
+	defer ipMu.Unlock()
+	ipReader.Store(nil)
 }
 
+// ReloadASN has the same reader lifetime guarantees as ReloadIP.
 func ReloadASN() {
-	mihomoOnce.Reset(&asnOnce)
+	asnMu.Lock()
+	defer asnMu.Unlock()
+	asnReader.Store(nil)
 }

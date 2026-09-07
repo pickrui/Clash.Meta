@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -72,11 +73,10 @@ func UpdateMMDB() (err error) {
 	}
 	_ = instance.Close()
 
-	defer mmdb.ReloadIP()
-	mmdb.IPInstance().Reader.Close() //  mmdb is loaded with mmap, so it needs to be closed before overwriting the file
-	if err = vehicle.Write(data); err != nil {
+	if err = writeGeoDatabase(vehicle.Path(), data); err != nil {
 		return fmt.Errorf("can't save MMDB database file: %w", err)
 	}
+	mmdb.ReloadIP()
 	return nil
 }
 
@@ -108,12 +108,40 @@ func UpdateASN() (err error) {
 	}
 	_ = instance.Close()
 
-	defer mmdb.ReloadASN()
-	mmdb.ASNInstance().Reader.Close() //  mmdb is loaded with mmap, so it needs to be closed before overwriting the file
-	if err = vehicle.Write(data); err != nil {
+	if err = writeGeoDatabase(vehicle.Path(), data); err != nil {
 		return fmt.Errorf("can't save ASN database file: %w", err)
 	}
+	mmdb.ReloadASN()
 	return nil
+}
+
+func writeGeoDatabase(path string, data []byte) error {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(directory, ".mihomo-geo-*")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+	}()
+	if err := file.Chmod(0o644); err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	// Replacing the directory entry preserves mappings held by in-flight lookups.
+	return os.Rename(file.Name(), path)
 }
 
 func UpdateGeoIp() (err error) {

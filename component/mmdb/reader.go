@@ -3,6 +3,7 @@ package mmdb
 import (
 	"fmt"
 	"net"
+	"runtime"
 	"strings"
 
 	"github.com/metacubex/mihomo/log"
@@ -35,6 +36,7 @@ type IPInfo struct {
 }
 
 func (r IPReader) LookupCode(ipAddress net.IP) []string {
+	defer runtime.KeepAlive(r.Reader)
 	switch r.databaseType {
 	case typeMaxmind:
 		var country geoip2Country
@@ -73,6 +75,7 @@ func (r IPReader) LookupCode(ipAddress net.IP) []string {
 }
 
 func (r ASNReader) LookupASN(ip net.IP) (string, string) {
+	defer runtime.KeepAlive(r.Reader)
 	switch r.Metadata.DatabaseType {
 	case "GeoLite2-ASN", "DBIP-ASN-Lite (compat=GeoLite2-ASN)":
 		var result GeoLite2
