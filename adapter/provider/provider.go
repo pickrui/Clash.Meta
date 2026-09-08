@@ -206,6 +206,11 @@ func NewProxySetProvider(name string, interval time.Duration, payload []map[stri
 	}
 
 	fetcher := resource.NewFetcher[[]C.Proxy](name, interval, vehicle, nil, parser, pd.setProxies)
+	fetcher.SetDiscard(func(proxies []C.Proxy) {
+		for _, proxy := range proxies {
+			_ = proxy.Close()
+		}
+	})
 	pd.Fetcher = fetcher
 	if httpVehicle, ok := vehicle.(*resource.HTTPVehicle); ok {
 		httpVehicle.SetInRead(func(resp *http.Response) {
@@ -394,6 +399,14 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
 		}
 
 		proxies := []C.Proxy{}
+		parsed := false
+		defer func() {
+			if !parsed {
+				for _, proxy := range proxies {
+					_ = proxy.Close()
+				}
+			}
+		}()
 		proxiesSet := map[string]struct{}{}
 		for _, filterReg := range filterRegs {
 		LOOP1:
@@ -463,6 +476,7 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
 			return nil, errors.New("file doesn't have any proxy")
 		}
 
+		parsed = true
 		return proxies, nil
 	}, nil
 }

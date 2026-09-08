@@ -2,7 +2,6 @@ package updater
 
 import (
 	"context"
-	"io"
 	"time"
 
 	mihomoHttp "github.com/metacubex/mihomo/component/http"
@@ -12,14 +11,16 @@ import (
 
 const defaultHttpTimeout = time.Second * 90
 
-func downloadForBytes(url string) ([]byte, error) {
+func downloadForBytes(url string, validators ...func([]byte) error) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultHttpTimeout)
 	defer cancel()
-	resp, err := mihomoHttp.HttpRequest(ctx, url, http.MethodGet, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	return io.ReadAll(resp.Body)
+	_, data, err := mihomoHttp.Get(ctx, url, nil, 0, func(_ *http.Response, data []byte) error {
+		for _, validate := range validators {
+			if err := validate(data); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, mihomoHttp.WithPublicRead())
+	return data, err
 }

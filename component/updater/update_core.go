@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/ca"
 	mihomoHttp "github.com/metacubex/mihomo/component/http"
 	C "github.com/metacubex/mihomo/constant"
@@ -173,76 +174,30 @@ func (u *CoreUpdater) Update(currentExePath string, channel string, force bool) 
 func (u *CoreUpdater) getLatestVersion(versionURL string) (version string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
-	resp, err := mihomoHttp.HttpRequest(ctx, versionURL, http.MethodGet, nil, nil, mihomoHttp.WithCAOption(ca.Option{ZeroTrust: true}))
+	_, body, err := mihomoHttp.Get(ctx, versionURL, nil, 128, func(_ *http.Response, data []byte) error {
+		return validateVersion(data)
+	}, mihomoHttp.WithCAOption(ca.Option{ZeroTrust: true}), mihomoHttp.WithPublicRead())
 	if err != nil {
 		return "", err
 	}
-	defer func() {
-		closeErr := resp.Body.Close()
-		if closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	content := strings.TrimRight(string(body), "\n")
-	return content, nil
+	return strings.TrimSpace(string(body)), nil
 }
 
-// download package file and save it to disk
-func (u *CoreUpdater) download(updateDir, packagePath, packageURL string) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*90)
+// download validates the complete archive before replacing the package file.
+func (u *CoreUpdater) download(updateDir, packagePath, packageURL string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultHttpTimeout)
 	defer cancel()
-	resp, err := mihomoHttp.HttpRequest(ctx, packageURL, http.MethodGet, nil, nil, mihomoHttp.WithCAOption(ca.Option{ZeroTrust: true}))
-	if err != nil {
-		return fmt.Errorf("http request failed: %w", err)
-	}
-
-	defer func() {
-		closeErr := resp.Body.Close()
-		if closeErr != nil && err == nil {
-			err = closeErr
+	_, body, err := mihomoHttp.Get(ctx, packageURL, nil, MaxPackageFileSize, func(_ *http.Response, data []byte) error {
+		target := u.CoreBaseName()
+		if runtime.GOOS == "windows" {
+			target += ".exe"
 		}
-	}()
-
-	log.Debugln("updateDir %s", updateDir)
-	err = os.Mkdir(updateDir, 0o755)
+		return validateCoreArchive(data, packagePath, target)
+	}, mihomoHttp.WithCAOption(ca.Option{ZeroTrust: true}), mihomoHttp.WithPublicRead())
 	if err != nil {
-		return fmt.Errorf("mkdir error: %w", err)
+		return err
 	}
-
-	log.Debugln("updater: saving package to file %s", packagePath)
-	// Create the output file
-	wc, err := os.OpenFile(packagePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
-	if err != nil {
-		return fmt.Errorf("os.OpenFile(%s): %w", packagePath, err)
-	}
-
-	defer func() {
-		closeErr := wc.Close()
-		if closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}()
-
-	log.Debugln("updater: reading http body")
-	// This use of io.Copy is now safe, because we limited body's Reader.
-	n, err := io.Copy(wc, io.LimitReader(resp.Body, MaxPackageFileSize))
-	if err != nil {
-		return fmt.Errorf("io.Copy(): %w", err)
-	}
-	if n == MaxPackageFileSize {
-		// Use whether n is equal to MaxPackageFileSize to determine whether the limit has been reached.
-		// It is also possible that the size of the downloaded file is exactly the same as the maximum limit,
-		// but we should not consider this too rare situation.
-		return fmt.Errorf("attempted to read more than %d bytes", MaxPackageFileSize)
-	}
-	log.Debugln("updater: downloaded package to file %s", packagePath)
-
-	return nil
+	return utils.WriteFileAtomic(ctx, packagePath, body, 0o755)
 }
 
 // unpack extracts the files from the downloaded archive.
@@ -255,7 +210,7 @@ func (u *CoreUpdater) unpack(updateDir, packagePath string, fileMode os.FileMode
 		}
 
 	} else if strings.HasSuffix(packagePath, ".gz") {
-		_, err := u.gzFileUnpack(packagePath, updateDir, fileMode)
+		_, err := u.gzFileUnpack(packagePath, updateDir, fileMode, u.CoreBaseName())
 		if err != nil {
 			return fmt.Errorf(".gz unpack failed: %w", err)
 		}
@@ -296,7 +251,7 @@ func (u *CoreUpdater) clean(updateDir string) {
 // Existing files are overwritten
 // All files are created inside outDir, subdirectories are not created
 // Return the output file name
-func (u *CoreUpdater) gzFileUnpack(gzfile, outDir string, fileMode os.FileMode) (outputName string, err error) {
+func (u *CoreUpdater) gzFileUnpack(gzfile, outDir string, fileMode os.FileMode, targetName ...string) (outputName string, err error) {
 	f, err := os.Open(gzfile)
 	if err != nil {
 		return "", fmt.Errorf("os.Open(): %w", err)
@@ -322,12 +277,24 @@ func (u *CoreUpdater) gzFileUnpack(gzfile, outDir string, fileMode os.FileMode) 
 	}()
 	// Get the original file name from the .gz file header
 	originalName := gzReader.Header.Name
+	if err := validateGzipName(originalName); err != nil {
+		return "", err
+	}
 	if originalName == "" {
 		// Fallback: remove the .gz extension from the input file name if the header doesn't provide the original name
 		originalName = filepath.Base(gzfile)
 		originalName = strings.TrimSuffix(originalName, ".gz")
 	}
 
+	if len(targetName) > 0 {
+		if targetName[0] == "" {
+			return "", fmt.Errorf("missing core target filename")
+		}
+		if err := validateGzipName(targetName[0]); err != nil {
+			return "", err
+		}
+		originalName = targetName[0]
+	}
 	outputName = filepath.Join(outDir, originalName)
 
 	// Create the output file
@@ -374,6 +341,12 @@ func (u *CoreUpdater) zipFileUnpack(zipfile, outDir string, fileMode os.FileMode
 
 	// Assuming the first file in the zip archive is the target file
 	zf := zrc.File[0]
+	if !zf.Mode().IsRegular() || zf.UncompressedSize64 == 0 {
+		return "", fmt.Errorf("core ZIP target must be a non-empty regular file")
+	}
+	if err := validateArchivePath(zf.Name); err != nil {
+		return "", err
+	}
 	var rc io.ReadCloser
 	rc, err = zf.Open()
 	if err != nil {
