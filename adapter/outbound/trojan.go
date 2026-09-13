@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/component/ca"
@@ -13,8 +14,10 @@ import (
 	tlsC "github.com/metacubex/mihomo/component/tls"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/transport/gun"
+	"github.com/metacubex/mihomo/transport/jls"
 	"github.com/metacubex/mihomo/transport/restls"
 	"github.com/metacubex/mihomo/transport/shadowsocks/core"
+	"github.com/metacubex/mihomo/transport/shadowtls"
 	"github.com/metacubex/mihomo/transport/trojan"
 	"github.com/metacubex/mihomo/transport/vmess"
 
@@ -30,35 +33,39 @@ type Trojan struct {
 	// for gun mux
 	gunClient *gun.Client
 
-	restlsConfig  *restls.Config
-	realityConfig *tlsC.RealityConfig
-	echConfig     *ech.Config
+	echConfig       *ech.Config
+	shadowTLSConfig *shadowtls.Config
+	restlsConfig    *restls.Config
+	jlsConfig       *jls.Config
+	realityConfig   *tlsC.RealityConfig
 
 	ssCipher core.Cipher
 }
 
 type TrojanOption struct {
 	BasicOption
-	Name              string         `proxy:"name"`
-	Server            string         `proxy:"server"`
-	Port              int            `proxy:"port"`
-	Password          string         `proxy:"password"`
-	ALPN              []string       `proxy:"alpn,omitempty"`
-	SNI               string         `proxy:"sni,omitempty"`
-	SkipCertVerify    bool           `proxy:"skip-cert-verify,omitempty"`
-	NameCertVerify    string         `proxy:"name-cert-verify,omitempty"`
-	Fingerprint       string         `proxy:"fingerprint,omitempty"`
-	Certificate       string         `proxy:"certificate,omitempty"`
-	PrivateKey        string         `proxy:"private-key,omitempty"`
-	UDP               bool           `proxy:"udp,omitempty"`
-	Network           string         `proxy:"network,omitempty"`
-	ECHOpts           ECHOptions     `proxy:"ech-opts,omitempty"`
-	RestlsOpts        RestlsOptions  `proxy:"restls-opts,omitempty"`
-	RealityOpts       RealityOptions `proxy:"reality-opts,omitempty"`
-	GrpcOpts          GrpcOptions    `proxy:"grpc-opts,omitempty"`
-	WSOpts            WSOptions      `proxy:"ws-opts,omitempty"`
-	SSOpts            TrojanSSOption `proxy:"ss-opts,omitempty"`
-	ClientFingerprint string         `proxy:"client-fingerprint,omitempty"`
+	Name              string           `proxy:"name"`
+	Server            string           `proxy:"server"`
+	Port              int              `proxy:"port"`
+	Password          string           `proxy:"password"`
+	ALPN              []string         `proxy:"alpn,omitempty"`
+	SNI               string           `proxy:"sni,omitempty"`
+	SkipCertVerify    bool             `proxy:"skip-cert-verify,omitempty"`
+	NameCertVerify    string           `proxy:"name-cert-verify,omitempty"`
+	Fingerprint       string           `proxy:"fingerprint,omitempty"`
+	Certificate       string           `proxy:"certificate,omitempty"`
+	PrivateKey        string           `proxy:"private-key,omitempty"`
+	UDP               bool             `proxy:"udp,omitempty"`
+	Network           string           `proxy:"network,omitempty"`
+	ECHOpts           ECHOptions       `proxy:"ech-opts,omitempty"`
+	ShadowTLSOpts     ShadowTLSOptions `proxy:"shadow-tls-opts,omitempty"`
+	RestlsOpts        RestlsOptions    `proxy:"restls-opts,omitempty"`
+	JLSOpts           JLSOptions       `proxy:"jls-opts,omitempty"`
+	RealityOpts       RealityOptions   `proxy:"reality-opts,omitempty"`
+	GrpcOpts          GrpcOptions      `proxy:"grpc-opts,omitempty"`
+	WSOpts            WSOptions        `proxy:"ws-opts,omitempty"`
+	SSOpts            TrojanSSOption   `proxy:"ss-opts,omitempty"`
+	ClientFingerprint string           `proxy:"client-fingerprint,omitempty"`
 }
 
 // TrojanSSOption from https://github.com/p4gefau1t/trojan-go/blob/v0.10.6/tunnel/shadowsocks/config.go#L5
@@ -101,34 +108,40 @@ func (t *Trojan) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.
 			alpn = t.option.ALPN
 		}
 
-		wsOpts.TLS = true
-		wsOpts.TLSConfig, err = ca.GetTLSConfig(ca.Option{
-			TLSConfig: &tls.Config{
-				NextProtos:         alpn,
-				MinVersion:         tls.VersionTLS12,
-				InsecureSkipVerify: t.option.SkipCertVerify,
-				ServerName:         t.option.SNI,
-			},
-			Fingerprint:    t.option.Fingerprint,
-			NameCertVerify: t.option.NameCertVerify,
-			Certificate:    t.option.Certificate,
-			PrivateKey:     t.option.PrivateKey,
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		if t.restlsConfig != nil {
+		if t.shadowTLSConfig != nil || t.restlsConfig != nil || t.jlsConfig != nil {
 			c, err = vmess.StreamTLSConn(ctx, c, &vmess.TLSConfig{
-				Host: wsOpts.TLSConfig.ServerName, SkipCertVerify: t.option.SkipCertVerify,
-				FingerPrint: t.option.Fingerprint, NextProtos: wsOpts.TLSConfig.NextProtos,
-				NameCertVerify: t.option.NameCertVerify,
-				Restls:         t.restlsConfig,
+				Host:              t.option.SNI,
+				SkipCertVerify:    t.option.SkipCertVerify,
+				NameCertVerify:    t.option.NameCertVerify,
+				FingerPrint:       t.option.Fingerprint,
+				Certificate:       t.option.Certificate,
+				PrivateKey:        t.option.PrivateKey,
+				ClientFingerprint: t.option.ClientFingerprint,
+				NextProtos:        []string{"http/1.1"},
+				ShadowTLS:         t.shadowTLSConfig,
+				Restls:            t.restlsConfig,
+				JLS:               t.jlsConfig,
 			})
 			if err != nil {
 				return nil, err
 			}
-			wsOpts.TLS = false // The Restls stream is already established.
+		} else {
+			wsOpts.TLS = true
+			wsOpts.TLSConfig, err = ca.GetTLSConfig(ca.Option{
+				TLSConfig: &tls.Config{
+					NextProtos:         alpn,
+					MinVersion:         tls.VersionTLS12,
+					InsecureSkipVerify: t.option.SkipCertVerify,
+					ServerName:         t.option.SNI,
+				},
+				Fingerprint:    t.option.Fingerprint,
+				NameCertVerify: t.option.NameCertVerify,
+				Certificate:    t.option.Certificate,
+				PrivateKey:     t.option.PrivateKey,
+			})
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		c, err = vmess.StreamWebsocketConn(ctx, c, wsOpts)
@@ -151,7 +164,9 @@ func (t *Trojan) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.
 			ClientFingerprint: t.option.ClientFingerprint,
 			NextProtos:        alpn,
 			ECH:               t.echConfig,
+			ShadowTLS:         t.shadowTLSConfig,
 			Restls:            t.restlsConfig,
+			JLS:               t.jlsConfig,
 			Reality:           t.realityConfig,
 		})
 	}
@@ -239,7 +254,7 @@ func (t *Trojan) ListenPacketContext(ctx context.Context, metadata *C.Metadata) 
 	}
 
 	pc := trojan.NewPacketConn(c)
-	return newPacketConn(pc, t), err
+	return NewPacketConn(pc, t), err
 }
 
 // SupportUOT implements C.ProxyAdapter
@@ -291,12 +306,23 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 	t.dialer = option.NewDialer(t.DialOptions())
 
 	var err error
-	t.realityConfig, err = option.RealityOpts.Parse()
+	t.echConfig, err = option.ECHOpts.Parse()
 	if err != nil {
 		return nil, err
 	}
-
+	t.shadowTLSConfig, err = option.ShadowTLSOpts.Parse()
+	if err != nil {
+		return nil, err
+	}
 	t.restlsConfig, err = option.RestlsOpts.Parse(option.SNI, option.ClientFingerprint)
+	if err != nil {
+		return nil, err
+	}
+	t.jlsConfig, err = option.JLSOpts.Parse()
+	if err != nil {
+		return nil, err
+	}
+	t.realityConfig, err = option.RealityOpts.Parse()
 	if err != nil {
 		return nil, err
 	}
@@ -311,10 +337,21 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 			return nil, errors.New("Restls does not support client certificates")
 		}
 	}
-
-	t.echConfig, err = option.ECHOpts.Parse()
-	if err != nil {
-		return nil, err
+	securityModes := make([]string, 0, 4)
+	if t.shadowTLSConfig != nil {
+		securityModes = append(securityModes, "ShadowTLS")
+	}
+	if t.restlsConfig != nil {
+		securityModes = append(securityModes, "Restls")
+	}
+	if t.jlsConfig != nil {
+		securityModes = append(securityModes, "JLS")
+	}
+	if t.realityConfig != nil {
+		securityModes = append(securityModes, "REALITY")
+	}
+	if len(securityModes) > 1 {
+		return nil, errors.New("security modes are mutually exclusive: " + strings.Join(securityModes, ", "))
 	}
 
 	if option.SSOpts.Enabled {
@@ -350,7 +387,9 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 			ClientFingerprint: option.ClientFingerprint,
 			NextProtos:        []string{"h2"},
 			ECH:               t.echConfig,
+			ShadowTLS:         t.shadowTLSConfig,
 			Restls:            t.restlsConfig,
+			JLS:               t.jlsConfig,
 			Reality:           t.realityConfig,
 		}
 

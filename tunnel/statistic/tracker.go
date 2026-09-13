@@ -131,6 +131,8 @@ func (tt *tcpTracker) Upstream() any {
 }
 
 func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *tcpTracker {
+	metadata.RemoteDst = conn.RemoteDestination()
+
 	tt := &tcpTracker{
 		Conn:    conn,
 		manager: manager,

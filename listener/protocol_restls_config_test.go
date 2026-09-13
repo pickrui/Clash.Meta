@@ -23,13 +23,13 @@ func newProtocolListener(kind, addr string, r LC.ResTLS) (C.MultiAddrListener, e
 	addition := A.WithInName("restls-lifecycle")
 	switch kind {
 	case "anytls":
-		return AT.New(LC.AnyTLSServer{Listen: addr, ResTLS: r, AllowInsecure: true}, tunnel, addition)
+		return AT.New(LC.AnyTLSServer{Listen: addr, ResTLS: r, AllowInsecure: true}, A.NewListenConfig(), tunnel, addition)
 	case "vmess":
-		return VM.New(LC.VmessServer{Listen: addr, ResTLS: r}, tunnel, addition)
+		return VM.New(LC.VmessServer{Listen: addr, ResTLS: r}, A.NewListenConfig(), tunnel, addition)
 	case "vless":
-		return VL.New(LC.VlessServer{Listen: addr, ResTLS: r, AllowInsecure: true}, tunnel, addition)
+		return VL.New(LC.VlessServer{Listen: addr, ResTLS: r, AllowInsecure: true}, A.NewListenConfig(), tunnel, addition)
 	default:
-		return TR.New(LC.TrojanServer{Listen: addr, ResTLS: r, AllowInsecure: true}, tunnel, addition)
+		return TR.New(LC.TrojanServer{Listen: addr, ResTLS: r, AllowInsecure: true}, A.NewListenConfig(), tunnel, addition)
 	}
 }
 

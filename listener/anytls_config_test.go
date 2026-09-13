@@ -2,6 +2,7 @@ package listener
 
 import (
 	"encoding/json"
+	A "github.com/metacubex/mihomo/adapter/inbound"
 	"testing"
 
 	"github.com/metacubex/mihomo/listener/anytls"
@@ -24,7 +25,7 @@ func TestParseAnyTLSOptionalCertificateFields(t *testing.T) {
 }
 
 func TestAnyTLSStillRequiresExplicitInsecureOptIn(t *testing.T) {
-	if listener, err := anytls.New(LC.AnyTLSServer{Listen: "127.0.0.1:0"}, nil); err == nil {
+	if listener, err := anytls.New(LC.AnyTLSServer{Listen: "127.0.0.1:0"}, A.NewListenConfig(), nil); err == nil {
 		_ = listener.Close()
 		t.Fatal("missing certificates accepted without opt-in")
 	}

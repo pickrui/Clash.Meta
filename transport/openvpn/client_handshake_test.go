@@ -20,7 +20,7 @@ import (
 )
 
 // Exercise the real client handshake; no test starts the control watcher itself.
-func TestHandshakeSoftResetUnblocksDataRead(t *testing.T) {
+func TestHandshakeFailedRekeyUnblocksDataRead(t *testing.T) {
 	for _, encrypted := range []bool{false, true} {
 		t.Run(fmt.Sprintf("tlsCrypt=%t", encrypted), func(t *testing.T) {
 			client, server, serverIO := handshakeTestClient(t, encrypted)
@@ -28,7 +28,7 @@ func TestHandshakeSoftResetUnblocksDataRead(t *testing.T) {
 			defer cancel()
 			blockedRead := make(chan error, 1)
 			go func() { _, err := client.ReadIPPacket(ctx); blockedRead <- err }()
-			reset, err := (ControlPacket{Opcode: PControlSoftResetV1, KeyID: 1, LocalSession: server.local, MessageID: 0}).Encode(server.crypt, 100, 1714567890)
+			reset, err := (ControlPacket{Opcode: PControlSoftResetV1, KeyID: 1, LocalSession: server.local, MessageID: 0}).Encode(server.crypt, 100, uint32(time.Now().Unix()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -52,7 +52,7 @@ func TestHandshakeClearsDeadlinesAndAcknowledgesControl(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if _, err := server.Send(ctx, PControlV1, []byte("post-handshake")); err != nil {
+	if _, err := server.Send(ctx, PControlV1, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Read consumes acknowledgements internally and returns only on timeout.
@@ -79,7 +79,7 @@ func TestHandshakeSendsPeerInfo(t *testing.T) {
 		t.Run(fmt.Sprintf("tlsCrypt=%t", encrypted), func(t *testing.T) {
 			handshakeTestClient(t, encrypted, handshakePeerInfo{
 				values: map[string]string{"IV_VER": "custom-client/1", "IV_PROTO": "999", "IV_CIPHERS": "wrong", "UV_DEVICE_ID": "id=001", "IV_HWADDR": "52:54:00:ff:72:87"},
-				want:   "IV_VER=custom-client/1\nIV_PROTO=6\nIV_CIPHERS=AES-128-GCM\nIV_HWADDR=52:54:00:ff:72:87\nUV_DEVICE_ID=id=001\n",
+				want:   "IV_VER=custom-client/1\nIV_PROTO=22\nIV_CIPHERS=AES-128-GCM\nIV_HWADDR=52:54:00:ff:72:87\nUV_DEVICE_ID=id=001\n",
 			})
 		})
 	}
@@ -100,7 +100,7 @@ func handshakeTestClient(t *testing.T, encrypted bool, peerInfo ...handshakePeer
 	if len(peerInfo) > 0 {
 		config.PeerInfo = peerInfo[0].values
 	}
-	var crypt *TLSCrypt
+	var crypt ControlCryptor
 	if encrypted {
 		config.TLSCryptKey = testStaticKey()
 		crypt, err = NewTLSCrypt(testStaticKey(), false)
@@ -117,6 +117,8 @@ func handshakeTestClient(t *testing.T, encrypted bool, peerInfo ...handshakePeer
 	var serverID SessionID
 	copy(serverID[:], "server01")
 	server := NewControlChannel(serverIO, crypt, serverID)
+	server.SetRemoteSessionID(client.control.LocalSessionID())
+	client.rekeyHandshakeTimeout = 100 * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	result := make(chan error, 1)

@@ -48,3 +48,12 @@ across temporary read deadlines. HTTP Upgrade's Hijack aborts a background read;
 discarding a half-read record there could break the authenticated Restls stream.
 The original handshake/fallback reader is unchanged. The deadline regression
 interrupts every byte boundary and verifies both the resumed and following record.
+
+The phase-27 server flow-control fix separates application Write ordering from
+record serialization. A scripted application write waiting for a client record
+must release the record lock so the reader can send a control response and the
+camouflage target can forward TLS records. Publish the awaiting-client state
+before sending the request record, preventing fast replies from being lost.
+`restls_server_flow_control_test.go` deterministically reproduces both failures
+without a network or a 40-second yamux keepalive timeout. Application writes remain
+ordered; control records can progress during a flow-control wait.

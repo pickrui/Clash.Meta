@@ -1,8 +1,8 @@
 package shadowsocks
 
 import (
+	"context"
 	"fmt"
-	LR "github.com/metacubex/mihomo/listener/restls"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -11,6 +11,9 @@ import (
 	N "github.com/metacubex/mihomo/common/net"
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/jls"
+	"github.com/metacubex/mihomo/listener/restls"
+	"github.com/metacubex/mihomo/listener/shadowtls"
 	"github.com/metacubex/mihomo/listener/sing"
 	"github.com/metacubex/mihomo/transport/shadowsocks/core"
 	obfs "github.com/metacubex/mihomo/transport/simple-obfs"
@@ -25,12 +28,11 @@ type Listener struct {
 	pickCipher   core.Cipher
 	handler      *sing.ListenerHandler
 	simpleObfs   func(net.Conn) net.Conn
-	resTLS       *LR.Server
 }
 
 var _listener atomic.Pointer[Listener]
 
-func New(config LC.ShadowsocksServer, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
+func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
 	pickCipher, err := core.PickCipher(config.Cipher, nil, config.Password)
 	if err != nil {
 		return nil, err
@@ -47,14 +49,45 @@ func New(config LC.ShadowsocksServer, tunnel C.Tunnel, additions ...inbound.Addi
 	}
 
 	sl := &Listener{config: config, pickCipher: pickCipher, handler: h}
+	isDefault := len(additions) == 0
 	ready := false
 	defer func() {
 		if !ready {
 			_ = sl.Close()
 		}
 	}()
+
+	securityModes := make([]string, 0, 3)
+	if config.ShadowTLS.Enable {
+		securityModes = append(securityModes, "shadow-tls")
+	}
 	if config.ResTLS.Enable {
-		sl.resTLS, err = LR.New(config.ResTLS, tunnel)
+		securityModes = append(securityModes, "res-tls")
+	}
+	if config.JLSConfig.Enable {
+		securityModes = append(securityModes, "jls")
+	}
+	if len(securityModes) > 1 {
+		return nil, fmt.Errorf("security modes are mutually exclusive: %s", strings.Join(securityModes, ", "))
+	}
+
+	var shadowTLSBuilder *shadowtls.Builder
+	if config.ShadowTLS.Enable {
+		shadowTLSBuilder, err = shadowtls.New(config.ShadowTLS, tunnel)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if config.ResTLS.Enable {
+		if err := restls.Validate(config.ResTLS); err != nil {
+			return nil, err
+		}
+	}
+
+	var jlsBuilder *jls.Builder
+	if config.JLSConfig.Enable {
+		jlsBuilder, err = jls.New(config.JLSConfig, tunnel)
 		if err != nil {
 			return nil, err
 		}
@@ -76,7 +109,7 @@ func New(config LC.ShadowsocksServer, tunnel C.Tunnel, additions ...inbound.Addi
 
 		if config.Udp {
 			//UDP
-			ul, err := NewUDP(addr, pickCipher, tunnel, additions...)
+			ul, err := NewUDP(addr, lc, pickCipher, tunnel, additions...)
 			if err != nil {
 				return nil, err
 			}
@@ -84,9 +117,21 @@ func New(config LC.ShadowsocksServer, tunnel C.Tunnel, additions ...inbound.Addi
 		}
 
 		//TCP
-		l, err := inbound.Listen("tcp", addr)
+		l, err := lc.Listen(context.Background(), "tcp", addr)
 		if err != nil {
 			return nil, err
+		}
+		if shadowTLSBuilder != nil {
+			l = shadowTLSBuilder.NewListener(l)
+		} else if config.ResTLS.Enable {
+			wrapped, wrapErr := restls.NewListener(l, config.ResTLS, tunnel)
+			if wrapErr != nil {
+				_ = l.Close()
+				return nil, wrapErr
+			}
+			l = wrapped
+		} else if jlsBuilder != nil {
+			l = jlsBuilder.NewListener(l)
 		}
 		sl.listeners = append(sl.listeners, l)
 
@@ -105,16 +150,15 @@ func New(config LC.ShadowsocksServer, tunnel C.Tunnel, additions ...inbound.Addi
 	}
 
 	ready = true
-	_listener.Store(sl)
+	if isDefault {
+		_listener.Store(sl)
+	}
 	return sl, nil
 }
 
 func (l *Listener) Close() error {
 	if !l.closed.CompareAndSwap(false, true) {
 		return nil
-	}
-	if l.resTLS != nil {
-		l.resTLS.Close()
 	}
 	var retErr error
 	for _, lis := range l.listeners {
@@ -147,16 +191,12 @@ func (l *Listener) AddrList() (addrList []net.Addr) {
 }
 
 func (l *Listener) HandleConn(conn net.Conn, tunnel C.Tunnel, additions ...inbound.Addition) {
-	if l.closed.Load() {
-		_ = conn.Close()
-		return
+	user, loaded := shadowtls.UserFromConn(conn)
+	if jlsUser, jlsLoaded := jls.UserFromConn(conn); jlsLoaded {
+		user, loaded = jlsUser, true
 	}
-	if l.resTLS != nil {
-		var err error
-		conn, err = l.resTLS.WrapConn(conn)
-		if err != nil {
-			return
-		}
+	if loaded {
+		additions = append(append([]inbound.Addition(nil), additions...), inbound.WithInUser(user))
 	}
 	if l.simpleObfs != nil {
 		conn = l.simpleObfs(conn)
@@ -174,8 +214,8 @@ func (l *Listener) HandleConn(conn net.Conn, tunnel C.Tunnel, additions ...inbou
 }
 
 func HandleShadowSocks(conn net.Conn, tunnel C.Tunnel, additions ...inbound.Addition) bool {
-	if listener := _listener.Load(); listener != nil && !listener.closed.Load() && listener.pickCipher != nil {
-		go listener.HandleConn(conn, tunnel, additions...)
+	if l := _listener.Load(); l != nil && !l.closed.Load() && l.pickCipher != nil {
+		go l.HandleConn(conn, tunnel, additions...)
 		return true
 	}
 	return false

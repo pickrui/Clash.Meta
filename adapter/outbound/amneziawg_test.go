@@ -11,7 +11,7 @@ import (
 	"net/netip"
 	"testing"
 
-	amnezia "github.com/metacubex/amneziawg-go/device"
+	amnezia "github.com/metacubex/amneziawg-go/device_v1"
 	M "github.com/metacubex/sing/common/metadata"
 )
 

@@ -14,13 +14,13 @@ func TestPeerInfoGeneratedFields(t *testing.T) {
 		name, comp, want string
 		values           map[string]string
 	}{
-		{name: "version override and generated fields", comp: CompLzoYes, values: map[string]string{"IV_VER": "custom-client/1.0", "IV_PROTO": "999", "IV_CIPHERS": "unsupported", "IV_LZO": "0", "UV_ID": "id=001"}, want: "IV_VER=custom-client/1.0\nIV_PROTO=6\nIV_LZO=1\nIV_CIPHERS=AES-128-GCM\nUV_ID=id=001\n"},
-		{name: "empty explicit version", values: map[string]string{"IV_VER": ""}, want: "IV_VER=\nIV_PROTO=6\nIV_CIPHERS=AES-128-GCM\n"},
-		{name: "custom LZO without generated LZO", values: map[string]string{"IV_LZO": "0"}, want: "IV_VER=mihomo-openvpn\nIV_PROTO=6\nIV_CIPHERS=AES-128-GCM\nIV_LZO=0\n"},
+		{name: "version override and generated fields", comp: CompLzoYes, values: map[string]string{"IV_VER": "custom-client/1.0", "IV_PROTO": "999", "IV_CIPHERS": "unsupported", "IV_LZO": "0", "UV_ID": "id=001"}, want: "IV_VER=custom-client/1.0\nIV_PROTO=22\nIV_LZO=1\nIV_CIPHERS=AES-128-GCM\nUV_ID=id=001\n"},
+		{name: "empty explicit version", values: map[string]string{"IV_VER": ""}, want: "IV_VER=\nIV_PROTO=22\nIV_CIPHERS=AES-128-GCM\n"},
+		{name: "custom LZO without generated LZO", values: map[string]string{"IV_LZO": "0"}, want: "IV_VER=mihomo-openvpn\nIV_PROTO=22\nIV_CIPHERS=AES-128-GCM\nIV_LZO=0\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for range 10 {
-				require.Equal(t, tc.want, InstallScriptPeerInfo(CipherAES128GCM, tc.comp, tc.values))
+				require.Equal(t, tc.want, InstallScriptPeerInfo(CipherAES128GCM, nil, tc.comp, tc.values))
 			}
 		})
 	}
@@ -46,7 +46,7 @@ func TestPeerInfoRejectsInvalidEntries(t *testing.T) {
 }
 
 func TestPeerInfoLengthAndWireRoundTrip(t *testing.T) {
-	overhead := len(InstallScriptPeerInfo(CipherAES128GCM, "", map[string]string{"UV_DEVICE_ID": ""}))
+	overhead := len(InstallScriptPeerInfo(CipherAES128GCM, nil, "", map[string]string{"UV_DEVICE_ID": ""}))
 	for _, size := range []int{0xfffe - 1, 0xfffe, 0xffff} {
 		t.Run(strconv.Itoa(size), func(t *testing.T) {
 			config := yamlStyleConfig()
@@ -57,7 +57,7 @@ func TestPeerInfoLengthAndWireRoundTrip(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			peerInfo := InstallScriptPeerInfo(config.Cipher, config.CompLZO, config.PeerInfo)
+			peerInfo := InstallScriptPeerInfo(config.Cipher, config.DataCiphers, config.CompLZO, config.PeerInfo)
 			require.Len(t, peerInfo, size)
 			record, err := NewClientKeyMethod2Record("options", peerInfo, "user", "pass")
 			require.NoError(t, err)

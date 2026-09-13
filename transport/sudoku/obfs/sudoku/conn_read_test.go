@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -15,44 +16,46 @@ func TestConnPaddedRequestResponse(t *testing.T) {
 	for _, mode := range []string{"prefer_ascii", "prefer_entropy"} {
 		for _, padding := range []int{0, 100} {
 			t.Run(fmt.Sprintf("%s/padding%d", mode, padding), func(t *testing.T) {
-				left, right := net.Pipe()
-				defer left.Close()
-				defer right.Close()
-				deadline := time.Now().Add(time.Second)
-				_ = left.SetDeadline(deadline)
-				_ = right.SetDeadline(deadline)
-				table := NewTable("request-response-test", mode)
-				client, server := NewConn(left, table, padding, padding, false), NewConn(right, table, padding, padding, false)
-				client.rng, server.rng = newSudokuRand(1), newSudokuRand(2)
-				request := bytes.Repeat([]byte{0x42}, 16)
-				response := []byte("ok")
-				done := make(chan error, 1)
-				go func() {
-					got := make([]byte, len(request))
-					_, err := io.ReadFull(server, got)
-					if err == nil && !bytes.Equal(got, request) {
-						err = fmt.Errorf("request mismatch: %x", got)
+				synctest.Test(t, func(t *testing.T) {
+					left, right := net.Pipe()
+					defer left.Close()
+					defer right.Close()
+					deadline := time.Now().Add(time.Second)
+					_ = left.SetDeadline(deadline)
+					_ = right.SetDeadline(deadline)
+					table := NewTable("request-response-test", mode)
+					client, server := NewConn(left, table, padding, padding, false), NewConn(right, table, padding, padding, false)
+					client.rng, server.rng = newSudokuRand(1), newSudokuRand(2)
+					request := bytes.Repeat([]byte{0x42}, 16)
+					response := []byte("ok")
+					done := make(chan error, 1)
+					go func() {
+						got := make([]byte, len(request))
+						_, err := io.ReadFull(server, got)
+						if err == nil && !bytes.Equal(got, request) {
+							err = fmt.Errorf("request mismatch: %x", got)
+						}
+						if err == nil {
+							_, err = server.Write(response)
+						}
+						done <- err
+					}()
+					_, writeErr := client.Write(request)
+					got := make([]byte, len(response))
+					var readErr error
+					if writeErr == nil {
+						_, readErr = io.ReadFull(client, got)
+					} else {
+						_ = left.Close()
 					}
-					if err == nil {
-						_, err = server.Write(response)
+					serverErr := <-done
+					if writeErr != nil || readErr != nil || serverErr != nil {
+						t.Fatalf("request=%v response=%v server=%v", writeErr, readErr, serverErr)
 					}
-					done <- err
-				}()
-				_, writeErr := client.Write(request)
-				got := make([]byte, len(response))
-				var readErr error
-				if writeErr == nil {
-					_, readErr = io.ReadFull(client, got)
-				} else {
-					_ = left.Close()
-				}
-				serverErr := <-done
-				if writeErr != nil || readErr != nil || serverErr != nil {
-					t.Fatalf("request=%v response=%v server=%v", writeErr, readErr, serverErr)
-				}
-				if !bytes.Equal(got, response) {
-					t.Fatalf("response = %q", got)
-				}
+					if !bytes.Equal(got, response) {
+						t.Fatalf("response = %q", got)
+					}
+				})
 			})
 		}
 	}

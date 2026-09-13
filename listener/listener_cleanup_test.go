@@ -1,6 +1,7 @@
 package listener_test
 
 import (
+	I "github.com/metacubex/mihomo/adapter/inbound"
 	"net"
 	"testing"
 
@@ -15,15 +16,15 @@ import (
 func TestAuthListenerClosesSocketWhenTLSSetupFails(t *testing.T) {
 	constructors := map[string]func(LC.AuthServer, C.Tunnel) error{
 		"http": func(config LC.AuthServer, tunnel C.Tunnel) error {
-			_, err := httpListener.NewWithConfig(config, tunnel)
+			_, err := httpListener.NewWithConfig(config, I.NewListenConfig(), tunnel)
 			return err
 		},
 		"socks": func(config LC.AuthServer, tunnel C.Tunnel) error {
-			_, err := socks.NewWithConfig(config, tunnel)
+			_, err := socks.NewWithConfig(config, I.NewListenConfig(), tunnel)
 			return err
 		},
 		"mixed": func(config LC.AuthServer, tunnel C.Tunnel) error {
-			_, err := mixed.NewWithConfig(config, tunnel)
+			_, err := mixed.NewWithConfig(config, I.NewListenConfig(), tunnel)
 			return err
 		},
 	}
@@ -76,7 +77,7 @@ func TestAnyTLSClosesSocketsWhenSetupFails(t *testing.T) {
 	_, err = anytls.New(LC.AnyTLSServer{
 		Listen:        firstAddress + "," + occupied.Addr().String(),
 		AllowInsecure: true,
-	}, nil)
+	}, I.NewListenConfig(), nil)
 	if err == nil {
 		t.Fatal("expected second address binding to fail")
 	}
@@ -98,7 +99,7 @@ func TestAnyTLSClosesSocketWhenCertificateIsRequired(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = anytls.New(LC.AnyTLSServer{Listen: address}, nil)
+	_, err = anytls.New(LC.AnyTLSServer{Listen: address}, I.NewListenConfig(), nil)
 	if err == nil {
 		t.Fatal("expected certificate policy to reject the listener")
 	}

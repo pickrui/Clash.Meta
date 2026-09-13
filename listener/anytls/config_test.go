@@ -1,6 +1,7 @@
 package anytls
 
 import (
+	I "github.com/metacubex/mihomo/adapter/inbound"
 	LC "github.com/metacubex/mihomo/listener/config"
 	"strings"
 	"testing"
@@ -34,7 +35,7 @@ func TestRestlsRejectsTLSOptions(t *testing.T) {
 				c.ResTLS.Dest = ""
 				want = "dest"
 			}
-			l, err := New(c, nil)
+			l, err := New(c, I.NewListenConfig(), nil)
 			if err == nil {
 				l.Close()
 				t.Fatal("invalid configuration accepted")

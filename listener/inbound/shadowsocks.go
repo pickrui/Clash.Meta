@@ -1,11 +1,11 @@
 package inbound
 
 import (
+	"github.com/metacubex/mihomo/listener/restls"
 	"strings"
 
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
-	LR "github.com/metacubex/mihomo/listener/restls"
 	"github.com/metacubex/mihomo/listener/sing_shadowsocks"
 	"github.com/metacubex/mihomo/log"
 )
@@ -16,8 +16,9 @@ type ShadowSocksOption struct {
 	Cipher     string     `inbound:"cipher"`
 	UDP        bool       `inbound:"udp,omitempty"`
 	MuxOption  MuxOption  `inbound:"mux-option,omitempty"`
-	ResTLS     ResTLS     `inbound:"res-tls,omitempty"`
 	ShadowTLS  ShadowTLS  `inbound:"shadow-tls,omitempty"`
+	ResTLS     ResTLS     `inbound:"res-tls,omitempty"`
+	JLSConfig  JLSConfig  `inbound:"jls-config,omitempty"`
 	KcpTun     KcpTun     `inbound:"kcp-tun,omitempty"`
 	SimpleObfs SimpleObfs `inbound:"simple-obfs,omitempty"`
 }
@@ -47,7 +48,7 @@ type ShadowSocks struct {
 
 func NewShadowSocks(options *ShadowSocksOption) (*ShadowSocks, error) {
 	if options.ResTLS.Enable {
-		if err := LR.Validate(options.ResTLS.Build()); err != nil {
+		if err := restls.Validate(options.ResTLS.Build()); err != nil {
 			return nil, err
 		}
 	}
@@ -67,6 +68,7 @@ func NewShadowSocks(options *ShadowSocksOption) (*ShadowSocks, error) {
 			MuxOption:  options.MuxOption.Build(),
 			ShadowTLS:  options.ShadowTLS.Build(),
 			ResTLS:     options.ResTLS.Build(),
+			JLSConfig:  options.JLSConfig.Build(),
 			KcpTun:     options.KcpTun.Build(),
 			SimpleObfs: options.SimpleObfs.Build(),
 		},
@@ -92,9 +94,8 @@ func (s *ShadowSocks) Address() string {
 // Listen implements constant.InboundListener
 func (s *ShadowSocks) Listen(tunnel C.Tunnel) error {
 	var err error
-	s.l, err = sing_shadowsocks.New(s.ss, tunnel, s.Additions()...)
+	s.l, err = sing_shadowsocks.New(s.ss, s.ListenConfig(), tunnel, s.Additions()...)
 	if err != nil {
-		// The embedded listener may return a typed nil through the interface.
 		s.l = nil
 		return err
 	}

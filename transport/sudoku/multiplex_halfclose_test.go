@@ -100,7 +100,7 @@ func TestMultiplexHalfCloseThroughHandshake(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					mux, err := StartMultiplexClient(conn)
+					mux, err := StartMultiplexClient(ctx, conn)
 					if err != nil {
 						t.Fatal(err)
 					}

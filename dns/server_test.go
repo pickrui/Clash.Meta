@@ -47,7 +47,7 @@ func TestServerTruncatesOnlyUDP(t *testing.T) {
 			if tc.tcp {
 				writer.remote = &net.TCPAddr{}
 			}
-			(&Server{service: largeReplyService{}}).ServeDNS(writer, query)
+			(serverHandler{Server: &Server{service: largeReplyService{}}, isUDP: !tc.tcp}).ServeDNS(writer, query)
 			if len(writer.data) > tc.limit {
 				t.Fatalf("response size %d exceeds %d", len(writer.data), tc.limit)
 			}

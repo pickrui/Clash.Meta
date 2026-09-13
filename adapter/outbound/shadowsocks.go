@@ -5,17 +5,17 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"strings"
 
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/structure"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/ntp"
 	gost "github.com/metacubex/mihomo/transport/gost"
+	"github.com/metacubex/mihomo/transport/jls"
 	"github.com/metacubex/mihomo/transport/kcptun"
 	"github.com/metacubex/mihomo/transport/restls"
+	"github.com/metacubex/mihomo/transport/shadowtls"
 	obfs "github.com/metacubex/mihomo/transport/simple-obfs"
-	shadowtls "github.com/metacubex/mihomo/transport/sing-shadowtls"
 	v2rayObfs "github.com/metacubex/mihomo/transport/v2ray-plugin"
 
 	shadowsocks "github.com/metacubex/sing-shadowsocks2"
@@ -36,6 +36,7 @@ type ShadowSocks struct {
 	gostOption      *gost.Option
 	shadowTLSOption *shadowtls.ShadowTLSOption
 	restlsConfig    *restls.Config
+	jlsConfig       *jls.ClientConfig
 	kcptunClient    *kcptun.Client
 }
 
@@ -114,6 +115,13 @@ type restlsOption struct {
 	ForceTLS12     bool   `obfs:"force-tls12,omitempty"` // for test
 }
 
+type jlsOption struct {
+	Host     string   `obfs:"host"`
+	Username string   `obfs:"username"`
+	Password string   `obfs:"password"`
+	ALPN     []string `obfs:"alpn,omitempty"`
+}
+
 type kcpTunOption struct {
 	Key          string `obfs:"key,omitempty"`
 	Crypt        string `obfs:"crypt,omitempty"`
@@ -174,13 +182,14 @@ func (ss *ShadowSocks) StreamConnContext(ctx context.Context, c net.Conn, metada
 			return nil, fmt.Errorf("%s (restls) connect error: %w", ss.addr, err)
 		}
 		useEarly = true
+	case jls.Mode:
+		c, err = jls.NewClient(ctx, c, ss.jlsConfig)
+		if err != nil {
+			return nil, fmt.Errorf("%s (jls) connect error: %w", ss.addr, err)
+		}
+		useEarly = true
 	}
 	useEarly = useEarly || N.NeedHandshake(c)
-	if ss.obfsMode == restls.Mode && strings.HasPrefix(ss.option.Cipher, "2022-") {
-		// Restls TLS is already established. Publish the 2022 request salt
-		// before handing the connection to concurrent mux readers/writers.
-		useEarly = false
-	}
 	if !useEarly {
 		if ctx.Done() != nil {
 			done := N.SetupContextForConn(ctx, c)
@@ -253,9 +262,9 @@ func (ss *ShadowSocks) ListenPacketContext(ctx context.Context, metadata *C.Meta
 		}
 		destination := M.SocksaddrFromNet(metadata.UDPAddr())
 		if ss.option.UDPOverTCPVersion == uot.LegacyVersion {
-			return newPacketConn(N.NewThreadSafePacketConn(uot.NewConn(c, uot.Request{Destination: destination})), ss), nil
+			return NewPacketConn(N.NewThreadSafePacketConn(uot.NewConn(c, uot.Request{Destination: destination})), ss), nil
 		} else {
-			return newPacketConn(N.NewThreadSafePacketConn(uot.NewLazyConn(c, uot.Request{Destination: destination})), ss), nil
+			return NewPacketConn(N.NewThreadSafePacketConn(uot.NewLazyConn(c, uot.Request{Destination: destination})), ss), nil
 		}
 	}
 	if err := ss.ResolveUDP(ctx, metadata); err != nil {
@@ -267,7 +276,7 @@ func (ss *ShadowSocks) ListenPacketContext(ctx context.Context, metadata *C.Meta
 		return nil, err
 	}
 	pc = ss.method.DialPacketConn(bufio.NewBindPacketConn(pc, addr))
-	return newPacketConn(pc, ss), nil
+	return NewPacketConn(pc, ss), nil
 }
 
 // ProxyInfo implements C.ProxyAdapter
@@ -304,6 +313,7 @@ func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 	var obfsOption *simpleObfsOption
 	var shadowTLSOpt *shadowtls.ShadowTLSOption
 	var restlsConfig *restls.Config
+	var jlsConfig *jls.ClientConfig
 	var kcptunClient *kcptun.Client
 	obfsMode := ""
 
@@ -422,14 +432,25 @@ func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 		}
 		restlsConfig.InsecureSkipVerify = restlsOpt.SkipCertVerify
 		if restlsOpt.Fingerprint != "" {
-			if err := restls.SetFingerprint(restlsConfig, restlsOpt.Fingerprint, restlsOpt.NameCertVerify); err != nil {
+			err = restls.SetFingerprint(restlsConfig, restlsOpt.Fingerprint, restlsOpt.NameCertVerify)
+			if err != nil {
 				return nil, fmt.Errorf("ss %s initialize restls-plugin error: %w", addr, err)
 			}
-		}
-		if restlsOpt.Fingerprint == "" && restlsOpt.NameCertVerify != "" {
+		} else if restlsOpt.NameCertVerify != "" {
 			restls.SetNameCertVerify(restlsConfig, restlsOpt.NameCertVerify)
 		}
 		restlsConfig.ForceTLS12 = restlsOpt.ForceTLS12
+	} else if option.Plugin == jls.Mode {
+		obfsMode = jls.Mode
+		jlsOpt := &jlsOption{}
+		if err := decoder.Decode(option.PluginOpts, jlsOpt); err != nil {
+			return nil, fmt.Errorf("ss %s initialize jls-plugin error: %w", addr, err)
+		}
+		jlsConfig, err = jls.NewClientConfig(jlsOpt.Host, jlsOpt.Username, jlsOpt.Password, jlsOpt.ALPN)
+		if err != nil {
+			return nil, fmt.Errorf("ss %s initialize jls-plugin error: %w", addr, err)
+		}
+		jlsConfig.ClientFingerprint = option.ClientFingerprint
 	} else if option.Plugin == kcptun.Mode {
 		obfsMode = kcptun.Mode
 		kcptunOpt := &kcpTunOption{}
@@ -496,6 +517,7 @@ func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 		obfsOption:      obfsOption,
 		shadowTLSOption: shadowTLSOpt,
 		restlsConfig:    restlsConfig,
+		jlsConfig:       jlsConfig,
 		kcptunClient:    kcptunClient,
 	}
 	outbound.dialer = option.NewDialer(outbound.DialOptions())

@@ -11,17 +11,21 @@ import (
 	"sync/atomic"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
+
 	"github.com/metacubex/mihomo/component/ca"
 	"github.com/metacubex/mihomo/component/ech"
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/jls"
 	"github.com/metacubex/mihomo/listener/restls"
+	"github.com/metacubex/mihomo/listener/shadowtls"
 	"github.com/metacubex/mihomo/listener/sing"
 	"github.com/metacubex/mihomo/ntp"
 	"github.com/metacubex/mihomo/transport/anytls/padding"
 	"github.com/metacubex/mihomo/transport/anytls/session"
 
 	"github.com/metacubex/sing/common/auth"
+
 	M "github.com/metacubex/sing/common/metadata"
 	"github.com/metacubex/tls"
 )
@@ -35,14 +39,7 @@ type Listener struct {
 	padding   atomic.Pointer[padding.PaddingFactory]
 }
 
-func New(config LC.AnyTLSServer, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
-	if len(additions) == 0 {
-		additions = []inbound.Addition{
-			inbound.WithInName("DEFAULT-ANYTLS"),
-			inbound.WithSpecialRules(""),
-		}
-	}
-
+func New(config LC.AnyTLSServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (_ *Listener, err error) {
 	if config.ResTLS.Enable {
 		if config.Certificate != "" || config.PrivateKey != "" {
 			return nil, errors.New("certificate is unavailable in Restls")
@@ -53,10 +50,16 @@ func New(config LC.AnyTLSServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		if config.EchKey != "" {
 			return nil, errors.New("ECH is unavailable in Restls")
 		}
-		if err := restls.Validate(config.ResTLS); err != nil {
-			return nil, err
+	}
+	if len(additions) == 0 {
+		additions = []inbound.Addition{
+			inbound.WithInName("DEFAULT-ANYTLS"),
+			inbound.WithSpecialRules(""),
 		}
 	}
+
+	var shadowTLSBuilder *shadowtls.Builder
+	var jlsBuilder *jls.Builder
 	tlsConfig := &tls.Config{Time: ntp.Now}
 	if config.Certificate != "" && config.PrivateKey != "" {
 		certLoader, err := ca.NewTLSKeyPairLoader(config.Certificate, config.PrivateKey)
@@ -87,8 +90,41 @@ func New(config LC.AnyTLSServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		}
 		tlsConfig.ClientCAs = pool
 	}
-	if !config.ResTLS.Enable && tlsConfig.GetCertificate == nil && !config.AllowInsecure {
-		return nil, errors.New("disallow using AnyTLS without certificates/res-tls/allow-insecure config")
+	if tlsConfig.ClientAuth != tls.NoClientCert && tlsConfig.GetCertificate == nil {
+		return nil, errors.New("client-auth requires certificate")
+	}
+	securityModes := make([]string, 0, 4)
+	if tlsConfig.GetCertificate != nil {
+		securityModes = append(securityModes, "certificate")
+	}
+	if config.ShadowTLS.Enable {
+		securityModes = append(securityModes, "shadow-tls")
+	}
+	if config.ResTLS.Enable {
+		securityModes = append(securityModes, "res-tls")
+	}
+	if config.JLSConfig.Enable {
+		securityModes = append(securityModes, "jls")
+	}
+	if len(securityModes) > 1 {
+		return nil, errors.New("security modes are mutually exclusive: " + strings.Join(securityModes, ", "))
+	}
+	if config.ShadowTLS.Enable {
+		shadowTLSBuilder, err = shadowtls.New(config.ShadowTLS, tunnel)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if config.ResTLS.Enable {
+		if err := restls.Validate(config.ResTLS); err != nil {
+			return nil, err
+		}
+	}
+	if config.JLSConfig.Enable {
+		jlsBuilder, err = jls.New(config.JLSConfig, tunnel)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	sl := &Listener{
@@ -96,12 +132,11 @@ func New(config LC.AnyTLSServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		tlsConfig: tlsConfig,
 		userMap:   make(map[[32]byte]string),
 	}
-	owned := false
-	defer func() {
-		if !owned {
-			_ = sl.Close()
+	defer func(owned *Listener) {
+		if err != nil {
+			_ = owned.Close()
 		}
-	}()
+	}(sl)
 
 	for user, password := range config.Users {
 		sl.userMap[sha256.Sum256([]byte(password))] = user
@@ -129,30 +164,34 @@ func New(config LC.AnyTLSServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		addr := addr
 
 		//TCP
-		l, err := inbound.Listen("tcp", addr)
+		l, err := lc.Listen(context.Background(), "tcp", addr)
 		if err != nil {
 			return nil, err
 		}
-		sl.listeners = append(sl.listeners, l)
-		if config.ResTLS.Enable {
-			l, err = restls.NewListener(l, config.ResTLS, tunnel)
-			if err != nil {
-				return nil, err
+		if shadowTLSBuilder != nil {
+			l = shadowTLSBuilder.NewListener(l)
+		} else if config.ResTLS.Enable {
+			wrapped, wrapErr := restls.NewListener(l, config.ResTLS, tunnel)
+			if wrapErr != nil {
+				_ = l.Close()
+				return nil, wrapErr
 			}
-			sl.listeners[len(sl.listeners)-1] = l
+			l = wrapped
+		} else if jlsBuilder != nil {
+			l = jlsBuilder.NewListener(l)
 		} else if tlsConfig.GetCertificate != nil {
 			l = tls.NewListener(l, tlsConfig)
-			sl.listeners[len(sl.listeners)-1] = l
+		} else if !config.AllowInsecure {
+			_ = l.Close()
+			return nil, errors.New("disallow using AnyTLS without certificates/shadow-tls/res-tls/jls/allow-insecure config")
 		}
-	}
+		sl.listeners = append(sl.listeners, l)
 
-	for _, l := range sl.listeners {
-		l := l
 		go func() {
 			for {
 				c, err := l.Accept()
 				if err != nil {
-					if sl.closed.Load() || errors.Is(err, net.ErrClosed) {
+					if sl.closed.Load() {
 						break
 					}
 					continue
@@ -162,7 +201,6 @@ func New(config LC.AnyTLSServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		}()
 	}
 
-	owned = true
 	return sl, nil
 }
 
@@ -174,7 +212,7 @@ func (l *Listener) Close() error {
 	for _, lis := range l.listeners {
 		err := lis.Close()
 		if err != nil {
-			retErr = errors.Join(retErr, err)
+			retErr = err
 		}
 	}
 	return retErr

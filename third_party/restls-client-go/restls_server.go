@@ -212,7 +212,8 @@ type restlsServerState struct {
 	targetRecordDone chan struct{}
 	targetRecordStop sync.Once
 
-	writeMu sync.Mutex
+	dataWriteMu sync.Mutex // order application writes without blocking control records
+	writeMu     sync.Mutex
 
 	awaitMu           sync.Mutex
 	awaitCond         *sync.Cond
@@ -1307,23 +1308,27 @@ func (s *restlsServerState) readRestlsAppData(record []byte) ([]byte, restlsComm
 }
 
 func (s *restlsServerState) writeRestlsRecords(inbound net.Conn, data []byte) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
 	if len(data) == 0 {
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
 		_, _, err := s.writeOneRestlsRecord(inbound, nil, true)
 		return err
 	}
+	// Keep application Write calls ordered, but permit control and target TLS
+	// records while a script is waiting for the client to send another record.
+	s.dataWriteMu.Lock()
+	defer s.dataWriteMu.Unlock()
 	for len(data) > 0 {
 		if err := s.waitToClientWritable(); err != nil {
 			return err
 		}
-		n, command, err := s.writeOneRestlsRecord(inbound, data, false)
+		s.writeMu.Lock()
+		n, _, err := s.writeOneRestlsRecord(inbound, data, false)
+		s.writeMu.Unlock()
 		if err != nil {
 			return err
 		}
 		data = data[n:]
-		s.maybeAwaitClientRecord(command)
 	}
 	return nil
 }
@@ -1406,7 +1411,14 @@ func (s *restlsServerState) writeOneRestlsRecord(inbound net.Conn, data []byte, 
 		}
 	}
 	s.writeAuthHeader(record, payloadOffset, dataLen, command)
+	// Publish the wait before sending: the peer can reply before Write returns.
+	if !fake {
+		s.maybeAwaitClientRecord(command)
+	}
 	if _, err := inbound.Write(record); err != nil {
+		if !fake {
+			s.noteClientRecord()
+		}
 		return 0, nil, err
 	}
 	s.toClientCounter++

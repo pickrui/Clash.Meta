@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/component/ca"
+	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 
@@ -35,16 +36,9 @@ const (
 	// connections in HTTP transport.
 	transportDefaultIdleConnTimeout = 5 * time.Minute
 
-	// dohMaxConnsPerHost controls the maximum number of connections for
-	// each host.  Note, that setting it to 1 may cause issues with Go's http
-	// implementation, see https://github.com/AdguardTeam/dnsproxy/issues/278.
-	dohMaxConnsPerHost = 2
-	dialTimeout        = 10 * time.Second
+	dialTimeout = 10 * time.Second
 
-	// dohMaxIdleConns controls the maximum number of connections being idle
-	// at the same time.
-	dohMaxIdleConns = 2
-	maxElapsedTime  = time.Second * 30
+	maxElapsedTime = time.Second * 30
 )
 
 var DefaultHTTPVersions = []C.HTTPVersion{C.HTTPVersion11, C.HTTPVersion2}
@@ -75,7 +69,7 @@ type dnsOverHTTPS struct {
 var _ dnsClient = (*dnsOverHTTPS)(nil)
 
 // newDoH returns the DNS-over-HTTPS Upstream.
-func newDoHClient(urlString string, r *Resolver, preferH3 bool, params map[string]string, proxyAdapter C.ProxyAdapter, proxyName string) dnsClient {
+func newDoHClient(urlString string, r resolver.Resolver, preferH3 bool, params map[string]string, proxyAdapter C.ProxyAdapter, proxyName string) dnsClient {
 	u, _ := url.Parse(urlString)
 	httpVersions := DefaultHTTPVersions
 	if preferH3 {
@@ -393,8 +387,6 @@ func (doh *dnsOverHTTPS) createTransport(ctx context.Context) (t http.RoundTripp
 		DisableCompression: true,
 		DialContext:        doh.dialer.DialContext,
 		IdleConnTimeout:    transportDefaultIdleConnTimeout,
-		MaxConnsPerHost:    dohMaxConnsPerHost,
-		MaxIdleConns:       dohMaxIdleConns,
 	}
 
 	if doh.url.Scheme == "http" {

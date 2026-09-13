@@ -1,6 +1,7 @@
 package shadowsocks
 
 import (
+	"context"
 	"net"
 	"sync/atomic"
 
@@ -18,8 +19,8 @@ type UDPListener struct {
 	closed     atomic.Bool
 }
 
-func NewUDP(addr string, pickCipher core.Cipher, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPListener, error) {
-	l, err := inbound.ListenPacket("udp", addr)
+func NewUDP(addr string, lc C.InboundListenConfig, pickCipher core.Cipher, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPListener, error) {
+	l, err := lc.ListenPacket(context.Background(), "udp", addr)
 	if err != nil {
 		return nil, err
 	}

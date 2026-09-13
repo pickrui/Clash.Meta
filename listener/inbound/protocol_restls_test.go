@@ -13,7 +13,7 @@ func protocolRestlsOptions() (inbound.ResTLS, outbound.RestlsOptions) {
 		outbound.RestlsOptions{Password: "restls-password", VersionHint: "tls13"}
 }
 
-func TestInboundVMess_Restls(t *testing.T) {
+func TestInboundVMess_RestlsRegression(t *testing.T) {
 	for _, network := range []string{"tcp", "ws", "ws-early", "http-upgrade", "grpc"} {
 		t.Run(network, func(t *testing.T) {
 			server, client := protocolRestlsOptions()
@@ -39,7 +39,7 @@ func TestInboundVMess_Restls(t *testing.T) {
 	}
 }
 
-func TestInboundVless_Restls(t *testing.T) {
+func TestInboundVless_RestlsRegression(t *testing.T) {
 	for _, network := range []string{"tcp", "ws", "ws-early", "http-upgrade", "grpc"} {
 		t.Run(network, func(t *testing.T) {
 			server, client := protocolRestlsOptions()
@@ -78,7 +78,7 @@ func TestInboundVless_Restls(t *testing.T) {
 	}
 }
 
-func TestInboundTrojan_Restls(t *testing.T) {
+func TestInboundTrojan_RestlsRegression(t *testing.T) {
 	for _, network := range []string{"tcp", "ws", "ws-early", "http-upgrade", "grpc"} {
 		t.Run(network, func(t *testing.T) {
 			server, client := protocolRestlsOptions()

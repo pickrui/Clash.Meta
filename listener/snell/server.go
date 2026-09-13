@@ -2,8 +2,8 @@ package snell
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,11 +11,16 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/utils"
 	C "github.com/metacubex/mihomo/constant"
+	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/jls"
+	"github.com/metacubex/mihomo/listener/restls"
+	"github.com/metacubex/mihomo/listener/shadowtls"
 	"github.com/metacubex/mihomo/transport/shadowsocks/shadowaead"
 	obfs "github.com/metacubex/mihomo/transport/simple-obfs"
 	"github.com/metacubex/mihomo/transport/snell"
@@ -23,31 +28,19 @@ import (
 
 const maxPacketLength = 0x3fff
 
-type Config struct {
-	Listen   string
-	Psk      string
-	Version  int
-	UDP      bool
-	ObfsMode string
-	ObfsHost string
-}
-
-func (c Config) String() string {
-	b, _ := json.Marshal(c)
-	return string(b)
-}
-
 type Listener struct {
-	closed    bool
-	config    Config
+	closed    atomic.Bool
+	config    LC.SnellServer
 	listeners []net.Listener
 }
 
-func New(config Config, tunnel C.Tunnel, additions ...inbound.Addition) (C.MultiAddrListener, error) {
+func New(config LC.SnellServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (C.MultiAddrListener, error) {
 	if config.Version == 0 {
 		config.Version = snell.Version4
 	}
-	if config.Version != snell.Version4 && config.Version != snell.Version5 {
+	switch config.Version {
+	case snell.Version1, snell.Version2, snell.Version3, snell.Version4, snell.Version5:
+	default:
 		return nil, fmt.Errorf("snell inbound version %d is not supported", config.Version)
 	}
 	if config.Psk == "" {
@@ -60,22 +53,71 @@ func New(config Config, tunnel C.Tunnel, additions ...inbound.Addition) (C.Multi
 	}
 
 	l := &Listener{config: config}
+
+	securityModes := make([]string, 0, 3)
+	if config.ShadowTLS.Enable {
+		securityModes = append(securityModes, "shadow-tls")
+	}
+	if config.ResTLS.Enable {
+		securityModes = append(securityModes, "res-tls")
+	}
+	if config.JLSConfig.Enable {
+		securityModes = append(securityModes, "jls")
+	}
+	if len(securityModes) > 1 {
+		return nil, errors.New("security modes are mutually exclusive: " + strings.Join(securityModes, ", "))
+	}
+
+	var shadowTLSBuilder *shadowtls.Builder
+	if config.ShadowTLS.Enable {
+		var err error
+		shadowTLSBuilder, err = shadowtls.New(config.ShadowTLS, tunnel)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if config.ResTLS.Enable {
+		if err := restls.Validate(config.ResTLS); err != nil {
+			return nil, err
+		}
+	}
+	var jlsBuilder *jls.Builder
+	if config.JLSConfig.Enable {
+		var err error
+		jlsBuilder, err = jls.New(config.JLSConfig, tunnel)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for _, addr := range strings.Split(config.Listen, ",") {
 		addr = strings.TrimSpace(addr)
 		if addr == "" {
 			continue
 		}
-		ln, err := inbound.Listen("tcp", addr)
+		ln, err := lc.Listen(context.Background(), "tcp", addr)
 		if err != nil {
 			_ = l.Close()
 			return nil, err
+		}
+		if shadowTLSBuilder != nil {
+			ln = shadowTLSBuilder.NewListener(ln)
+		} else if config.ResTLS.Enable {
+			wrapped, wrapErr := restls.NewListener(ln, config.ResTLS, tunnel)
+			if wrapErr != nil {
+				_ = ln.Close()
+				_ = l.Close()
+				return nil, wrapErr
+			}
+			ln = wrapped
+		} else if jlsBuilder != nil {
+			ln = jlsBuilder.NewListener(ln)
 		}
 		l.listeners = append(l.listeners, ln)
 		go func(ln net.Listener) {
 			for {
 				conn, err := ln.Accept()
 				if err != nil {
-					if l.closed {
+					if l.closed.Load() {
 						return
 					}
 					continue
@@ -88,7 +130,9 @@ func New(config Config, tunnel C.Tunnel, additions ...inbound.Addition) (C.Multi
 }
 
 func (l *Listener) Close() error {
-	l.closed = true
+	if !l.closed.CompareAndSwap(false, true) {
+		return nil
+	}
 	var retErr error
 	for _, ln := range l.listeners {
 		if err := ln.Close(); err != nil {
@@ -111,7 +155,13 @@ func (l *Listener) AddrList() (addrList []net.Addr) {
 
 func (l *Listener) HandleConn(rawConn net.Conn, tunnel C.Tunnel, additions ...inbound.Addition) {
 	defer rawConn.Close()
-
+	user, loaded := shadowtls.UserFromConn(rawConn)
+	if jlsUser, jlsLoaded := jls.UserFromConn(rawConn); jlsLoaded {
+		user, loaded = jlsUser, true
+	}
+	if loaded {
+		additions = append(append([]inbound.Addition(nil), additions...), inbound.WithInUser(user))
+	}
 	conn := rawConn
 	switch l.config.ObfsMode {
 	case "http":

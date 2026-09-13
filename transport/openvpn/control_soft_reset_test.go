@@ -7,12 +7,12 @@ import (
 	"time"
 )
 
-func TestClientClosesOnSoftReset(t *testing.T) {
+func TestLegacyClientClosesOnSoftReset(t *testing.T) {
 	for _, name := range []string{"plain", "tls-crypt"} {
 		t.Run(name, func(t *testing.T) {
 			var (
 				config      ClientConfig
-				serverCrypt *TLSCrypt
+				serverCrypt ControlCryptor
 				err         error
 			)
 			switch name {
@@ -63,7 +63,7 @@ func TestClientClosesOnSoftReset(t *testing.T) {
 				KeyID:        1,
 				LocalSession: serverID,
 				MessageID:    0,
-			}).Encode(serverCrypt, 3, 1714567890)
+			}).Encode(serverCrypt, 3, uint32(time.Now().Unix()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -95,7 +95,7 @@ func TestClientClosesOnSoftReset(t *testing.T) {
 	}
 }
 
-func TestClientControlWatcherIgnoresInvalidPackets(t *testing.T) {
+func TestLegacyClientControlWatcherIgnoresInvalidPackets(t *testing.T) {
 	var serverID SessionID
 	copy(serverID[:], []byte("server01"))
 	var otherID SessionID

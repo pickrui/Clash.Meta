@@ -2,7 +2,7 @@ package updater
 
 import (
 	"context"
-	"time"
+	"sync"
 
 	"github.com/metacubex/mihomo/log"
 )
@@ -17,51 +17,37 @@ func sendGeoUpdateStatus(geoType string, updating bool, skipped bool, updateErr 
 	}
 }
 
-var geoUpdateCancel context.CancelFunc
+var (
+	geoUpdateMutex  sync.Mutex
+	geoUpdateCancel context.CancelFunc
+)
+
+func StopGeoUpdater() {
+	geoUpdateMutex.Lock()
+	defer geoUpdateMutex.Unlock()
+	stopGeoUpdater()
+}
+
+func stopGeoUpdater() {
+	if geoUpdateCancel == nil {
+		return
+	}
+	geoUpdateCancel()
+	geoUpdateCancel = nil
+}
 
 func RegisterGeoUpdaterWithCancel() {
-	if geoUpdateCancel != nil {
-		geoUpdateCancel()
-	}
+	geoUpdateMutex.Lock()
+	defer geoUpdateMutex.Unlock()
+
+	stopGeoUpdater()
 
 	if updateInterval <= 0 {
-		log.Errorln("[GEO] Invalid update interval: %d", updateInterval)
+		log.Infoln("[GEO] Invalid update interval: %d", updateInterval)
 		return
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	geoUpdateCancel = cancel
-
-	go func() {
-		ticker := time.NewTicker(time.Duration(updateInterval) * time.Hour)
-		defer ticker.Stop()
-
-		lastUpdate, err := getUpdateTime()
-		if err != nil {
-			log.Errorln("[GEO] Get GEO database update time error: %s", err.Error())
-			return
-		}
-
-		log.Infoln("[GEO] last update time %s", lastUpdate)
-		if lastUpdate.Add(time.Duration(updateInterval) * time.Hour).Before(time.Now()) {
-			log.Infoln("[GEO] Database has not been updated for %v, update now", time.Duration(updateInterval)*time.Hour)
-			if err := UpdateGeoDatabases(); err != nil {
-				log.Errorln("[GEO] Failed to update GEO database: %s", err.Error())
-				return
-			}
-		}
-
-		for {
-			select {
-			case <-ctx.Done():
-				log.Infoln("[GEO] Geo updater stopped")
-				return
-			case <-ticker.C:
-				log.Infoln("[GEO] updating database every %d hours", updateInterval)
-				if err := UpdateGeoDatabases(); err != nil {
-					log.Errorln("[GEO] Failed to update GEO database: %s", err.Error())
-				}
-			}
-		}
-	}()
+	registerGeoUpdater(ctx)
 }

@@ -42,6 +42,7 @@ const (
 	MIERU
 	SUDOKU
 	TRUSTTUNNEL
+	SHADOWQUIC
 	INNER
 )
 
@@ -121,6 +122,8 @@ func (t Type) String() string {
 		return "Sudoku"
 	case TRUSTTUNNEL:
 		return "TrustTunnel"
+	case SHADOWQUIC:
+		return "ShadowQuic"
 	case INNER:
 		return "Inner"
 	default:
@@ -169,6 +172,8 @@ func ParseType(t string) (*Type, error) {
 		res = SUDOKU
 	case "TRUSTTUNNEL":
 		res = TRUSTTUNNEL
+	case "SHADOWQUIC":
+		res = SHADOWQUIC
 	case "INNER":
 		res = INNER
 	default:
@@ -197,6 +202,7 @@ type Metadata struct {
 	InPort       uint16     `json:"inboundPort,string"` // `,string` is used to compatible with old version json output
 	InName       string     `json:"inboundName"`
 	InUser       string     `json:"inboundUser"`
+	RematchName  string     `json:"rematchName"`
 	Host         string     `json:"host"`
 	DNSMode      DNSMode    `json:"dnsMode"`
 	Uid          uint32     `json:"uid"`

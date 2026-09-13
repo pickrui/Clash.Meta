@@ -1,6 +1,7 @@
 package trojan
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -15,8 +16,10 @@ import (
 	"github.com/metacubex/mihomo/component/ech"
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/jls"
 	"github.com/metacubex/mihomo/listener/reality"
 	"github.com/metacubex/mihomo/listener/restls"
+	"github.com/metacubex/mihomo/listener/shadowtls"
 	"github.com/metacubex/mihomo/listener/sing"
 	"github.com/metacubex/mihomo/ntp"
 	"github.com/metacubex/mihomo/transport/gun"
@@ -39,7 +42,18 @@ type Listener struct {
 	handler    *sing.ListenerHandler
 }
 
-func New(config LC.TrojanServer, tunnel C.Tunnel, additions ...inbound.Addition) (_ *Listener, err error) {
+func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (_ *Listener, err error) {
+	if config.ResTLS.Enable {
+		if config.Certificate != "" || config.PrivateKey != "" {
+			return nil, errors.New("certificate is unavailable in Restls")
+		}
+		if ca.ClientAuthTypeFromString(config.ClientAuthType) != tls.NoClientCert || config.ClientAuthCert != "" {
+			return nil, errors.New("client-auth is unavailable in Restls")
+		}
+		if config.EchKey != "" {
+			return nil, errors.New("ECH is unavailable in Restls")
+		}
+	}
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-TROJAN"),
@@ -75,17 +89,19 @@ func New(config LC.TrojanServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		}
 	}
 	sl := &Listener{config: config, keys: keys, pickCipher: pickCipher, handler: h}
-	defer func() {
+	defer func(owned *Listener) {
 		if err != nil {
-			_ = sl.Close()
+			_ = owned.Close()
 		}
-	}()
+	}(sl)
 
 	httpServer := http.Server{
 		IdleTimeout: 30 * time.Second,
 		Protocols:   new(http.Protocols),
 	}
 	tlsConfig := &tls.Config{Time: ntp.Now}
+	var shadowTLSBuilder *shadowtls.Builder
+	var jlsBuilder *jls.Builder
 	var realityBuilder *reality.Builder
 
 	if config.Certificate != "" && config.PrivateKey != "" {
@@ -117,36 +133,51 @@ func New(config LC.TrojanServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		}
 		tlsConfig.ClientCAs = pool
 	}
+	if tlsConfig.ClientAuth != tls.NoClientCert && tlsConfig.GetCertificate == nil {
+		return nil, errors.New("client-auth requires certificate")
+	}
+	securityModes := make([]string, 0, 5)
+	if tlsConfig.GetCertificate != nil {
+		securityModes = append(securityModes, "certificate")
+	}
 	if config.RealityConfig.PrivateKey != "" {
-		if tlsConfig.GetCertificate != nil {
-			return nil, errors.New("certificate is unavailable in reality")
-		}
-		if tlsConfig.ClientAuth != tls.NoClientCert {
-			return nil, errors.New("client-auth is unavailable in reality")
-		}
+		securityModes = append(securityModes, "reality")
+	}
+	if config.ShadowTLS.Enable {
+		securityModes = append(securityModes, "shadow-tls")
+	}
+	if config.ResTLS.Enable {
+		securityModes = append(securityModes, "res-tls")
+	}
+	if config.JLSConfig.Enable {
+		securityModes = append(securityModes, "jls")
+	}
+	if len(securityModes) > 1 {
+		return nil, errors.New("security modes are mutually exclusive: " + strings.Join(securityModes, ", "))
+	}
+	if config.RealityConfig.PrivateKey != "" {
 		realityBuilder, err = config.RealityConfig.Build(tunnel)
 		if err != nil {
 			return nil, err
 		}
 	}
+	if config.ShadowTLS.Enable {
+		shadowTLSBuilder, err = shadowtls.New(config.ShadowTLS, tunnel)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if config.ResTLS.Enable {
-		if config.Certificate != "" || config.PrivateKey != "" {
-			return nil, errors.New("certificate is unavailable in Restls")
-		}
-		if tlsConfig.ClientAuth != tls.NoClientCert {
-			return nil, errors.New("client-auth is unavailable in Restls")
-		}
-		if realityBuilder != nil {
-			return nil, errors.New("REALITY is unavailable in Restls")
-		}
-		if config.EchKey != "" {
-			return nil, errors.New("ECH is unavailable in Restls")
-		}
 		if err := restls.Validate(config.ResTLS); err != nil {
 			return nil, err
 		}
 	}
-
+	if config.JLSConfig.Enable {
+		jlsBuilder, err = jls.New(config.JLSConfig, tunnel)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if config.WsPath != "" {
 		httpMux := http.NewServeMux()
 		httpMux.HandleFunc(config.WsPath, func(w http.ResponseWriter, r *http.Request) {
@@ -181,29 +212,32 @@ func New(config LC.TrojanServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		tlsConfig.NextProtos = append([]string{"h2"}, tlsConfig.NextProtos...) // h2 must before http/1.1
 	}
 
-	if !config.ResTLS.Enable && realityBuilder == nil && tlsConfig.GetCertificate == nil && !config.TrojanSSOption.Enabled && !config.AllowInsecure {
-		return nil, errors.New("Trojan requires certificates, res-tls, reality, ss or allow-insecure")
-	}
-
 	for _, addr := range strings.Split(config.Listen, ",") {
 		addr := addr
 
 		//TCP
-		l, err := inbound.Listen("tcp", addr)
+		l, err := lc.Listen(context.Background(), "tcp", addr)
 		if err != nil {
 			return nil, err
 		}
-		if config.ResTLS.Enable {
+		if shadowTLSBuilder != nil {
+			l = shadowTLSBuilder.NewListener(l)
+		} else if config.ResTLS.Enable {
 			wrapped, wrapErr := restls.NewListener(l, config.ResTLS, tunnel)
 			if wrapErr != nil {
 				_ = l.Close()
 				return nil, wrapErr
 			}
 			l = wrapped
+		} else if jlsBuilder != nil {
+			l = jlsBuilder.NewListener(l)
 		} else if realityBuilder != nil {
 			l = realityBuilder.NewListener(l)
 		} else if tlsConfig.GetCertificate != nil {
 			l = tls.NewListener(l, tlsConfig)
+		} else if !config.TrojanSSOption.Enabled && !config.AllowInsecure {
+			_ = l.Close()
+			return nil, errors.New("disallow using Trojan without any certificates/shadow-tls/res-tls/jls/reality/ss/allow-insecure config")
 		}
 		sl.listeners = append(sl.listeners, l)
 
@@ -215,7 +249,7 @@ func New(config LC.TrojanServer, tunnel C.Tunnel, additions ...inbound.Addition)
 			for {
 				c, err := l.Accept()
 				if err != nil {
-					if sl.closed.Load() || errors.Is(err, net.ErrClosed) {
+					if sl.closed.Load() {
 						break
 					}
 					continue

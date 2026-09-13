@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -47,6 +49,7 @@ var realityShortid = "10f897e26c4b9478"
 var realityRealDial = false
 var echPublicSni = "public.sni"
 var echConfigBase64, echKeyPem, _ = ech.GenECHConfig(echPublicSni)
+var winGo120 = runtime.GOOS == "windows" && strings.HasPrefix(runtime.Version(), "go1.20")
 
 func init() {
 	rand.Read(httpData)
@@ -175,7 +178,7 @@ func NewHttpTestTunnel() *TestTunnel {
 	ln := &TestTunnelListener{ch: make(chan net.Conn), ctx: ctx, cancel: cancel, addr: net.TCPAddrFromAddrPort(netip.AddrPortFrom(remoteAddr, 0))}
 
 	r := chi.NewRouter()
-	r.Get(httpPath, func(w http.ResponseWriter, r *http.Request) {
+	r.Post(httpPath, func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		size, err := strconv.Atoi(query.Get("size"))
 		if err != nil {
@@ -191,7 +194,7 @@ func NewHttpTestTunnel() *TestTunnel {
 	//_ = http.Http2ConfigureServer(&server, h2Server)
 	go server.Serve(ln)
 	testFn := func(t *testing.T, proxy C.ProxyAdapter, proto string, size int) {
-		req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s://%s%s?size=%d", proto, remoteAddr, httpPath, size), bytes.NewReader(httpData[:size]))
+		req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s://%s%s?size=%d", proto, remoteAddr, httpPath, size), bytes.NewReader(httpData[:size]))
 		if !assert.NoError(t, err) {
 			return
 		}

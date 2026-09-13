@@ -17,6 +17,9 @@ import (
 	"github.com/metacubex/mihomo/component/ech/echparser"
 	tlsC "github.com/metacubex/mihomo/component/tls"
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/transport/jls"
+	"github.com/metacubex/mihomo/transport/restls"
+	newshadowtls "github.com/metacubex/mihomo/transport/shadowtls"
 	obfs "github.com/metacubex/mihomo/transport/simple-obfs"
 	shadowtls "github.com/metacubex/mihomo/transport/sing-shadowtls"
 	"github.com/metacubex/mihomo/transport/snell"
@@ -32,6 +35,9 @@ type Snell struct {
 	pool                  *snell.Pool
 	obfsOption            *snellObfsOption
 	echTLS                *vmess.TLSConfig
+	obfsShadowTLS         *newshadowtls.ShadowTLSOption
+	restlsConfig          *restls.Config
+	jlsConfig             *jls.ClientConfig
 	shadowTLS             *shadowtls.ShadowTLSOption
 	echTLSIdentityVersion int
 	echTLSLegacyFallback  bool
@@ -290,9 +296,26 @@ func snellStreamConn(c net.Conn, option streamOption) (*snell.Snell, error) {
 	return snell.StreamConn(c, option.psk, option.version), nil
 }
 
+func (s *Snell) wrapObfsContext(ctx context.Context, c net.Conn) (net.Conn, error) {
+	switch s.obfsOption.Mode {
+	case newshadowtls.Mode:
+		return newshadowtls.NewShadowTLS(ctx, c, s.obfsShadowTLS)
+	case restls.Mode:
+		return restls.NewRestls(ctx, c, s.restlsConfig)
+	case jls.Mode:
+		return jls.NewClient(ctx, c, s.jlsConfig)
+	default:
+		return c, nil
+	}
+}
+
 // StreamConnContext implements C.ProxyAdapter
 func (s *Snell) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.Metadata) (net.Conn, error) {
-	c, err := snellStreamConn(c, streamOption{
+	wrapped, err := s.wrapObfsContext(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	c, err = snellStreamConn(wrapped, streamOption{
 		psk:             s.psk,
 		version:         s.version,
 		addr:            s.addr,
@@ -380,7 +403,7 @@ func (s *Snell) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 	}
 
 	pc := snell.PacketConn(c)
-	return newPacketConn(pc, s), nil
+	return NewPacketConn(pc, s), nil
 }
 
 func (s *Snell) dialSnellTransport(ctx context.Context) (net.Conn, error) {
@@ -432,20 +455,92 @@ func NewSnell(option SnellOption) (*Snell, error) {
 
 	decoder := structure.NewDecoder(structure.Option{TagName: "obfs", WeaklyTypedInput: true})
 	obfsOption := &snellObfsOption{}
-	if err := decoder.Decode(option.ObfsOpts, obfsOption); err != nil {
+	simpleOption := &simpleObfsOption{}
+	if err := decoder.Decode(option.ObfsOpts, simpleOption); err != nil {
+		return nil, err
+	}
+	newMode := simpleOption.Mode == newshadowtls.Mode || simpleOption.Mode == restls.Mode || simpleOption.Mode == jls.Mode
+	decodeOption := any(obfsOption)
+	if newMode {
+		decodeOption = simpleOption
+	}
+	if err := decoder.Decode(option.ObfsOpts, decodeOption); err != nil {
 		return nil, fmt.Errorf("snell %s initialize obfs error: %w", addr, err)
 	}
 
-	shadowTLSOption, err := snellShadowTLSOption(option)
+	if newMode {
+		obfsOption.Mode, obfsOption.Host = simpleOption.Mode, simpleOption.Host
+	}
+	legacyShadowTLSOption, err := snellShadowTLSOption(option)
 	if err != nil {
 		return nil, fmt.Errorf("snell %s initialize shadow-tls error: %w", addr, err)
 	}
+	var shadowTLSOpt *newshadowtls.ShadowTLSOption
+	var restlsConfig *restls.Config
+	var jlsConfig *jls.ClientConfig
 	switch obfsOption.Mode {
+	case newshadowtls.Mode:
+		opt := &shadowTLSOption{
+			Version: 2,
+		}
+		if err := decoder.Decode(option.ObfsOpts, opt); err != nil {
+			return nil, fmt.Errorf("snell %s initialize shadow-tls-plugin error: %w", addr, err)
+		}
+
+		shadowTLSOpt = &newshadowtls.ShadowTLSOption{
+			Password:          opt.Password,
+			Host:              opt.Host,
+			Fingerprint:       opt.Fingerprint,
+			Certificate:       opt.Certificate,
+			PrivateKey:        opt.PrivateKey,
+			ClientFingerprint: option.ClientFingerprint,
+			SkipCertVerify:    opt.SkipCertVerify,
+			NameCertVerify:    opt.NameCertVerify,
+			Version:           opt.Version,
+		}
+
+		if opt.ALPN != nil { // structure's Decode will ensure value not nil when input has value even it was set an empty array
+			shadowTLSOpt.ALPN = opt.ALPN
+		} else {
+			shadowTLSOpt.ALPN = newshadowtls.DefaultALPN
+		}
+	case restls.Mode:
+		opt := &restlsOption{}
+		if err := decoder.Decode(option.ObfsOpts, opt); err != nil {
+			return nil, fmt.Errorf("snell %s initialize restls-plugin error: %w", addr, err)
+		}
+
+		var err error
+		restlsConfig, err = restls.NewRestlsConfig(opt.Host, opt.Password, opt.VersionHint, opt.RestlsScript, option.ClientFingerprint)
+		if err != nil {
+			return nil, fmt.Errorf("snell %s initialize restls-plugin error: %w", addr, err)
+		}
+		restlsConfig.InsecureSkipVerify = opt.SkipCertVerify
+		if opt.Fingerprint != "" {
+			if err = restls.SetFingerprint(restlsConfig, opt.Fingerprint, opt.NameCertVerify); err != nil {
+				return nil, fmt.Errorf("snell %s initialize restls-plugin error: %w", addr, err)
+			}
+		} else if opt.NameCertVerify != "" {
+			restls.SetNameCertVerify(restlsConfig, opt.NameCertVerify)
+		}
+		restlsConfig.ForceTLS12 = opt.ForceTLS12
+	case jls.Mode:
+		opt := &jlsOption{}
+		if err := decoder.Decode(option.ObfsOpts, opt); err != nil {
+			return nil, fmt.Errorf("snell %s initialize jls-plugin error: %w", addr, err)
+		}
+
+		var err error
+		jlsConfig, err = jls.NewClientConfig(opt.Host, opt.Username, opt.Password, opt.ALPN)
+		if err != nil {
+			return nil, fmt.Errorf("snell %s initialize jls-plugin error: %w", addr, err)
+		}
+		jlsConfig.ClientFingerprint = option.ClientFingerprint
 	case "tls", "http", "ech-tls", "":
 	default:
 		return nil, fmt.Errorf("snell %s obfs mode error: %s", addr, obfsOption.Mode)
 	}
-	if shadowTLSOption != nil && obfsOption.Mode != "" {
+	if legacyShadowTLSOption != nil && obfsOption.Mode != "" {
 		return nil, fmt.Errorf("snell %s shadow-tls and obfs mode %s are mutually exclusive", addr, obfsOption.Mode)
 	}
 	if obfsOption.Host == "" && (obfsOption.Mode == "tls" || obfsOption.Mode == "http") {
@@ -478,7 +573,7 @@ func NewSnell(option SnellOption) (*Snell, error) {
 
 	// backward compatible
 	if option.Version == 0 {
-		if requiresSnellV4Identity(obfsOption.Mode, shadowTLSOption) {
+		if requiresSnellV4Identity(obfsOption.Mode, legacyShadowTLSOption) {
 			option.Version = snell.Version4
 		} else {
 			option.Version = snell.DefaultSnellVersion
@@ -489,7 +584,7 @@ func NewSnell(option SnellOption) (*Snell, error) {
 		option.Version = snell.Version4
 	}
 	identity := option.Identity
-	if requiresSnellV4Identity(obfsOption.Mode, shadowTLSOption) && option.Version == snell.Version4 {
+	if requiresSnellV4Identity(obfsOption.Mode, legacyShadowTLSOption) && option.Version == snell.Version4 {
 		if option.IdentityConfigured && !option.Identity {
 			return nil, fmt.Errorf("snell %s identity cannot be disabled with ech-tls or shadow-tls", addr)
 		}
@@ -519,13 +614,14 @@ func NewSnell(option SnellOption) (*Snell, error) {
 			RoutingMark:  option.RoutingMark,
 			Prefer:       option.IPVersion,
 		}),
-		option:                &option,
-		psk:                   psk,
-		obfsOption:            obfsOption,
-		identity:              identity,
-		version:               option.Version,
-		reuse:                 reuse,
-		shadowTLS:             shadowTLSOption,
+		option:        &option,
+		psk:           psk,
+		obfsOption:    obfsOption,
+		identity:      identity,
+		version:       option.Version,
+		reuse:         reuse,
+		shadowTLS:     legacyShadowTLSOption,
+		obfsShadowTLS: shadowTLSOpt, restlsConfig: restlsConfig, jlsConfig: jlsConfig,
 		echTLSIdentityVersion: obfsOption.IdentityVersion,
 		echTLSLegacyFallback:  obfsOption.LegacyFallback,
 	}
@@ -563,7 +659,12 @@ func NewSnell(option SnellOption) (*Snell, error) {
 				return nil, err
 			}
 
-			stream, err := snellStreamConn(c, streamOption{
+			wrapped, err := s.wrapObfsContext(ctx, c)
+			if err != nil {
+				_ = c.Close()
+				return nil, err
+			}
+			stream, err := snellStreamConn(wrapped, streamOption{
 				psk:             psk,
 				version:         option.Version,
 				addr:            addr,
@@ -576,7 +677,9 @@ func NewSnell(option SnellOption) (*Snell, error) {
 				_ = c.Close()
 				return nil, err
 			}
-			if s.version == snell.Version4 {
+			// The oix identity transport keeps a ping connection reusable. A plain
+			// upstream Snell server closes it after pong, so only prewarm identity sessions.
+			if s.version == snell.Version4 && s.identity {
 				if err = stream.Warmup(); err != nil {
 					_ = stream.Close()
 					return nil, err

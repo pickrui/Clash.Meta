@@ -24,6 +24,7 @@ type overrideSchema struct {
 	AdditionalPrefix *string                   `provider:"additional-prefix,omitempty"`
 	AdditionalSuffix *string                   `provider:"additional-suffix,omitempty"`
 	ProxyName        []overrideProxyNameSchema `provider:"proxy-name,omitempty"`
+	OverrideExpr     []OverrideExpr            `provider:"override-expr,omitempty"`
 }
 
 type overrideProxyNameSchema struct {
@@ -86,6 +87,11 @@ func (o *overrideSchema) Apply(mapping map[string]any) error {
 	}
 	if o.AdditionalSuffix != nil {
 		mapping["name"] = fmt.Sprintf("%s%s", mapping["name"], *o.AdditionalSuffix)
+	}
+	for idx, expr := range o.OverrideExpr {
+		if err := expr.Apply(mapping); err != nil {
+			return fmt.Errorf("override-expr[%d] %q: %w", idx, expr.String(), err)
+		}
 	}
 
 	return nil

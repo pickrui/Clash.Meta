@@ -24,8 +24,10 @@ type TrojanServer struct {
 	ClientAuthCert  string
 	EchKey          string
 	AllowInsecure   bool
-	ResTLS          ResTLS
-	RealityConfig   reality.Config
+	ShadowTLS       ShadowTLS      `yaml:"shadow-tls" json:"shadow-tls,omitempty"`
+	ResTLS          ResTLS         `yaml:"res-tls" json:"res-tls,omitempty"`
+	JLSConfig       JLSConfig      `yaml:"jls-config" json:"jls-config,omitempty"`
+	RealityConfig   reality.Config `yaml:"reality-config" json:"reality-config,omitempty"`
 	MuxOption       sing.MuxOption
 	TrojanSSOption  TrojanSSOption
 }

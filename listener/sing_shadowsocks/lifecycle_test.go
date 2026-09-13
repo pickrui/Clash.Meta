@@ -39,7 +39,7 @@ func TestShadowSocksPartialBindRollback(t *testing.T) {
 			firstTCP.Close()
 			firstUDP.Close()
 			secondUDP.Close()
-			_, err := SS.New(LC.ShadowsocksServer{Listen: first + "," + second, Cipher: cipher, Password: "password", Udp: true}, &idleTunnel{}, A.WithInName("rollback-test"))
+			_, err := SS.New(LC.ShadowsocksServer{Listen: first + "," + second, Cipher: cipher, Password: "password", Udp: true}, A.NewListenConfig(), &idleTunnel{}, A.WithInName("rollback-test"))
 			if err == nil {
 				t.Fatal("expected the second TCP bind to fail")
 			}
@@ -66,7 +66,7 @@ func TestShadowSocksConcurrentClose(t *testing.T) {
 			address := tcp.Addr().String()
 			tcp.Close()
 			udp.Close()
-			listener, err := SS.New(LC.ShadowsocksServer{Listen: address, Cipher: cipher, Password: "password", Udp: true}, &idleTunnel{}, A.WithInName("close-test"))
+			listener, err := SS.New(LC.ShadowsocksServer{Listen: address, Cipher: cipher, Password: "password", Udp: true}, A.NewListenConfig(), &idleTunnel{}, A.WithInName("close-test"))
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -4,9 +4,9 @@ import (
 	"context"
 	"net"
 
-	"github.com/metacubex/mihomo/adapter/inbound"
 	"github.com/metacubex/mihomo/common/sockopt"
 	"github.com/metacubex/mihomo/component/resolver"
+	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 
 	D "github.com/miekg/dns"
@@ -25,8 +25,13 @@ type Server struct {
 	udpServer *D.Server
 }
 
+type serverHandler struct {
+	*Server
+	isUDP bool
+}
+
 // ServeDNS implement D.Handler ServeDNS
-func (s *Server) ServeDNS(w D.ResponseWriter, r *D.Msg) {
+func (s serverHandler) ServeDNS(w D.ResponseWriter, r *D.Msg) {
 	msg, err := s.service.ServeMsg(context.Background(), r)
 	if err != nil {
 		m := new(D.Msg)
@@ -35,7 +40,7 @@ func (s *Server) ServeDNS(w D.ResponseWriter, r *D.Msg) {
 		w.WriteMsg(m)
 		return
 	}
-	if _, isUDP := w.RemoteAddr().(*net.UDPAddr); isUDP {
+	if s.isUDP {
 		// RFC 6891: fit the reply into the client's advertised buffer size,
 		// setting the TC bit if records must be dropped; 512 when no OPT present
 		msg.Truncate(resolver.RequestUDPSize(r))
@@ -44,11 +49,19 @@ func (s *Server) ServeDNS(w D.ResponseWriter, r *D.Msg) {
 	w.WriteMsg(msg)
 }
 
+func (s *Server) UDPHandler() D.Handler {
+	return serverHandler{Server: s, isUDP: true}
+}
+
+func (s *Server) TCPHandler() D.Handler {
+	return serverHandler{Server: s, isUDP: false}
+}
+
 func (s *Server) SetService(service resolver.Service) {
 	s.service = service
 }
 
-func ReCreateServer(addr string, service resolver.Service) {
+func ReCreateServer(addr string, lc C.InboundListenConfig, service resolver.Service) {
 	if addr == address && service != nil {
 		server.SetService(service)
 		return
@@ -67,7 +80,7 @@ func ReCreateServer(addr string, service resolver.Service) {
 	server.service = nil
 	address = ""
 
-	if addr == "" || service == nil {
+	if addr == "" || lc == nil || service == nil {
 		return
 	}
 
@@ -87,7 +100,7 @@ func ReCreateServer(addr string, service resolver.Service) {
 	server = &Server{service: service}
 
 	go func() {
-		p, err := inbound.ListenPacket("udp", addr)
+		p, err := lc.ListenPacket(context.Background(), "udp", addr)
 		if err != nil {
 			log.Errorln("Start DNS server(UDP) error: %s", err.Error())
 			return
@@ -98,19 +111,19 @@ func ReCreateServer(addr string, service resolver.Service) {
 		}
 
 		log.Infoln("DNS server(UDP) listening at: %s", p.LocalAddr().String())
-		server.udpServer = &D.Server{Addr: addr, PacketConn: p, Handler: server}
+		server.udpServer = &D.Server{Addr: addr, PacketConn: p, Handler: server.UDPHandler()}
 		_ = server.udpServer.ActivateAndServe()
 	}()
 
 	go func() {
-		l, err := inbound.Listen("tcp", addr)
+		l, err := lc.Listen(context.Background(), "tcp", addr)
 		if err != nil {
 			log.Errorln("Start DNS server(TCP) error: %s", err.Error())
 			return
 		}
 
 		log.Infoln("DNS server(TCP) listening at: %s", l.Addr().String())
-		server.tcpServer = &D.Server{Addr: addr, Listener: l, Handler: server}
+		server.tcpServer = &D.Server{Addr: addr, Listener: l, Handler: server.TCPHandler()}
 		_ = server.tcpServer.ActivateAndServe()
 	}()
 

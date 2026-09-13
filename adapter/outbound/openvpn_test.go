@@ -44,12 +44,12 @@ func TestOpenVPNPeerInfoOptions(t *testing.T) {
 			}
 			require.NoError(t, err)
 			defer proxy.Close()
-			want := "IV_VER=mihomo-openvpn\nIV_PROTO=6\nIV_CIPHERS=AES-128-GCM\n"
+			want := "IV_VER=mihomo-openvpn\nIV_PROTO=22\nIV_CIPHERS=AES-128-GCM\n"
 			if scenario == "metadata" {
-				want = "IV_VER=custom-client/1\nIV_PROTO=6\nIV_CIPHERS=AES-128-GCM\nUV_DEVICE_ID=id=001\n"
+				want = "IV_VER=custom-client/1\nIV_PROTO=22\nIV_CIPHERS=AES-128-GCM\nUV_DEVICE_ID=id=001\n"
 				option.PeerInfo["UV_DEVICE_ID"] = "changed-after-construction"
 			}
-			require.Equal(t, want, ovpn.InstallScriptPeerInfo(proxy.config.Cipher, proxy.config.CompLZO, proxy.config.PeerInfo))
+			require.Equal(t, want, ovpn.InstallScriptPeerInfo(proxy.config.Cipher, proxy.config.DataCiphers, proxy.config.CompLZO, proxy.config.PeerInfo))
 			require.Nil(t, proxy.client) // Constructing metadata must not start a network connection or TUN.
 			require.Nil(t, proxy.tunDevice)
 		})

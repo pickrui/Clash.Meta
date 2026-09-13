@@ -148,7 +148,7 @@ func (t *Hysteria2) Address() string {
 // Listen implements constant.InboundListener
 func (t *Hysteria2) Listen(tunnel C.Tunnel) error {
 	var err error
-	t.l, err = sing_hysteria2.New(t.ts, tunnel, t.Additions()...)
+	t.l, err = sing_hysteria2.New(t.ts, t.ListenConfig(), tunnel, t.Additions()...)
 	if err != nil {
 		return err
 	}

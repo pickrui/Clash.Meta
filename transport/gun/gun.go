@@ -279,7 +279,7 @@ func NewTransport(dialFn DialFn, tlsConfig *vmess.TLSConfig, gunCfg *Config) *Tr
 			return nil, err
 		}
 
-		if tlsConfig.Restls == nil && tlsConfig.Reality == nil { // Restls and REALITY use a different TLS connection type.
+		if tlsConfig.ShadowTLS == nil && tlsConfig.Restls == nil && tlsConfig.Reality == nil && tlsConfig.TLSMirror == nil { // These wrappers do not expose a standard TLS connection state.
 			state := tlsC.GetTLSConnectionState(conn)
 			if p := state.NegotiatedProtocol; p != Http2NextProtoTLS {
 				_ = conn.Close()
