@@ -109,6 +109,9 @@ func NewConn(conn net.Conn, tlsConn net.Conn, userUUID uuid.UUID) (*Conn, error)
 	if r, ok := t.FieldByName("rawInput"); ok {
 		c.rawInput = (*bytes.Buffer)(unsafe.Add(p, r.Offset))
 	}
+	c.handshakePending.Store(true)
+	c.frontHeadroom = PaddingHeaderLen + N.CalculateFrontHeadroom(c.netConn)
+	c.rearHeadroom = 1400 + N.CalculateRearHeadroom(c.netConn)
 	return c, nil
 }
 
