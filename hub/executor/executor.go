@@ -103,8 +103,9 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateSniffer(cfg.Sniffer)
 	updateHosts(cfg.Hosts)
 	updateGeneral(cfg.General, true)
-	updateNTP(cfg.NTP)
 	updateDNS(cfg.DNS, cfg.General.IPv6)
+	// NTP resolves its server as soon as it starts, so install DNS first.
+	updateNTP(cfg.NTP)
 	//updateListeners(cfg.General, cfg.Listeners, force)
 	//updateTun(cfg.General) // tun should not care "force"
 	updateIPTables(cfg)
