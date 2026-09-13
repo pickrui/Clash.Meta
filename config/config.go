@@ -155,6 +155,7 @@ type DNS struct {
 	Fallback              []dns.NameServer
 	FallbackIPFilter      []C.IpMatcher
 	FallbackDomainFilter  []C.DomainMatcher
+	FallbackLazyQuery     bool
 	Listen                string
 	EnhancedMode          C.DNSMode
 	DefaultNameserver     []dns.NameServer
@@ -227,6 +228,7 @@ type RawDNS struct {
 	NameServer                   []string                            `yaml:"nameserver" json:"nameserver"`
 	Fallback                     []string                            `yaml:"fallback" json:"fallback"`
 	FallbackFilter               RawFallbackFilter                   `yaml:"fallback-filter" json:"fallback-filter"`
+	FallbackLazyQuery            bool                                `yaml:"fallback-lazy-query" json:"fallback-lazy-query"`
 	Listen                       string                              `yaml:"listen" json:"listen"`
 	EnhancedMode                 C.DNSMode                           `yaml:"enhanced-mode" json:"enhanced-mode"`
 	FakeIPRange                  string                              `yaml:"fake-ip-range" json:"fake-ip-range"`
@@ -1540,6 +1542,7 @@ func parseDNS(rawCfg *RawConfig, ruleProviders map[string]P.RuleProvider) (*DNS,
 	}
 
 	if len(cfg.Fallback) != 0 {
+		dnsCfg.FallbackLazyQuery = cfg.FallbackLazyQuery
 		if cfg.FallbackFilter.GeoIP {
 			matcher, err := RC.NewGEOIP(cfg.FallbackFilter.GeoIPCode, "dns.fallback-filter.geoip", false, true)
 			if err != nil {
