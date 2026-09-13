@@ -583,6 +583,11 @@ proxies: # socks5
         # 应当是一个 TLS 1.3 服务器
       password: [YOUR_RESTLS_PASSWORD]
       version-hint: "tls13"
+      # Optional SHA-256 certificate pin; browser identity uses client-fingerprint above.
+      # fingerprint: "SHA256_OF_CERTIFICATE"
+      # Certificate verification stays enabled unless explicitly disabled.
+      # skip-cert-verify: false
+      # Invalid script lengths/response counts return a configuration error.
       # Control your post-handshake traffic through restls-script
       # Hide proxy behaviors like "tls in tls".
       # see https://github.com/3andne/restls/blob/main/Restls-Script:%20Hide%20Your%20Proxy%20Traffic%20Behavior.md

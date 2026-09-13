@@ -659,7 +659,7 @@ func (c *Conn) extractRestlsAppData(record []byte) ([]byte, restlsCommand, error
 	authMac := hmacAuth.Sum(nil)[:restlsAppDataMACLength]
 	for i, m := range authMac {
 		if m != record[i] {
-			debugf(c, "extractRestlsAppData: bad authMac, expect %v, actual %v, to_server: %d, to_client: %d\n", authMac, record[:+restlsAppDataMACLength], c.restlsToServerCounter, c.restlsToClientCounter)
+			debugf(c, "extractRestlsAppData: bad authMac, expect %v, actual %v, to_client: %d\n", authMac, record[:+restlsAppDataMACLength], c.restlsToClientCounter)
 			return nil, nil, alertBadRecordMAC
 		}
 	}
@@ -680,7 +680,7 @@ func (c *Conn) extractRestlsAppData(record []byte) ([]byte, restlsCommand, error
 		return nil, nil, alertBadRecordMAC
 	}
 	data := record[restlsAppDataOffset : restlsAppDataOffset+dataLen]
-	debugf(c, "extractRestlsAppData: lengthMask: %v, recordLen: %v, dataLen: %v, authMac: %v, to_server: %d, to_client: %d\n", mask, len(record), dataLen, authMac, c.restlsToServerCounter, c.restlsToClientCounter)
+	debugf(c, "extractRestlsAppData: lengthMask: %v, recordLen: %v, dataLen: %v, authMac: %v, to_client: %d\n", mask, len(record), dataLen, authMac, c.restlsToClientCounter)
 	return data, command, nil
 }
 
@@ -1415,7 +1415,7 @@ func (c *Conn) write0x17AuthHeader(paddingLen int, dataLen int, command restlsCo
 	hmacAuth.Write(header)
 	hmacAuth.Write(outBuf[restlsAppDataLenOffset:]) // data len as well as the data are protected
 	authMac := hmacAuth.Sum(nil)[:restlsAppDataMACLength]
-	debugf(c, "lengthMask: %v, authMac: %v, to_server: %d, to_client: %d\n", mask, authMac, c.restlsToServerCounter, c.restlsToClientCounter)
+	debugf(c, "lengthMask: %v, authMac: %v, to_server: %d\n", mask, authMac, c.restlsToServerCounter)
 	copy(outBuf[:restlsAppDataMACLength], authMac)
 	return nil
 }
@@ -1530,7 +1530,7 @@ func (c *Conn) writeRestlsApplicationRecord(dataNew []byte) (int, error) {
 		n += payloadLen
 		data = data[dataLen:]
 		if command.needInterrupt() && !fakeResponse {
-			debugf(c, "restls write [%d] blocked, remaining %d\n", c.restlsToClientCounter, len(data))
+			debugf(c, "restls write blocked, remaining %d\n", len(data))
 			break
 		}
 		fakeResponse = false

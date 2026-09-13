@@ -28,7 +28,7 @@ require (
 	github.com/metacubex/mlkem v0.1.0
 	github.com/metacubex/quic-go v0.61.1-0.20260727080200-2548683b76f4
 	github.com/metacubex/randv2 v0.2.0
-	github.com/metacubex/restls-client-go v0.1.7
+	github.com/metacubex/restls-client-go v0.1.9
 	github.com/metacubex/sevenzip v1.6.4
 	github.com/metacubex/sing v0.5.7
 	github.com/metacubex/sing-mux v0.3.10
@@ -151,3 +151,6 @@ require (
 
 // for https://github.com/golang/protobuf/issues/1704
 replace google.golang.org/protobuf => github.com/metacubex/protobuf-go v0.0.0-20260306035419-7ceee0674686
+
+// Keep the Restls diagnostic race fix in Android and desktop builds.
+replace github.com/metacubex/restls-client-go => ./third_party/restls-client-go
