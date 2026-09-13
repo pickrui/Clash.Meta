@@ -1732,6 +1732,14 @@ listeners:
     #       password: password
     #   handshake:
     #     dest: test.com:443
+    # res-tls:
+    #   enable: false # 设置为 true 时包装 Shadowsocks TCP；原生 UDP 保持原协议
+    #   dest: test.com:443 # TLS 伪装站点；省略端口时使用 443
+    #   password: password
+    #   restls-script: "" # 空字符串使用默认剧本；非法剧本在加载配置时拒绝
+    #   min-record-len: 0 # 0 使用协议默认值
+    #   rate-limit: 0 # 仅限制未认证回退流量，单位 bit/s，两个方向各自限速；0 不限速
+    #   proxy: "" # 伪装站点连接使用的代理名称
     # kcp-tun:
     #   enable: false
     #   key: it's a secrect # pre-shared secret between client and server

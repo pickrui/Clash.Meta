@@ -5,6 +5,7 @@ import (
 
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
+	LR "github.com/metacubex/mihomo/listener/restls"
 	"github.com/metacubex/mihomo/listener/sing_shadowsocks"
 	"github.com/metacubex/mihomo/log"
 )
@@ -15,6 +16,7 @@ type ShadowSocksOption struct {
 	Cipher     string     `inbound:"cipher"`
 	UDP        bool       `inbound:"udp,omitempty"`
 	MuxOption  MuxOption  `inbound:"mux-option,omitempty"`
+	ResTLS     ResTLS     `inbound:"res-tls,omitempty"`
 	ShadowTLS  ShadowTLS  `inbound:"shadow-tls,omitempty"`
 	KcpTun     KcpTun     `inbound:"kcp-tun,omitempty"`
 	SimpleObfs SimpleObfs `inbound:"simple-obfs,omitempty"`
@@ -44,6 +46,11 @@ type ShadowSocks struct {
 }
 
 func NewShadowSocks(options *ShadowSocksOption) (*ShadowSocks, error) {
+	if options.ResTLS.Enable {
+		if err := LR.Validate(options.ResTLS.Build()); err != nil {
+			return nil, err
+		}
+	}
 	base, err := NewBase(&options.BaseOption)
 	if err != nil {
 		return nil, err
@@ -59,6 +66,7 @@ func NewShadowSocks(options *ShadowSocksOption) (*ShadowSocks, error) {
 			Udp:        options.UDP,
 			MuxOption:  options.MuxOption.Build(),
 			ShadowTLS:  options.ShadowTLS.Build(),
+			ResTLS:     options.ResTLS.Build(),
 			KcpTun:     options.KcpTun.Build(),
 			SimpleObfs: options.SimpleObfs.Build(),
 		},
@@ -86,6 +94,8 @@ func (s *ShadowSocks) Listen(tunnel C.Tunnel) error {
 	var err error
 	s.l, err = sing_shadowsocks.New(s.ss, tunnel, s.Additions()...)
 	if err != nil {
+		// The embedded listener may return a typed nil through the interface.
+		s.l = nil
 		return err
 	}
 	log.Infoln("ShadowSocks[%s] proxy listening at: %s", s.Name(), s.Address())
@@ -94,6 +104,9 @@ func (s *ShadowSocks) Listen(tunnel C.Tunnel) error {
 
 // Close implements constant.InboundListener
 func (s *ShadowSocks) Close() error {
+	if s.l == nil {
+		return nil
+	}
 	return s.l.Close()
 }
 

@@ -106,7 +106,7 @@ func RestlsServer(ctx context.Context, inbound net.Conn, config *RestlsServerCon
 			if _, writeErr := target.Write(firstClientRecord); writeErr != nil {
 				return nil, writeErr
 			}
-			return nil, relayRaw(inbound, target, config.RateLimit)
+			return nil, relayRaw(ctx, inbound, target, config.RateLimit)
 		}
 		return nil, err
 	}
@@ -115,7 +115,7 @@ func RestlsServer(ctx context.Context, inbound net.Conn, config *RestlsServerCon
 		if _, writeErr := target.Write(firstClientRecord); writeErr != nil {
 			return nil, writeErr
 		}
-		return nil, relayRaw(inbound, target, config.RateLimit)
+		return nil, relayRaw(ctx, inbound, target, config.RateLimit)
 	}
 	state.clientHello = clientHello
 	if _, err := target.Write(firstClientRecord); err != nil {
@@ -128,7 +128,7 @@ func RestlsServer(ctx context.Context, inbound net.Conn, config *RestlsServerCon
 			if _, writeErr := inbound.Write(firstServerRecord); writeErr != nil {
 				return nil, writeErr
 			}
-			return nil, relayRaw(inbound, target, config.RateLimit)
+			return nil, relayRaw(ctx, inbound, target, config.RateLimit)
 		}
 		return nil, err
 	}
@@ -137,13 +137,13 @@ func RestlsServer(ctx context.Context, inbound net.Conn, config *RestlsServerCon
 		if _, writeErr := inbound.Write(firstServerRecord); writeErr != nil {
 			return nil, writeErr
 		}
-		return nil, relayRaw(inbound, target, config.RateLimit)
+		return nil, relayRaw(ctx, inbound, target, config.RateLimit)
 	}
 	if bytes.Equal(serverHello.random, helloRetryRequestRandom) {
 		if _, writeErr := inbound.Write(firstServerRecord); writeErr != nil {
 			return nil, writeErr
 		}
-		return nil, relayRaw(inbound, target, config.RateLimit)
+		return nil, relayRaw(ctx, inbound, target, config.RateLimit)
 	}
 	state.serverRandom = serverHello.random
 	state.isTLS13 = serverHello.supportedVersion == VersionTLS13
@@ -155,7 +155,7 @@ func RestlsServer(ctx context.Context, inbound net.Conn, config *RestlsServerCon
 
 	if state.isTLS13 {
 		if err := state.checkTLS13ClientAuth(); err != nil {
-			return nil, relayRaw(inbound, target, config.RateLimit)
+			return nil, relayRaw(ctx, inbound, target, config.RateLimit)
 		}
 		if err := state.handshakeTLS13(inbound, target); err != nil {
 			return nil, err
@@ -165,7 +165,7 @@ func RestlsServer(ctx context.Context, inbound net.Conn, config *RestlsServerCon
 			if state.tls12Authenticated {
 				return nil, err
 			}
-			return nil, relayRaw(inbound, target, config.RateLimit)
+			return nil, relayRaw(ctx, inbound, target, config.RateLimit)
 		}
 	}
 
@@ -871,8 +871,12 @@ func (r *handshakeMessageReader) addRecord(record []byte, fn func([]byte) bool) 
 	return nil
 }
 
-func relayRaw(a, b net.Conn, rateLimit uint64) error {
+func relayRaw(ctx context.Context, a, b net.Conn, rateLimit uint64) error {
 	b = newRateLimitedConn(b, rateLimit)
+	// Closing only the raw socket cannot interrupt a limiter waiting for its
+	// next reservation. Close the wrapper as well when the listener shuts down.
+	stop := context.AfterFunc(ctx, func() { _ = a.Close(); _ = b.Close() })
+	defer stop()
 	errc := make(chan error, 2)
 	go func() {
 		_, err := io.Copy(a, b)

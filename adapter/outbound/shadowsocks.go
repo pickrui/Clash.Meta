@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/structure"
@@ -171,6 +172,11 @@ func (ss *ShadowSocks) StreamConnContext(ctx context.Context, c net.Conn, metada
 		useEarly = true
 	}
 	useEarly = useEarly || N.NeedHandshake(c)
+	if ss.obfsMode == restls.Mode && strings.HasPrefix(ss.option.Cipher, "2022-") {
+		// Restls TLS is already established. Publish the 2022 request salt
+		// before handing the connection to concurrent mux readers/writers.
+		useEarly = false
+	}
 	if !useEarly {
 		if ctx.Done() != nil {
 			done := N.SetupContextForConn(ctx, c)

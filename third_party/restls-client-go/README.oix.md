@@ -10,13 +10,21 @@ The unmodified snapshot is local commit
 `fbd77b30c4cdef9a3ccbf11a3f532c5fedfb9403` (258 files checked byte for byte).
 All upstream source, tests, fixtures and license files are retained.
 
-The only local production changes are four diagnostic calls in `conn.go`:
+The local client changes are four diagnostic calls in `conn.go`:
 read-side diagnostics no longer inspect `restlsToServerCounter`, and write-side
 diagnostics no longer inspect `restlsToClientCounter`. Even with `debugLog = false`,
 Go evaluates those arguments before calling `debugf`; concurrent reads and writes
 therefore trigger the race detector. Each remaining counter read belongs to its
 own direction's lock. Authentication, counters, record bytes and traffic scripts
 are unchanged. The same diagnostic reads existed in v0.1.7.
+
+The local server change in `restls_server.go` passes the connection context into
+all seven fallback relay paths and closes the rate-limit wrapper on cancellation.
+Closing a raw socket alone leaves both transfer goroutines waiting on long rate
+reservations. The server lifecycle regression at `listener/restls/restls_test.go`
+reproduces this using a one-bit-per-second fallback: shutdown must finish before
+the next eight-second byte interval. The local `go.mod` minimum is Go 1.21 for
+`context.AfterFunc`; the enclosing application already uses Go 1.26.
 
 The parent `core/go.mod` and the nested core's `go.mod` both replace the module
 with this directory. Both replacements are needed: dependency-module replace
@@ -31,6 +39,6 @@ fingerprints and TLS 1.2 session reuse for Chrome and Firefox. Safari/iOS do not
 advertise the TLS 1.2 SessionTicket extension in these upstream fingerprints.
 
 When updating this snapshot, compare it against the module ZIP verified by the
-Go checksum database, preserve both license files, reapply or retire the four
-logging changes, and run the Restls CI gate and Android core checks. A compatible
+Go checksum database, preserve both license files, reapply or retire the
+logging and fallback cancellation changes, and run the Restls CI gate and Android core checks. A compatible
 upstream fix can replace this snapshot after those checks pass.
