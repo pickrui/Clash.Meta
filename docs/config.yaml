@@ -1325,6 +1325,7 @@ proxies: # socks5
     # handshake-mode: HANDSHAKE_STANDARD
     # 一个 base64 字符串用于微调网络行为
     # traffic-pattern: ""
+    # 低熵流量模式默认关闭，启用时客户端和服务端均需支持 Mieru 3.35.0 的低熵协议。
 
   # sudoku
   - name: sudoku
@@ -1965,6 +1966,7 @@ listeners:
       username2: password2
     # 一个 base64 字符串用于微调网络行为
     # traffic-pattern: ""
+    # 低熵流量模式默认关闭，启用时客户端和服务端均需支持 Mieru 3.35.0 的低熵协议。
     # 如果开启，且客户端不发送用户提示，代理服务器将拒绝连接
     # user-hint-is-mandatory: false
 
