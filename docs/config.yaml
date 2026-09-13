@@ -1390,7 +1390,10 @@ proxies: # socks5
       # tls: true # 可选：按需开启 HTTPS/WSS
       # host: "" # 可选：覆盖 Host/SNI（支持 example.com 或 example.com:443）；仅在 mode 为 stream/poll/auto/ws 时生效
       # path-root: "" # 可选：HTTP 隧道端点一级路径前缀（双方需一致），例如 "aabbcc" 或 "/aabbcc/" => /aabbcc/session、/aabbcc/stream、/aabbcc/api/v1/upload、/aabbcc/ws
-      # multiplex: "off" # 可选字符串：off（默认）、auto（复用底层 HTTP 连接，减少建链 RTT）、on（Sudoku mux 单隧道多目标；仅在 mode=stream/poll/auto 生效；ws 强制 off）
+      # multiplex: "off" # 可选字符串：off（默认）、auto（复用底层 HTTP 连接）、on（Sudoku mux 单隧道多目标）
+      # on 可用于直连、legacy、ws、stream、poll、auto；auto 的 HTTP 连接复用不适用于 ws。
+      # on 支持流的独立半关闭；单流未读数据超过 4 MiB 时重置该流，其他流继续传输。
+      # 复用会话空闲时每 15 秒发送兼容旧版的空 DATA 保活帧；会话关闭后停止。
     enable-pure-downlink: false # 可选：false=带宽优化下行；true=纯 Sudoku 下行
 
   # anytls
