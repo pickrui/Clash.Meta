@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"strconv"
 	"strings"
@@ -50,6 +51,8 @@ type ClientConfig struct {
 
 	Username string
 	Password string
+
+	PeerInfo map[string]string
 
 	PingInterval time.Duration
 	PingRestart  time.Duration
@@ -140,6 +143,7 @@ func (c *ClientConfig) Prepare() error {
 		}
 		c.TLSCryptKey = key
 	}
+	c.PeerInfo = maps.Clone(c.PeerInfo)
 	return nil
 }
 
@@ -185,6 +189,19 @@ func (c *ClientConfig) ValidateInstallScriptSubset() error {
 		}
 	} else if strings.TrimSpace(c.Username) == "" {
 		return errors.New("openvpn requires either cert+key or username (auth-user-pass)")
+	}
+	for key, value := range c.PeerInfo {
+		if key == "" || strings.ContainsAny(key, "=\r\n\x00") {
+			return errors.New("openvpn peer-info key must be nonempty and contain no equals, CR, LF or NUL")
+		}
+		if strings.ContainsAny(value, "\r\n\x00") {
+			return errors.New("openvpn peer-info value must contain no CR, LF or NUL")
+		}
+	}
+	// Key-method strings use a 16-bit length including the terminating NUL.
+	// Reject an oversized record here instead of silently truncating metadata.
+	if len(InstallScriptPeerInfo(c.Cipher, c.CompLZO, c.PeerInfo)) > 0xfffe {
+		return errors.New("openvpn peer-info exceeds 65534 bytes")
 	}
 	if c.PingInterval < 0 {
 		return errors.New("openvpn ping interval must be positive")

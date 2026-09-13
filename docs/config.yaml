@@ -1229,6 +1229,11 @@ proxies: # socks5
     #   00000000000000000000000000000000
     #   ...
     #   -----END OpenVPN Static key V1-----
+    # peer-info: # 透传给服务端的元数据；自定义键按名称排序
+    #   IV_VER: "custom-client/1.0" # 替换内置版本标识；IV_PROTO/IV_CIPHERS 以及已生成的 IV_LZO 不重复发送
+    #   IV_HWADDR: "52:54:00:ff:72:87"
+    #   UV_DEVICE_ID: "laptop-001"
+    # peer-info 的键非空且不能含 =，键和值均不能含 CR/LF/NUL；生成内容最多 65534 字节
     # ping: 10 # 默认值为 0
     # ping-restart: 60 # 默认值为 0
     # mtu: 1500

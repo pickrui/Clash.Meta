@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"sort"
+	"strings"
 )
 
 const (
@@ -171,12 +173,36 @@ func InstallScriptOptionsString(proto, cipher, auth string, compLZO string) stri
 	return fmt.Sprintf("V4,dev-type tun,link-mtu %s,tun-mtu 1500,proto %s,%scipher %s,auth %s,keysize %s,key-method 2,tls-client", mtu, protoName, comp, cipher, auth, keysize)
 }
 
-func InstallScriptPeerInfo(cipher string, compLZO string) string {
+func InstallScriptPeerInfo(cipher string, compLZO string, peerInfo map[string]string) string {
+	ivVer := "mihomo-openvpn"
+	if value, ok := peerInfo["IV_VER"]; ok {
+		ivVer = value
+	}
 	lzo := ""
 	if compLZO == CompLzoYes {
 		lzo = "IV_LZO=1\n"
 	}
-	return fmt.Sprintf("IV_VER=mihomo-openvpn\nIV_PROTO=6\n%sIV_CIPHERS=%s\n", lzo, cipher)
+	var info strings.Builder
+	fmt.Fprintf(&info, "IV_VER=%s\nIV_PROTO=6\n%sIV_CIPHERS=%s\n", ivVer, lzo, cipher)
+	// Append user-defined peer-info entries (e.g. IV_HWADDR, UV_*) after the
+	// built-in fields. Keys are sorted so the output is deterministic.
+	keys := make([]string, 0, len(peerInfo))
+	for key := range peerInfo {
+		switch key {
+		case "IV_VER", "IV_PROTO", "IV_CIPHERS":
+			continue
+		case "IV_LZO":
+			if lzo != "" {
+				continue
+			}
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintf(&info, "%s=%s\n", key, peerInfo[key])
+	}
+	return info.String()
 }
 
 func appendOpenVPNString(out []byte, s string) []byte {

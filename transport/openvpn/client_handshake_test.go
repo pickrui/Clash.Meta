@@ -69,7 +69,23 @@ func TestHandshakeClearsDeadlinesAndAcknowledgesControl(t *testing.T) {
 	}
 }
 
-func handshakeTestClient(t *testing.T, encrypted bool) (*Client, *ControlChannel, *memoryPacketIO) {
+type handshakePeerInfo struct {
+	values map[string]string
+	want   string
+}
+
+func TestHandshakeSendsPeerInfo(t *testing.T) {
+	for _, encrypted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("tlsCrypt=%t", encrypted), func(t *testing.T) {
+			handshakeTestClient(t, encrypted, handshakePeerInfo{
+				values: map[string]string{"IV_VER": "custom-client/1", "IV_PROTO": "999", "IV_CIPHERS": "wrong", "UV_DEVICE_ID": "id=001", "IV_HWADDR": "52:54:00:ff:72:87"},
+				want:   "IV_VER=custom-client/1\nIV_PROTO=6\nIV_CIPHERS=AES-128-GCM\nIV_HWADDR=52:54:00:ff:72:87\nUV_DEVICE_ID=id=001\n",
+			})
+		})
+	}
+}
+
+func handshakeTestClient(t *testing.T, encrypted bool, peerInfo ...handshakePeerInfo) (*Client, *ControlChannel, *memoryPacketIO) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -81,6 +97,9 @@ func handshakeTestClient(t *testing.T, encrypted bool) (*Client, *ControlChannel
 		t.Fatal(err)
 	}
 	config := &ClientConfig{CA: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), Proto: ProtoTCP, Cipher: CipherAES128GCM, Auth: "SHA256"}
+	if len(peerInfo) > 0 {
+		config.PeerInfo = peerInfo[0].values
+	}
 	var crypt *TLSCrypt
 	if encrypted {
 		config.TLSCryptKey = testStaticKey()
@@ -127,13 +146,17 @@ func handshakeTestClient(t *testing.T, encrypted bool) (*Client, *ControlChannel
 			if header[4] != KeyMethod2 {
 				return fmt.Errorf("unexpected key method: %d", header[4])
 			}
-			for range 4 {
+			for index := range 4 {
 				var size [2]byte
 				if _, err := io.ReadFull(conn, size[:]); err != nil {
 					return err
 				}
-				if _, err := io.CopyN(io.Discard, conn, int64(binary.BigEndian.Uint16(size[:]))); err != nil {
+				value := make([]byte, binary.BigEndian.Uint16(size[:]))
+				if _, err := io.ReadFull(conn, value); err != nil {
 					return err
+				}
+				if index == 3 && len(peerInfo) > 0 && string(value) != peerInfo[0].want+"\x00" {
+					return fmt.Errorf("unexpected peer-info on the control channel: %q", value)
 				}
 			}
 			response := []byte{0, 0, 0, 0, KeyMethod2}
