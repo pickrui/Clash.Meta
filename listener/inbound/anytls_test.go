@@ -2,6 +2,7 @@ package inbound_test
 
 import (
 	"net/netip"
+	"strconv"
 	"testing"
 
 	"github.com/metacubex/mihomo/adapter/outbound"
@@ -93,4 +94,16 @@ func TestInboundAnyTLS_TLS(t *testing.T) {
 		}
 		testInboundAnyTLS(t, inboundOptions, outboundOptions)
 	})
+}
+
+func TestInboundAnyTLS_Restls(t *testing.T) {
+	for _, fingerprint := range []string{"chrome", "firefox", "safari", "ios"} {
+		for _, disabled := range []bool{false, true} {
+			t.Run(fingerprint+"/disable-reuse="+strconv.FormatBool(disabled), func(t *testing.T) {
+				server, client := protocolRestlsOptions()
+				client.RestlsScript = "1,1,1,1"
+				testInboundAnyTLS(t, inbound.AnyTLSOption{ResTLS: server}, outbound.AnyTLSOption{SNI: realityDest, Fingerprint: tlsFingerprint, ClientFingerprint: fingerprint, RestlsOpts: client, DisableReuse: disabled})
+			})
+		}
+	}
 }

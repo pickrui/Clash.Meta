@@ -8,6 +8,7 @@ import (
 
 	A "github.com/metacubex/mihomo/adapter/inbound"
 	C "github.com/metacubex/mihomo/constant"
+	AT "github.com/metacubex/mihomo/listener/anytls"
 	LC "github.com/metacubex/mihomo/listener/config"
 	IN "github.com/metacubex/mihomo/listener/inbound"
 	VL "github.com/metacubex/mihomo/listener/sing_vless"
@@ -21,6 +22,8 @@ func newProtocolListener(kind, addr string, r LC.ResTLS) (C.MultiAddrListener, e
 	tunnel := &restlsIdleTunnel{}
 	addition := A.WithInName("restls-lifecycle")
 	switch kind {
+	case "anytls":
+		return AT.New(LC.AnyTLSServer{Listen: addr, ResTLS: r, AllowInsecure: true}, tunnel, addition)
 	case "vmess":
 		return VM.New(LC.VmessServer{Listen: addr, ResTLS: r}, tunnel, addition)
 	case "vless":
@@ -31,11 +34,15 @@ func newProtocolListener(kind, addr string, r LC.ResTLS) (C.MultiAddrListener, e
 }
 
 func protocolRestlsMapping(kind string, port int) map[string]any {
-	return map[string]any{"type": kind, "name": "restls-test", "listen": "127.0.0.1", "port": port, "allow-insecure": true, "users": []any{}, "res-tls": map[string]any{"enable": true, "dest": "camouflage.test:443", "password": "password", "min-record-len": 32, "rate-limit": 32768, "proxy": "route"}}
+	mapping := map[string]any{"type": kind, "name": "restls-test", "listen": "127.0.0.1", "port": port, "allow-insecure": true, "users": []any{}, "res-tls": map[string]any{"enable": true, "dest": "camouflage.test:443", "password": "password", "min-record-len": 32, "rate-limit": 32768, "proxy": "route"}}
+	if kind == "anytls" {
+		mapping["users"] = map[string]string{}
+	}
+	return mapping
 }
 
 func TestProtocolRestlsListenerParsing(t *testing.T) {
-	for _, kind := range []string{"vmess", "vless", "trojan"} {
+	for _, kind := range []string{"vmess", "vless", "trojan", "anytls"} {
 		t.Run(kind, func(t *testing.T) {
 			mapping := protocolRestlsMapping(kind, 0)
 			l, err := ParseListener(mapping)
@@ -47,6 +54,8 @@ func TestProtocolRestlsListenerParsing(t *testing.T) {
 			}
 			var r IN.ResTLS
 			switch config := l.Config().(type) {
+			case *IN.AnyTLSOption:
+				r = config.ResTLS
 			case *IN.VmessOption:
 				r = config.ResTLS
 			case *IN.VlessOption:
@@ -78,7 +87,7 @@ func TestProtocolRestlsListenerParsing(t *testing.T) {
 }
 
 func TestProtocolRestlsPartialBindRollback(t *testing.T) {
-	for _, kind := range []string{"vmess", "vless", "trojan"} {
+	for _, kind := range []string{"vmess", "vless", "trojan", "anytls"} {
 		for _, enabled := range []bool{false, true} {
 			t.Run(kind+"/restls="+strconv.FormatBool(enabled), func(t *testing.T) {
 				first, err := net.Listen("tcp", "127.0.0.1:0")
@@ -108,7 +117,7 @@ func TestProtocolRestlsPartialBindRollback(t *testing.T) {
 }
 
 func TestProtocolRestlsConcurrentClose(t *testing.T) {
-	for _, kind := range []string{"vmess", "vless", "trojan"} {
+	for _, kind := range []string{"vmess", "vless", "trojan", "anytls"} {
 		t.Run(kind, func(t *testing.T) {
 			l, err := newProtocolListener(kind, "127.0.0.1:0", LC.ResTLS{Enable: true, Dest: "camouflage.test", Password: "password"})
 			if err != nil {
@@ -134,7 +143,7 @@ func TestProtocolRestlsConcurrentClose(t *testing.T) {
 }
 
 func TestProtocolRestlsCloseAfterFailedListen(t *testing.T) {
-	for _, kind := range []string{"vmess", "vless", "trojan"} {
+	for _, kind := range []string{"vmess", "vless", "trojan", "anytls"} {
 		t.Run(kind, func(t *testing.T) {
 			blocked, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {

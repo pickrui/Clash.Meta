@@ -14,7 +14,6 @@ import (
 
 	"github.com/metacubex/mihomo/common/buf"
 	"github.com/metacubex/mihomo/common/pool"
-	"github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/transport/anytls/padding"
 	"github.com/metacubex/mihomo/transport/anytls/util"
@@ -43,22 +42,24 @@ type Session struct {
 	peerVersion byte
 
 	// client
-	isClient    bool
-	sendPadding bool
-	buffering   bool
-	buffer      []byte
-	pktCounter  atomic.Uint32
+	isClient       bool
+	sendPadding    bool
+	buffering      bool
+	buffer         []byte
+	pktCounter     atomic.Uint32
+	clientMetadata string
 
 	// server
 	onNewStream func(stream *Stream)
 }
 
-func NewClientSession(conn net.Conn, _padding *atomic.Pointer[padding.PaddingFactory]) *Session {
+func NewClientSession(conn net.Conn, _padding *atomic.Pointer[padding.PaddingFactory], clientMetadata string) *Session {
 	s := &Session{
-		conn:        conn,
-		isClient:    true,
-		sendPadding: true,
-		padding:     _padding,
+		conn:           conn,
+		isClient:       true,
+		sendPadding:    true,
+		padding:        _padding,
+		clientMetadata: clientMetadata,
 	}
 	s.die = make(chan struct{})
 	s.streams = make(map[uint32]*Stream)
@@ -84,7 +85,7 @@ func (s *Session) Run() {
 
 	settings := util.StringMap{
 		"v":           "2",
-		"client":      "mihomo/" + constant.Version,
+		"client":      s.clientMetadata,
 		"padding-md5": s.padding.Load().Md5,
 	}
 	f := newFrame(cmdSettings, 0)
@@ -109,6 +110,7 @@ func (s *Session) IsClosed() bool {
 func (s *Session) Close() error {
 	var once bool
 	s.dieOnce.Do(func() {
+		_ = s.conn.SetDeadline(time.Now())
 		close(s.die)
 		once = true
 	})
@@ -368,20 +370,52 @@ func (s *Session) streamClosed(sid uint32) error {
 	return err
 }
 
+// maxFrameDataLen is the maximum payload bytes per data frame. The wire
+// format encodes payload length as a uint16, so a single frame cannot
+// carry more than 65535 bytes. writeDataFrame splits larger writes into
+// multiple frames and sends the whole frame sequence in one writeConn call.
+// That keeps one Stream.Write contiguous relative to other stream/control
+// frame writes.
+const maxFrameDataLen = 0xFFFF
+
 func (s *Session) writeDataFrame(sid uint32, data []byte) (int, error) {
 	dataLen := len(data)
-
-	buffer := buf.NewSize(dataLen + headerOverHeadSize)
-	buffer.WriteByte(cmdPSH)
-	binary.BigEndian.PutUint32(buffer.Extend(4), sid)
-	binary.BigEndian.PutUint16(buffer.Extend(2), uint16(dataLen))
-	buffer.Write(data)
-	_, err := s.writeConn(buffer.Bytes())
-	buffer.Release()
-	if err != nil {
-		return 0, err
+	if dataLen == 0 {
+		return 0, nil
+	}
+	if dataLen <= maxFrameDataLen {
+		buffer := buf.NewSize(dataLen + headerOverHeadSize)
+		buffer.WriteByte(cmdPSH)
+		binary.BigEndian.PutUint32(buffer.Extend(4), sid)
+		binary.BigEndian.PutUint16(buffer.Extend(2), uint16(dataLen))
+		buffer.Write(data)
+		_, err := s.writeConn(buffer.Bytes())
+		buffer.Release()
+		if err != nil {
+			return 0, err
+		}
+		return dataLen, nil
 	}
 
+	frameCount := (dataLen + maxFrameDataLen - 1) / maxFrameDataLen
+	buffer := buf.NewSize(dataLen + frameCount*headerOverHeadSize)
+	defer buffer.Release()
+
+	for written := 0; written < dataLen; {
+		chunk := dataLen - written
+		if chunk > maxFrameDataLen {
+			chunk = maxFrameDataLen
+		}
+		buffer.WriteByte(cmdPSH)
+		binary.BigEndian.PutUint32(buffer.Extend(4), sid)
+		binary.BigEndian.PutUint16(buffer.Extend(2), uint16(chunk))
+		buffer.Write(data[written : written+chunk])
+		written += chunk
+	}
+
+	if _, err := s.writeConn(buffer.Bytes()); err != nil {
+		return 0, err
+	}
 	return dataLen, nil
 }
 

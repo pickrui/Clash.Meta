@@ -94,11 +94,12 @@ func (s *Stream) closeWithError(err error) error {
 		once = true
 	})
 	if once {
+		closeErr := s.sess.streamClosed(s.id)
 		if s.dieHook != nil {
 			s.dieHook()
 			s.dieHook = nil
 		}
-		return s.sess.streamClosed(s.id)
+		return closeErr
 	}
 	return s.dieErr.Load().value
 }

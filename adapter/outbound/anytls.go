@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strconv"
 	"time"
@@ -24,22 +25,25 @@ type AnyTLS struct {
 
 type AnyTLSOption struct {
 	BasicOption
-	Name                     string     `proxy:"name"`
-	Server                   string     `proxy:"server"`
-	Port                     int        `proxy:"port"`
-	Password                 string     `proxy:"password"`
-	ALPN                     []string   `proxy:"alpn,omitempty"`
-	SNI                      string     `proxy:"sni,omitempty"`
-	ECHOpts                  ECHOptions `proxy:"ech-opts,omitempty"`
-	ClientFingerprint        string     `proxy:"client-fingerprint,omitempty"`
-	SkipCertVerify           bool       `proxy:"skip-cert-verify,omitempty"`
-	Fingerprint              string     `proxy:"fingerprint,omitempty"`
-	Certificate              string     `proxy:"certificate,omitempty"`
-	PrivateKey               string     `proxy:"private-key,omitempty"`
-	UDP                      bool       `proxy:"udp,omitempty"`
-	IdleSessionCheckInterval int        `proxy:"idle-session-check-interval,omitempty"`
-	IdleSessionTimeout       int        `proxy:"idle-session-timeout,omitempty"`
-	MinIdleSession           int        `proxy:"min-idle-session,omitempty"`
+	RestlsOpts               RestlsOptions `proxy:"restls-opts,omitempty"`
+	DisableReuse             bool          `proxy:"disable-reuse,omitempty"`
+	ClientMetadata           string        `proxy:"client-metadata,omitempty"`
+	Name                     string        `proxy:"name"`
+	Server                   string        `proxy:"server"`
+	Port                     int           `proxy:"port"`
+	Password                 string        `proxy:"password"`
+	ALPN                     []string      `proxy:"alpn,omitempty"`
+	SNI                      string        `proxy:"sni,omitempty"`
+	ECHOpts                  ECHOptions    `proxy:"ech-opts,omitempty"`
+	ClientFingerprint        string        `proxy:"client-fingerprint,omitempty"`
+	SkipCertVerify           bool          `proxy:"skip-cert-verify,omitempty"`
+	Fingerprint              string        `proxy:"fingerprint,omitempty"`
+	Certificate              string        `proxy:"certificate,omitempty"`
+	PrivateKey               string        `proxy:"private-key,omitempty"`
+	UDP                      bool          `proxy:"udp,omitempty"`
+	IdleSessionCheckInterval int           `proxy:"idle-session-check-interval,omitempty"`
+	IdleSessionTimeout       int           `proxy:"idle-session-timeout,omitempty"`
+	MinIdleSession           int           `proxy:"min-idle-session,omitempty"`
 }
 
 func (t *AnyTLS) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
@@ -105,11 +109,25 @@ func NewAnyTLS(option AnyTLSOption) (*AnyTLS, error) {
 
 	tOption := anytls.ClientConfig{
 		Password:                 option.Password,
+		DisableReuse:             option.DisableReuse,
+		ClientMetadata:           option.ClientMetadata,
 		Server:                   M.ParseSocksaddrHostPort(option.Server, uint16(option.Port)),
 		Dialer:                   singDialer,
 		IdleSessionCheckInterval: time.Duration(option.IdleSessionCheckInterval) * time.Second,
 		IdleSessionTimeout:       time.Duration(option.IdleSessionTimeout) * time.Second,
 		MinIdleSession:           option.MinIdleSession,
+	}
+	restlsConfig, err := option.RestlsOpts.Parse(option.SNI, option.ClientFingerprint)
+	if err != nil {
+		return nil, err
+	}
+	if restlsConfig != nil {
+		if option.ECHOpts.Enable {
+			return nil, errors.New("Restls does not support ECH")
+		}
+		if option.Certificate != "" || option.PrivateKey != "" {
+			return nil, errors.New("Restls does not support client certificates")
+		}
 	}
 	echConfig, err := option.ECHOpts.Parse()
 	if err != nil {
@@ -124,6 +142,7 @@ func NewAnyTLS(option AnyTLSOption) (*AnyTLS, error) {
 		PrivateKey:        option.PrivateKey,
 		ClientFingerprint: option.ClientFingerprint,
 		ECH:               echConfig,
+		Restls:            restlsConfig,
 	}
 	if tlsConfig.Host == "" {
 		tlsConfig.Host = option.Server

@@ -31,17 +31,21 @@ type Client struct {
 
 	padding *atomic.Pointer[padding.PaddingFactory]
 
+	clientMetadata     string
 	idleSessionTimeout time.Duration
 	minIdleSession     int
+	disableReuse       bool
 }
 
-func NewClient(ctx context.Context, dialOut util.DialOutFunc, _padding *atomic.Pointer[padding.PaddingFactory], idleSessionCheckInterval, idleSessionTimeout time.Duration, minIdleSession int) *Client {
+func NewClient(ctx context.Context, dialOut util.DialOutFunc, _padding *atomic.Pointer[padding.PaddingFactory], clientMetadata string, idleSessionCheckInterval, idleSessionTimeout time.Duration, minIdleSession int, disableReuse bool) *Client {
 	c := &Client{
 		sessions:           make(map[uint64]*Session),
 		dialOut:            dialOut,
 		padding:            _padding,
+		clientMetadata:     clientMetadata,
 		idleSessionTimeout: idleSessionTimeout,
 		minIdleSession:     minIdleSession,
+		disableReuse:       disableReuse,
 	}
 	if idleSessionCheckInterval <= time.Second*5 {
 		idleSessionCheckInterval = time.Second * 30
@@ -51,7 +55,9 @@ func NewClient(ctx context.Context, dialOut util.DialOutFunc, _padding *atomic.P
 	}
 	c.die, c.dieCancel = context.WithCancel(ctx)
 	c.idleSession = skiplist.NewSkipList[uint64, *Session]()
-	util.StartRoutine(c.die, idleSessionCheckInterval, c.idleCleanup)
+	if !c.disableReuse {
+		util.StartRoutine(c.die, idleSessionCheckInterval, c.idleCleanup)
+	}
 	return c
 }
 
@@ -66,7 +72,9 @@ func (c *Client) CreateStream(ctx context.Context) (net.Conn, error) {
 	var stream *Stream
 	var err error
 
-	session = c.getIdleSession()
+	if !c.disableReuse {
+		session = c.getIdleSession()
+	}
 	if session == nil {
 		session, err = c.createSession(ctx)
 	}
@@ -82,10 +90,15 @@ func (c *Client) CreateStream(ctx context.Context) (net.Conn, error) {
 	stream.dieHook = func() {
 		// If Session is not closed, put this Stream to pool
 		if !session.IsClosed() {
+			if c.disableReuse {
+				session.Close()
+				return
+			}
+
 			select {
 			case <-c.die.Done():
 				// Now client has been closed
-				go session.Close()
+				session.Close()
 			default:
 				c.idleSessionLock.Lock()
 				session.idleSince = time.Now()
@@ -110,17 +123,27 @@ func (c *Client) getIdleSession() (idle *Session) {
 }
 
 func (c *Client) createSession(ctx context.Context) (*Session, error) {
-	underlying, err := c.dialOut(ctx)
+	// A Restls/TLS handshake can still be in flight when the proxy is removed.
+	// Cancel that work on client shutdown as well as caller cancellation.
+	dialCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(c.die, cancel)
+	defer func() {
+		stop()
+		cancel()
+	}()
+	underlying, err := c.dialOut(dialCtx)
 	if err != nil {
 		return nil, err
 	}
 
-	session := NewClientSession(underlying, c.padding)
+	session := NewClientSession(underlying, c.padding, c.clientMetadata)
 	session.seq = c.sessionCounter.Add(1)
 	session.dieHook = func() {
-		c.idleSessionLock.Lock()
-		c.idleSession.Remove(math.MaxUint64 - session.seq)
-		c.idleSessionLock.Unlock()
+		if !c.disableReuse {
+			c.idleSessionLock.Lock()
+			c.idleSession.Remove(math.MaxUint64 - session.seq)
+			c.idleSessionLock.Unlock()
+		}
 
 		c.sessionsLock.Lock()
 		delete(c.sessions, session.seq)
@@ -128,6 +151,13 @@ func (c *Client) createSession(ctx context.Context) (*Session, error) {
 	}
 
 	c.sessionsLock.Lock()
+	// Serialize publication with Close's snapshot. A dialer may finish just
+	// after cancellation (or ignore it), but must not revive the client.
+	if c.die.Err() != nil || ctx.Err() != nil {
+		c.sessionsLock.Unlock()
+		underlying.Close()
+		return nil, io.ErrClosedPipe
+	}
 	c.sessions[session.seq] = session
 	c.sessionsLock.Unlock()
 

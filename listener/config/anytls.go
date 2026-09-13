@@ -5,6 +5,7 @@ import (
 )
 
 type AnyTLSServer struct {
+	ResTLS         ResTLS            `yaml:"res-tls" json:"res-tls,omitempty"`
 	Enable         bool              `yaml:"enable" json:"enable"`
 	Listen         string            `yaml:"listen" json:"listen"`
 	Users          map[string]string `yaml:"users" json:"users,omitempty"`
