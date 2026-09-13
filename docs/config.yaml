@@ -650,6 +650,12 @@ proxies: # socks5
   # cipher 支持 auto/aes-128-gcm/chacha20-poly1305/none
   - name: "vmess"
     type: vmess
+    # restls-opts: # 启用时 VMess/VLESS 还需 tls: true；Trojan 隐含启用 TLS
+    #   password: restls-password
+    #   version-hint: tls13 # 必填：tls12 或 tls13
+    #   restls-script: "" # 空字符串使用默认剧本
+    # Restls 使用 servername（Trojan 使用 sni）及 client-fingerprint；支持证书指纹校验
+    # 不与 REALITY、ECH、mTLS、XTLS Vision 组合；VLESS XHTTP 仅支持 HTTP/1.1 和 HTTP/2
     server: server
     port: 443
     uuid: uuid
@@ -744,6 +750,12 @@ proxies: # socks5
   # vless
   - name: "vless-tcp"
     type: vless
+    # restls-opts: # 启用时 VMess/VLESS 还需 tls: true；Trojan 隐含启用 TLS
+    #   password: restls-password
+    #   version-hint: tls13 # 必填：tls12 或 tls13
+    #   restls-script: "" # 空字符串使用默认剧本
+    # Restls 使用 servername（Trojan 使用 sni）及 client-fingerprint；支持证书指纹校验
+    # 不与 REALITY、ECH、mTLS、XTLS Vision 组合；VLESS XHTTP 仅支持 HTTP/1.1 和 HTTP/2
     server: server
     port: 443
     uuid: uuid
@@ -923,6 +935,11 @@ proxies: # socks5
       #     h-max-reusable-secs: "1800-3000"
       #     h-keep-alive-period: 0
       #   ## proxy part
+      #   # restls-opts 缺省时继承上传选项；{} 仅关闭下载侧 Restls，TLS 独立配置
+      #   restls-opts:
+      #     password: download-restls-password
+      #     version-hint: tls13
+      #     restls-script: ""
       #   server: server
       #   port: 443
       #   tls: true
@@ -940,6 +957,12 @@ proxies: # socks5
   # Trojan
   - name: "trojan"
     type: trojan
+    # restls-opts: # 启用时 VMess/VLESS 还需 tls: true；Trojan 隐含启用 TLS
+    #   password: restls-password
+    #   version-hint: tls13 # 必填：tls12 或 tls13
+    #   restls-script: "" # 空字符串使用默认剧本
+    # Restls 使用 servername（Trojan 使用 sni）及 client-fingerprint；支持证书指纹校验
+    # 不与 REALITY、ECH、mTLS、XTLS Vision 组合；VLESS XHTTP 仅支持 HTTP/1.1 和 HTTP/2
     server: server
     port: 443
     password: yourpsk
@@ -1786,6 +1809,14 @@ listeners:
     listen: 0.0.0.0
     # rule: sub-rule-name1 # 默认使用 rules，如果未找到 sub-rule 则直接使用 rules
     # proxy: proxy # 如果不为空则直接将该入站流量交由指定 proxy 处理 (当 proxy 不为空时，这里的 proxy 名称必须合法，否则会出错)
+    # res-tls: # 启用前移除 certificate/private-key、client-auth、ech-key 和 reality-config
+    #   enable: true
+    #   dest: test.com:443 # 伪装 TLS 站点；省略端口时使用 443
+    #   password: restls-password
+    #   restls-script: ""
+    #   min-record-len: 0
+    #   rate-limit: 0 # 仅限制未认证回退流量，单位 bit/s；0 不限速
+    #   proxy: "" # 伪装站点连接使用的代理名称
     users:
       - username: 1
         uuid: 9d0cb9d0-964f-4ef6-897d-6c6b3ccf9e68
@@ -1870,6 +1901,14 @@ listeners:
     listen: 0.0.0.0
     # rule: sub-rule-name1 # 默认使用 rules，如果未找到 sub-rule 则直接使用 rules
     # proxy: proxy # 如果不为空则直接将该入站流量交由指定 proxy 处理 (当 proxy 不为空时，这里的 proxy 名称必须合法，否则会出错)
+    # res-tls: # 启用前移除 certificate/private-key、client-auth、ech-key 和 reality-config
+    #   enable: true
+    #   dest: test.com:443 # 伪装 TLS 站点；省略端口时使用 443
+    #   password: restls-password
+    #   restls-script: ""
+    #   min-record-len: 0
+    #   rate-limit: 0 # 仅限制未认证回退流量，单位 bit/s；0 不限速
+    #   proxy: "" # 伪装站点连接使用的代理名称
     users:
       - username: 1
         uuid: 9d0cb9d0-964f-4ef6-897d-6c6b3ccf9e68
@@ -2012,6 +2051,14 @@ listeners:
     listen: 0.0.0.0
     # rule: sub-rule-name1 # 默认使用 rules，如果未找到 sub-rule 则直接使用 rules
     # proxy: proxy # 如果不为空则直接将该入站流量交由指定 proxy 处理 (当 proxy 不为空时，这里的 proxy 名称必须合法，否则会出错)
+    # res-tls: # 启用前移除 certificate/private-key、client-auth、ech-key 和 reality-config
+    #   enable: true
+    #   dest: test.com:443 # 伪装 TLS 站点；省略端口时使用 443
+    #   password: restls-password
+    #   restls-script: ""
+    #   min-record-len: 0
+    #   rate-limit: 0 # 仅限制未认证回退流量，单位 bit/s；0 不限速
+    #   proxy: "" # 伪装站点连接使用的代理名称
     users:
       - username: 1
         password: 9d0cb9d0-964f-4ef6-897d-6c6b3ccf9e68

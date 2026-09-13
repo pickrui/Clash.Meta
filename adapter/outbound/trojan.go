@@ -13,6 +13,7 @@ import (
 	tlsC "github.com/metacubex/mihomo/component/tls"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/transport/gun"
+	"github.com/metacubex/mihomo/transport/restls"
 	"github.com/metacubex/mihomo/transport/shadowsocks/core"
 	"github.com/metacubex/mihomo/transport/trojan"
 	"github.com/metacubex/mihomo/transport/vmess"
@@ -29,6 +30,7 @@ type Trojan struct {
 	// for gun mux
 	gunClient *gun.Client
 
+	restlsConfig  *restls.Config
 	realityConfig *tlsC.RealityConfig
 	echConfig     *ech.Config
 
@@ -50,6 +52,7 @@ type TrojanOption struct {
 	UDP               bool           `proxy:"udp,omitempty"`
 	Network           string         `proxy:"network,omitempty"`
 	ECHOpts           ECHOptions     `proxy:"ech-opts,omitempty"`
+	RestlsOpts        RestlsOptions  `proxy:"restls-opts,omitempty"`
 	RealityOpts       RealityOptions `proxy:"reality-opts,omitempty"`
 	GrpcOpts          GrpcOptions    `proxy:"grpc-opts,omitempty"`
 	WSOpts            WSOptions      `proxy:"ws-opts,omitempty"`
@@ -113,6 +116,18 @@ func (t *Trojan) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.
 			return nil, err
 		}
 
+		if t.restlsConfig != nil {
+			c, err = vmess.StreamTLSConn(ctx, c, &vmess.TLSConfig{
+				Host: wsOpts.TLSConfig.ServerName, SkipCertVerify: t.option.SkipCertVerify,
+				FingerPrint: t.option.Fingerprint, NextProtos: wsOpts.TLSConfig.NextProtos,
+				Restls: t.restlsConfig,
+			})
+			if err != nil {
+				return nil, err
+			}
+			wsOpts.TLS = false // The Restls stream is already established.
+		}
+
 		c, err = vmess.StreamWebsocketConn(ctx, c, wsOpts)
 	case "grpc":
 		break // already handle in dialContext
@@ -132,6 +147,7 @@ func (t *Trojan) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.
 			ClientFingerprint: t.option.ClientFingerprint,
 			NextProtos:        alpn,
 			ECH:               t.echConfig,
+			Restls:            t.restlsConfig,
 			Reality:           t.realityConfig,
 		})
 	}
@@ -276,6 +292,22 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 		return nil, err
 	}
 
+	t.restlsConfig, err = option.RestlsOpts.Parse(option.SNI, option.ClientFingerprint)
+	if err != nil {
+		return nil, err
+	}
+	if t.restlsConfig != nil {
+		if t.realityConfig != nil {
+			return nil, errors.New("Restls is incompatible with REALITY")
+		}
+		if option.ECHOpts.Enable {
+			return nil, errors.New("Restls does not support ECH")
+		}
+		if option.Certificate != "" || option.PrivateKey != "" {
+			return nil, errors.New("Restls does not support client certificates")
+		}
+	}
+
 	t.echConfig, err = option.ECHOpts.Parse()
 	if err != nil {
 		return nil, err
@@ -313,6 +345,7 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 			ClientFingerprint: option.ClientFingerprint,
 			NextProtos:        []string{"h2"},
 			ECH:               t.echConfig,
+			Restls:            t.restlsConfig,
 			Reality:           t.realityConfig,
 		}
 

@@ -16,6 +16,7 @@ import (
 	tlsC "github.com/metacubex/mihomo/component/tls"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/transport/gun"
+	"github.com/metacubex/mihomo/transport/restls"
 	"github.com/metacubex/mihomo/transport/tuic/common"
 	"github.com/metacubex/mihomo/transport/vless"
 	"github.com/metacubex/mihomo/transport/vless/encryption"
@@ -43,6 +44,7 @@ type Vless struct {
 	// for xhttp
 	xhttpClient *xhttp.Client
 
+	restlsConfig  *restls.Config
 	realityConfig *tlsC.RealityConfig
 	echConfig     *ech.Config
 }
@@ -63,6 +65,7 @@ type VlessOption struct {
 	Encryption        string            `proxy:"encryption,omitempty"`
 	Network           string            `proxy:"network,omitempty"`
 	ECHOpts           ECHOptions        `proxy:"ech-opts,omitempty"`
+	RestlsOpts        RestlsOptions     `proxy:"restls-opts,omitempty"`
 	RealityOpts       RealityOptions    `proxy:"reality-opts,omitempty"`
 	HTTPOpts          HTTPOptions       `proxy:"http-opts,omitempty"`
 	HTTP2Opts         HTTP2Options      `proxy:"h2-opts,omitempty"`
@@ -114,6 +117,7 @@ type XHTTPReuseSettings struct {
 }
 
 type XHTTPDownloadSettings struct {
+	RestlsOpts *RestlsOptions `proxy:"restls-opts,omitempty"`
 	// xhttp part
 	Path          *string             `proxy:"path,omitempty"`
 	Host          *string             `proxy:"host,omitempty"`
@@ -183,6 +187,18 @@ func (v *Vless) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.M
 				convert.SetUserAgent(wsOpts.Headers)
 			}
 		}
+		if v.restlsConfig != nil {
+			c, err = vmess.StreamTLSConn(ctx, c, &vmess.TLSConfig{
+				Host: wsOpts.TLSConfig.ServerName, SkipCertVerify: v.option.SkipCertVerify,
+				FingerPrint: v.option.Fingerprint, NextProtos: wsOpts.TLSConfig.NextProtos,
+				Restls: v.restlsConfig,
+			})
+			if err != nil {
+				return nil, err
+			}
+			wsOpts.TLS = false // The Restls stream is already established.
+		}
+
 		c, err = vmess.StreamWebsocketConn(ctx, c, wsOpts)
 	case "http":
 		// readability first, so just copy default TLS logic
@@ -276,6 +292,7 @@ func (v *Vless) streamTLSConn(ctx context.Context, conn net.Conn, isH2 bool) (ne
 			PrivateKey:        v.option.PrivateKey,
 			ClientFingerprint: v.option.ClientFingerprint,
 			ECH:               v.echConfig,
+			Restls:            v.restlsConfig,
 			Reality:           v.realityConfig,
 			NextProtos:        v.option.ALPN,
 		}
@@ -475,6 +492,28 @@ func NewVless(option VlessOption) (*Vless, error) {
 		return nil, err
 	}
 
+	v.restlsConfig, err = option.RestlsOpts.Parse(option.ServerName, option.ClientFingerprint)
+	if err != nil {
+		return nil, err
+	}
+	if v.restlsConfig != nil {
+		if addons != nil {
+			return nil, errors.New("Restls does not support XTLS Vision")
+		}
+		if !option.TLS {
+			return nil, errors.New("Restls requires TLS")
+		}
+		if v.realityConfig != nil {
+			return nil, errors.New("Restls is incompatible with REALITY")
+		}
+		if option.ECHOpts.Enable {
+			return nil, errors.New("Restls does not support ECH")
+		}
+		if option.Certificate != "" || option.PrivateKey != "" {
+			return nil, errors.New("Restls does not support client certificates")
+		}
+	}
+
 	v.echConfig, err = v.option.ECHOpts.Parse()
 	if err != nil {
 		return nil, err
@@ -514,6 +553,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 				ClientFingerprint: option.ClientFingerprint,
 				NextProtos:        []string{"h2"},
 				ECH:               v.echConfig,
+				Restls:            v.restlsConfig,
 				Reality:           v.realityConfig,
 			}
 			if option.ServerName == "" {
@@ -597,6 +637,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 						PrivateKey:        v.option.PrivateKey,
 						ClientFingerprint: v.option.ClientFingerprint,
 						ECH:               v.echConfig,
+						Restls:            v.restlsConfig,
 						Reality:           v.realityConfig,
 						NextProtos:        []string{"h3"},
 					}
@@ -605,6 +646,9 @@ func NewVless(option VlessOption) (*Vless, error) {
 					}
 					if !v.option.TLS {
 						return nil, errors.New("xhttp HTTP/3 requires TLS")
+					}
+					if v.restlsConfig != nil {
+						return nil, errors.New("xhttp HTTP/3 does not support Restls")
 					}
 					if v.realityConfig != nil {
 						return nil, errors.New("xhttp HTTP/3 does not support reality")
@@ -660,6 +704,26 @@ func NewVless(option VlessOption) (*Vless, error) {
 			downloadServerName := lo.FromPtrOr(ds.ServerName, v.option.ServerName)
 			downloadClientFingerprint := lo.FromPtrOr(ds.ClientFingerprint, v.option.ClientFingerprint)
 
+			downloadRestlsOpts := lo.FromPtrOr(ds.RestlsOpts, v.option.RestlsOpts)
+			downloadRestlsConfig, err := downloadRestlsOpts.Parse(downloadServerName, downloadClientFingerprint)
+			if err != nil {
+				return nil, fmt.Errorf("xhttp download-settings: %w", err)
+			}
+			if downloadRestlsConfig != nil {
+				if !downloadTLS {
+					return nil, errors.New("xhttp download-settings: Restls requires TLS")
+				}
+				if downloadRealityCfg != nil {
+					return nil, errors.New("xhttp download-settings: Restls is incompatible with REALITY")
+				}
+				if downloadEchConfig != nil {
+					return nil, errors.New("xhttp download-settings: Restls does not support ECH")
+				}
+				if downloadCertificate != "" || downloadPrivateKey != "" {
+					return nil, errors.New("xhttp download-settings: Restls does not support client certificates")
+				}
+			}
+
 			downloadAddr := net.JoinHostPort(downloadServer, strconv.Itoa(downloadPort))
 
 			downloadHost := lo.FromPtrOr(ds.Host, v.option.XHTTPOpts.Host)
@@ -708,6 +772,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 								PrivateKey:        downloadPrivateKey,
 								ClientFingerprint: downloadClientFingerprint,
 								ECH:               downloadEchConfig,
+								Restls:            downloadRestlsConfig,
 								Reality:           downloadRealityCfg,
 								NextProtos:        downloadALPN,
 							}
@@ -735,6 +800,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 							PrivateKey:        downloadPrivateKey,
 							ClientFingerprint: downloadClientFingerprint,
 							ECH:               downloadEchConfig,
+							Restls:            downloadRestlsConfig,
 							Reality:           downloadRealityCfg,
 							NextProtos:        []string{"h3"},
 						}
@@ -743,6 +809,9 @@ func NewVless(option VlessOption) (*Vless, error) {
 						}
 						if !downloadTLS {
 							return nil, errors.New("xhttp HTTP/3 requires TLS")
+						}
+						if downloadRestlsConfig != nil {
+							return nil, errors.New("xhttp HTTP/3 does not support Restls")
 						}
 						if downloadRealityCfg != nil {
 							return nil, errors.New("xhttp HTTP/3 does not support reality")

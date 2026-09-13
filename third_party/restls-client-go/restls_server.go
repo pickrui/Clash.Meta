@@ -274,6 +274,44 @@ func readTLSRecord(conn net.Conn) ([]byte, error) {
 	return record[:recordHeaderLen+n], err
 }
 
+// restlsServerRecordReader preserves partially consumed records across a read
+// deadline. HTTP Hijack aborts a background Read with a temporary deadline; the
+// next Read must resume the same record instead of treating its tail as a header.
+// Calls are serialized by restlsServerConn.readMu.
+type restlsServerRecordReader struct {
+	header [recordHeaderLen]byte
+	record []byte
+	n      int
+}
+
+func (r *restlsServerRecordReader) ReadRecord(conn net.Conn) ([]byte, error) {
+	if r.n < recordHeaderLen {
+		n, err := io.ReadFull(conn, r.header[r.n:])
+		r.n += n
+		if err != nil {
+			return nil, err
+		}
+	}
+	if r.record == nil {
+		payloadLen := int(r.header[3])<<8 | int(r.header[4])
+		version := uint16(r.header[1])<<8 | uint16(r.header[2])
+		if !isTLSRecordType(recordType(r.header[0])) || version < VersionSSL30 || version > VersionTLS13 || payloadLen > maxCiphertext {
+			return nil, errInvalidTLSRecordHeader
+		}
+		r.record = make([]byte, recordHeaderLen+payloadLen)
+		copy(r.record, r.header[:])
+	}
+	n, err := io.ReadFull(conn, r.record[r.n:])
+	r.n += n
+	if err != nil {
+		return nil, err
+	}
+	record := r.record
+	r.record = nil
+	r.n = 0
+	return record, nil
+}
+
 func isTLSRecordType(typ recordType) bool {
 	switch typ {
 	case recordTypeChangeCipherSpec, recordTypeAlert, recordTypeHandshake, recordTypeApplicationData:
@@ -1013,8 +1051,9 @@ type restlsServerConn struct {
 	target  net.Conn
 	state   *restlsServerState
 
-	readMu  sync.Mutex
-	readBuf []byte
+	readMu       sync.Mutex
+	readBuf      []byte
+	recordReader restlsServerRecordReader
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -1067,7 +1106,7 @@ func (c *restlsServerConn) Read(p []byte) (int, error) {
 		c.state.pendingClientRecord = nil
 		if record == nil {
 			var err error
-			record, err = readTLSRecord(c.inbound)
+			record, err = c.recordReader.ReadRecord(c.inbound)
 			if err != nil {
 				if c.isClosed() {
 					return 0, net.ErrClosed

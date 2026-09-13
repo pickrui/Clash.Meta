@@ -8,12 +8,14 @@ import (
 	"github.com/metacubex/mihomo/component/ca"
 	"github.com/metacubex/mihomo/component/ech"
 	tlsC "github.com/metacubex/mihomo/component/tls"
+	"github.com/metacubex/mihomo/transport/restls"
 
 	"github.com/metacubex/tls"
 	utls "github.com/metacubex/utls"
 )
 
 type TLSConfig struct {
+	Restls               *restls.Config
 	Host                 string
 	SkipCertVerify       bool
 	CAFile               string
@@ -54,6 +56,29 @@ func (cfg *TLSConfig) ToStdConfig() (*tls.Config, error) {
 }
 
 func StreamTLSConn(ctx context.Context, conn net.Conn, cfg *TLSConfig) (net.Conn, error) {
+	if cfg.Restls != nil {
+		if cfg.Reality != nil || cfg.ECH != nil || cfg.Certificate != "" || cfg.PrivateKey != "" {
+			return nil, errors.New("Restls does not support REALITY, ECH or client certificates")
+		}
+		config := cfg.Restls.Clone()
+		config.ServerName = cfg.Host
+		config.NextProtos = cfg.NextProtos
+		config.InsecureSkipVerify = cfg.SkipCertVerify
+		if cfg.CAFile != "" {
+			pool, err := ca.LoadCertificates(cfg.CAFile)
+			if err != nil {
+				return nil, err
+			}
+			config.RootCAs = pool
+		}
+		if cfg.FingerPrint != "" {
+			if err := restls.SetFingerprint(config, cfg.FingerPrint); err != nil {
+				return nil, err
+			}
+		}
+		return restls.NewRestls(ctx, conn, config)
+	}
+
 	tlsConfig, err := cfg.ToStdConfig()
 	if err != nil {
 		return nil, err

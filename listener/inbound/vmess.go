@@ -5,6 +5,7 @@ import (
 
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/restls"
 	"github.com/metacubex/mihomo/listener/sing_vmess"
 	"github.com/metacubex/mihomo/log"
 )
@@ -19,6 +20,7 @@ type VmessOption struct {
 	ClientAuthType  string        `inbound:"client-auth-type,omitempty"`
 	ClientAuthCert  string        `inbound:"client-auth-cert,omitempty"`
 	EchKey          string        `inbound:"ech-key,omitempty"`
+	ResTLS          ResTLS        `inbound:"res-tls,omitempty"`
 	RealityConfig   RealityConfig `inbound:"reality-config,omitempty"`
 	MuxOption       MuxOption     `inbound:"mux-option,omitempty"`
 }
@@ -41,6 +43,11 @@ type Vmess struct {
 }
 
 func NewVmess(options *VmessOption) (*Vmess, error) {
+	if options.ResTLS.Enable {
+		if err := restls.Validate(options.ResTLS.Build()); err != nil {
+			return nil, err
+		}
+	}
 	base, err := NewBase(&options.BaseOption)
 	if err != nil {
 		return nil, err
@@ -67,6 +74,7 @@ func NewVmess(options *VmessOption) (*Vmess, error) {
 			ClientAuthType:  options.ClientAuthType,
 			ClientAuthCert:  options.ClientAuthCert,
 			EchKey:          options.EchKey,
+			ResTLS:          options.ResTLS.Build(),
 			RealityConfig:   options.RealityConfig.Build(),
 			MuxOption:       options.MuxOption.Build(),
 		},
@@ -94,6 +102,7 @@ func (v *Vmess) Listen(tunnel C.Tunnel) error {
 	var err error
 	v.l, err = sing_vmess.New(v.vs, tunnel, v.Additions()...)
 	if err != nil {
+		v.l = nil
 		return err
 	}
 	log.Infoln("Vmess[%s] proxy listening at: %s", v.Name(), v.Address())
@@ -102,6 +111,9 @@ func (v *Vmess) Listen(tunnel C.Tunnel) error {
 
 // Close implements constant.InboundListener
 func (v *Vmess) Close() error {
+	if v.l == nil {
+		return nil
+	}
 	return v.l.Close()
 }
 

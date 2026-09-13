@@ -17,6 +17,7 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/ntp"
 	"github.com/metacubex/mihomo/transport/gun"
+	"github.com/metacubex/mihomo/transport/restls"
 	mihomoVMess "github.com/metacubex/mihomo/transport/vmess"
 
 	"github.com/metacubex/http"
@@ -36,6 +37,7 @@ type Vmess struct {
 	// for gun mux
 	gunClient *gun.Client
 
+	restlsConfig  *restls.Config
 	realityConfig *tlsC.RealityConfig
 	echConfig     *ech.Config
 }
@@ -58,6 +60,7 @@ type VmessOption struct {
 	PrivateKey          string         `proxy:"private-key,omitempty"`
 	ServerName          string         `proxy:"servername,omitempty"`
 	ECHOpts             ECHOptions     `proxy:"ech-opts,omitempty"`
+	RestlsOpts          RestlsOptions  `proxy:"restls-opts,omitempty"`
 	RealityOpts         RealityOptions `proxy:"reality-opts,omitempty"`
 	HTTPOpts            HTTPOptions    `proxy:"http-opts,omitempty"`
 	HTTP2Opts           HTTP2Options   `proxy:"h2-opts,omitempty"`
@@ -145,6 +148,18 @@ func (v *Vmess) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.M
 				wsOpts.TLSConfig.ServerName = host
 			}
 		}
+		if v.restlsConfig != nil {
+			c, err = mihomoVMess.StreamTLSConn(ctx, c, &mihomoVMess.TLSConfig{
+				Host: wsOpts.TLSConfig.ServerName, SkipCertVerify: v.option.SkipCertVerify,
+				FingerPrint: v.option.Fingerprint, NextProtos: wsOpts.TLSConfig.NextProtos,
+				Restls: v.restlsConfig,
+			})
+			if err != nil {
+				return nil, err
+			}
+			wsOpts.TLS = false // The Restls stream is already established.
+		}
+
 		c, err = mihomoVMess.StreamWebsocketConn(ctx, c, wsOpts)
 	case "http":
 		// readability first, so just copy default TLS logic
@@ -256,6 +271,7 @@ func (v *Vmess) streamTLSConn(ctx context.Context, conn net.Conn, isH2 bool) (ne
 			PrivateKey:        v.option.PrivateKey,
 			ClientFingerprint: v.option.ClientFingerprint,
 			ECH:               v.echConfig,
+			Restls:            v.restlsConfig,
 			Reality:           v.realityConfig,
 			NextProtos:        v.option.ALPN,
 		}
@@ -397,6 +413,25 @@ func NewVmess(option VmessOption) (*Vmess, error) {
 		return nil, err
 	}
 
+	v.restlsConfig, err = option.RestlsOpts.Parse(option.ServerName, option.ClientFingerprint)
+	if err != nil {
+		return nil, err
+	}
+	if v.restlsConfig != nil {
+		if !option.TLS {
+			return nil, errors.New("Restls requires TLS")
+		}
+		if v.realityConfig != nil {
+			return nil, errors.New("Restls is incompatible with REALITY")
+		}
+		if option.ECHOpts.Enable {
+			return nil, errors.New("Restls does not support ECH")
+		}
+		if option.Certificate != "" || option.PrivateKey != "" {
+			return nil, errors.New("Restls does not support client certificates")
+		}
+	}
+
 	v.echConfig, err = v.option.ECHOpts.Parse()
 	if err != nil {
 		return nil, err
@@ -436,6 +471,7 @@ func NewVmess(option VmessOption) (*Vmess, error) {
 				ClientFingerprint: option.ClientFingerprint,
 				NextProtos:        []string{"h2"},
 				ECH:               v.echConfig,
+				Restls:            v.restlsConfig,
 				Reality:           v.realityConfig,
 			}
 			if option.ServerName == "" {

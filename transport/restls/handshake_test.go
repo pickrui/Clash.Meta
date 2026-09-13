@@ -22,7 +22,6 @@ import (
 )
 
 // Both the camouflage TLS target and the Restls peer are local test servers.
-// The app still only exposes the existing outbound Restls plugin.
 func restlsTestPeer(t *testing.T, version uint16) (string, *x509.CertPool, string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

@@ -24,6 +24,7 @@ type VmessServer struct {
 	ClientAuthType  string
 	ClientAuthCert  string
 	EchKey          string
+	ResTLS          ResTLS
 	RealityConfig   reality.Config
 	MuxOption       sing.MuxOption `yaml:"mux-option" json:"mux-option,omitempty"`
 }

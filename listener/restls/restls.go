@@ -14,7 +14,7 @@ import (
 )
 
 // Server owns handshakes and unauthenticated fallback relays until the
-// authenticated connection is transferred to the Shadowsocks handler.
+// authenticated connection is transferred to the protocol handler.
 type Server struct {
 	config  restls.ServerConfig
 	mu      sync.Mutex

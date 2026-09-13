@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -13,6 +14,7 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/listener/reality"
+	"github.com/metacubex/mihomo/listener/restls"
 	"github.com/metacubex/mihomo/listener/sing"
 	"github.com/metacubex/mihomo/ntp"
 	"github.com/metacubex/mihomo/transport/gun"
@@ -28,14 +30,14 @@ import (
 )
 
 type Listener struct {
-	closed     bool
+	closed     atomic.Bool
 	config     LC.VlessServer
 	listeners  []net.Listener
 	service    *Service[string]
 	decryption *encryption.ServerInstance
 }
 
-func New(config LC.VlessServer, tunnel C.Tunnel, additions ...inbound.Addition) (sl *Listener, err error) {
+func New(config LC.VlessServer, tunnel C.Tunnel, additions ...inbound.Addition) (_ *Listener, err error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-VLESS"),
@@ -64,19 +66,16 @@ func New(config LC.VlessServer, tunnel C.Tunnel, additions ...inbound.Addition) 
 			return it.Flow
 		}))
 
-	sl = &Listener{config: config, service: service}
+	sl := &Listener{config: config, service: service}
+	defer func() {
+		if err != nil {
+			_ = sl.Close()
+		}
+	}()
 
 	sl.decryption, err = encryption.NewServer(config.Decryption)
 	if err != nil {
 		return nil, err
-	}
-	if sl.decryption != nil {
-		defer func() { // decryption must be closed to avoid the goroutine leak
-			if err != nil {
-				_ = sl.decryption.Close()
-				sl.decryption = nil
-			}
-		}()
 	}
 
 	httpServer := http.Server{
@@ -127,6 +126,24 @@ func New(config LC.VlessServer, tunnel C.Tunnel, additions ...inbound.Addition) 
 			return nil, err
 		}
 	}
+	if config.ResTLS.Enable {
+		if config.Certificate != "" || config.PrivateKey != "" {
+			return nil, errors.New("certificate is unavailable in Restls")
+		}
+		if tlsConfig.ClientAuth != tls.NoClientCert {
+			return nil, errors.New("client-auth is unavailable in Restls")
+		}
+		if realityBuilder != nil {
+			return nil, errors.New("REALITY is unavailable in Restls")
+		}
+		if config.EchKey != "" {
+			return nil, errors.New("ECH is unavailable in Restls")
+		}
+		if err := restls.Validate(config.ResTLS); err != nil {
+			return nil, err
+		}
+	}
+
 	if config.WsPath != "" {
 		httpMux := http.NewServeMux()
 		httpMux.HandleFunc(config.WsPath, func(w http.ResponseWriter, r *http.Request) {
@@ -217,6 +234,10 @@ func New(config LC.VlessServer, tunnel C.Tunnel, additions ...inbound.Addition) 
 			tlsConfig.NextProtos = append([]string{"h2"}, tlsConfig.NextProtos...)
 		}
 	}
+	if !config.ResTLS.Enable && realityBuilder == nil && tlsConfig.GetCertificate == nil && sl.decryption == nil && !config.AllowInsecure {
+		return nil, errors.New("Vless requires certificates, res-tls, reality, decryption or allow-insecure")
+	}
+
 	for _, addr := range strings.Split(config.Listen, ",") {
 		addr := addr
 
@@ -225,12 +246,17 @@ func New(config LC.VlessServer, tunnel C.Tunnel, additions ...inbound.Addition) 
 		if err != nil {
 			return nil, err
 		}
-		if realityBuilder != nil {
+		if config.ResTLS.Enable {
+			wrapped, wrapErr := restls.NewListener(l, config.ResTLS, tunnel)
+			if wrapErr != nil {
+				_ = l.Close()
+				return nil, wrapErr
+			}
+			l = wrapped
+		} else if realityBuilder != nil {
 			l = realityBuilder.NewListener(l)
 		} else if tlsConfig.GetCertificate != nil {
 			l = tls.NewListener(l, tlsConfig)
-		} else if sl.decryption == nil && !config.AllowInsecure {
-			return nil, errors.New("disallow using Vless without any certificates/reality/decryption/allow-insecure config")
 		}
 		sl.listeners = append(sl.listeners, l)
 
@@ -242,7 +268,7 @@ func New(config LC.VlessServer, tunnel C.Tunnel, additions ...inbound.Addition) 
 			for {
 				c, err := l.Accept()
 				if err != nil {
-					if sl.closed {
+					if sl.closed.Load() || errors.Is(err, net.ErrClosed) {
 						break
 					}
 					continue
@@ -257,7 +283,9 @@ func New(config LC.VlessServer, tunnel C.Tunnel, additions ...inbound.Addition) 
 }
 
 func (l *Listener) Close() error {
-	l.closed = true
+	if !l.closed.CompareAndSwap(false, true) {
+		return nil
+	}
 	var retErr error
 	for _, lis := range l.listeners {
 		err := lis.Close()

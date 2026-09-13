@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -15,6 +16,7 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/listener/reality"
+	"github.com/metacubex/mihomo/listener/restls"
 	"github.com/metacubex/mihomo/listener/sing"
 	"github.com/metacubex/mihomo/ntp"
 	"github.com/metacubex/mihomo/transport/gun"
@@ -29,7 +31,7 @@ import (
 )
 
 type Listener struct {
-	closed     bool
+	closed     atomic.Bool
 	config     LC.TrojanServer
 	listeners  []net.Listener
 	keys       map[[trojan.KeyLength]byte]string
@@ -37,7 +39,7 @@ type Listener struct {
 	handler    *sing.ListenerHandler
 }
 
-func New(config LC.TrojanServer, tunnel C.Tunnel, additions ...inbound.Addition) (sl *Listener, err error) {
+func New(config LC.TrojanServer, tunnel C.Tunnel, additions ...inbound.Addition) (_ *Listener, err error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-TROJAN"),
@@ -72,7 +74,12 @@ func New(config LC.TrojanServer, tunnel C.Tunnel, additions ...inbound.Addition)
 			return nil, err
 		}
 	}
-	sl = &Listener{false, config, nil, keys, pickCipher, h}
+	sl := &Listener{config: config, keys: keys, pickCipher: pickCipher, handler: h}
+	defer func() {
+		if err != nil {
+			_ = sl.Close()
+		}
+	}()
 
 	httpServer := http.Server{
 		IdleTimeout: 30 * time.Second,
@@ -122,6 +129,24 @@ func New(config LC.TrojanServer, tunnel C.Tunnel, additions ...inbound.Addition)
 			return nil, err
 		}
 	}
+	if config.ResTLS.Enable {
+		if config.Certificate != "" || config.PrivateKey != "" {
+			return nil, errors.New("certificate is unavailable in Restls")
+		}
+		if tlsConfig.ClientAuth != tls.NoClientCert {
+			return nil, errors.New("client-auth is unavailable in Restls")
+		}
+		if realityBuilder != nil {
+			return nil, errors.New("REALITY is unavailable in Restls")
+		}
+		if config.EchKey != "" {
+			return nil, errors.New("ECH is unavailable in Restls")
+		}
+		if err := restls.Validate(config.ResTLS); err != nil {
+			return nil, err
+		}
+	}
+
 	if config.WsPath != "" {
 		httpMux := http.NewServeMux()
 		httpMux.HandleFunc(config.WsPath, func(w http.ResponseWriter, r *http.Request) {
@@ -156,6 +181,10 @@ func New(config LC.TrojanServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		tlsConfig.NextProtos = append([]string{"h2"}, tlsConfig.NextProtos...) // h2 must before http/1.1
 	}
 
+	if !config.ResTLS.Enable && realityBuilder == nil && tlsConfig.GetCertificate == nil && !config.TrojanSSOption.Enabled && !config.AllowInsecure {
+		return nil, errors.New("Trojan requires certificates, res-tls, reality, ss or allow-insecure")
+	}
+
 	for _, addr := range strings.Split(config.Listen, ",") {
 		addr := addr
 
@@ -164,12 +193,17 @@ func New(config LC.TrojanServer, tunnel C.Tunnel, additions ...inbound.Addition)
 		if err != nil {
 			return nil, err
 		}
-		if realityBuilder != nil {
+		if config.ResTLS.Enable {
+			wrapped, wrapErr := restls.NewListener(l, config.ResTLS, tunnel)
+			if wrapErr != nil {
+				_ = l.Close()
+				return nil, wrapErr
+			}
+			l = wrapped
+		} else if realityBuilder != nil {
 			l = realityBuilder.NewListener(l)
 		} else if tlsConfig.GetCertificate != nil {
 			l = tls.NewListener(l, tlsConfig)
-		} else if !config.TrojanSSOption.Enabled && !config.AllowInsecure {
-			return nil, errors.New("disallow using Trojan without both certificates/reality/ss/allow-insecure config")
 		}
 		sl.listeners = append(sl.listeners, l)
 
@@ -181,7 +215,7 @@ func New(config LC.TrojanServer, tunnel C.Tunnel, additions ...inbound.Addition)
 			for {
 				c, err := l.Accept()
 				if err != nil {
-					if sl.closed {
+					if sl.closed.Load() || errors.Is(err, net.ErrClosed) {
 						break
 					}
 					continue
@@ -196,7 +230,9 @@ func New(config LC.TrojanServer, tunnel C.Tunnel, additions ...inbound.Addition)
 }
 
 func (l *Listener) Close() error {
-	l.closed = true
+	if !l.closed.CompareAndSwap(false, true) {
+		return nil
+	}
 	var retErr error
 	for _, lis := range l.listeners {
 		err := lis.Close()

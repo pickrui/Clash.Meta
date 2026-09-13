@@ -27,6 +27,7 @@ type VlessServer struct {
 	ClientAuthCert  string
 	EchKey          string
 	AllowInsecure   bool
+	ResTLS          ResTLS
 	RealityConfig   reality.Config
 	MuxOption       sing.MuxOption `yaml:"mux-option" json:"mux-option,omitempty"`
 }

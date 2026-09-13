@@ -42,3 +42,9 @@ When updating this snapshot, compare it against the module ZIP verified by the
 Go checksum database, preserve both license files, reapply or retire the
 logging and fallback cancellation changes, and run the Restls CI gate and Android core checks. A compatible
 upstream fix can replace this snapshot after those checks pass.
+
+The phase-21 server reader also retains partial TLS record headers and payloads
+across temporary read deadlines. HTTP Upgrade's Hijack aborts a background read;
+discarding a half-read record there could break the authenticated Restls stream.
+The original handshake/fallback reader is unchanged. The deadline regression
+interrupts every byte boundary and verifies both the resumed and following record.
