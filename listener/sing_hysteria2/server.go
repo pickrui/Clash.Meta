@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -187,15 +186,8 @@ func New(config LC.Hysteria2Server, tunnel C.Tunnel, additions ...inbound.Additi
 				TLSHandshakeTimeout:   10 * time.Second,
 				ExpectContinueTimeout: 1 * time.Second,
 			}},
-			Resolver: func(ctx context.Context, host string, ipv4, ipv6 bool) ([]netip.Addr, error) {
-				if ipv4 && !ipv6 {
-					return resolver.LookupIPv4WithResolver(ctx, host, resolver.ProxyServerHostResolver)
-				} else if ipv6 && !ipv4 {
-					return resolver.LookupIPv4WithResolver(ctx, host, resolver.ProxyServerHostResolver)
-				}
-				return resolver.LookupIPWithResolver(ctx, host, resolver.ProxyServerHostResolver)
-			},
-			Logger: log.SingLogger,
+			Resolver: resolver.LookupIPForHysteria2Realm,
+			Logger:   log.SingLogger,
 		}
 	}
 

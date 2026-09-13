@@ -43,7 +43,7 @@ require (
 	github.com/metacubex/ssh v0.1.0
 	github.com/metacubex/tailscale v0.0.0-20260520011538-f23132fac4b7
 	github.com/metacubex/tfo-go v0.0.0-20251130171125-413e892ac443
-	github.com/metacubex/tls v0.1.7
+	github.com/metacubex/tls v0.1.8
 	github.com/metacubex/utls v1.8.7
 	github.com/metacubex/wireguard-go v0.0.0-20250820062549-a6cecdd7f57f
 	github.com/mroth/weightedrand/v2 v2.1.0
