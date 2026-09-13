@@ -241,6 +241,16 @@ func NewMasque(option MasqueOption) (*Masque, error) {
 	return outbound, nil
 }
 
+func (w *Masque) dialQuic(ctx context.Context) (net.PacketConn, *quic.Conn, error) {
+	// MASQUE backends can reject connections without a nonzero source connection ID.
+	pc, quicConn, err := common.DialQuic(ctx, w.addr, w.DialOptions(), w.dialer, w.tlsConfig, w.quicConfig, common.DialQuicOption{ConnectionIDLength: 20})
+	if err != nil {
+		return nil, nil, err
+	}
+	common.SetCongestionController(quicConn, w.option.CongestionController, w.option.CWND, w.option.BBRProfile)
+	return pc, quicConn, nil
+}
+
 func (w *Masque) run(ctx context.Context) error {
 	if w.running.Load() {
 		return nil
@@ -275,11 +285,10 @@ func (w *Masque) run(ctx context.Context) error {
 		}
 	} else {
 		var quicConn *quic.Conn
-		pc, quicConn, err = common.DialQuic(ctx, w.addr, w.DialOptions(), w.dialer, w.tlsConfig, w.quicConfig, false)
+		pc, quicConn, err = w.dialQuic(ctx)
 		if err != nil {
 			return err
 		}
-		common.SetCongestionController(quicConn, w.option.CongestionController, w.option.CWND, w.option.BBRProfile)
 
 		closer, ipConn, err = masque.ConnectTunnel(ctx, quicConn, w.uri)
 		if err != nil {

@@ -4,6 +4,9 @@ import (
 	"context"
 	"net"
 
+	"github.com/metacubex/mihomo/component/ca"
+	"github.com/metacubex/mihomo/ntp"
+
 	tls "github.com/metacubex/restls-client-go"
 )
 
@@ -21,7 +24,15 @@ func (r *Restls) Upstream() any {
 
 type Config = tls.Config
 
-var NewRestlsConfig = tls.NewRestlsConfig
+func NewRestlsConfig(serverName, password, versionHint, restlsScript, clientID string) (*Config, error) {
+	config, err := tls.NewRestlsConfig(serverName, password, versionHint, restlsScript, clientID)
+	if err != nil {
+		return nil, err
+	}
+	config.RootCAs = ca.GetCertPool()
+	config.Time = ntp.Now
+	return config, nil
+}
 
 // NewRestls return a Restls Connection
 func NewRestls(ctx context.Context, conn net.Conn, config *Config) (net.Conn, error) {
