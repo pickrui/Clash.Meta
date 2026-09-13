@@ -17,7 +17,7 @@ require (
 	github.com/metacubex/blake3 v0.1.0
 	github.com/metacubex/chacha v0.1.5
 	github.com/metacubex/chi v0.1.0
-	github.com/metacubex/connect-ip-go v0.0.0-20260412152424-e1625567920a
+	github.com/metacubex/connect-ip-go v0.0.0-20260727083417-67ccdb0cf771
 	github.com/metacubex/cpu v0.1.1
 	github.com/metacubex/edwards25519 v1.2.0
 	github.com/metacubex/fswatch v0.1.1
@@ -26,13 +26,13 @@ require (
 	github.com/metacubex/kcp-go v0.0.0-20260105040817-550693377604
 	github.com/metacubex/mhurl v0.1.0
 	github.com/metacubex/mlkem v0.1.0
-	github.com/metacubex/quic-go v0.59.1-0.20260606115121-0662b57ad5bf
+	github.com/metacubex/quic-go v0.61.1-0.20260727080200-2548683b76f4
 	github.com/metacubex/randv2 v0.2.0
 	github.com/metacubex/restls-client-go v0.1.7
 	github.com/metacubex/sevenzip v1.6.4
 	github.com/metacubex/sing v0.5.7
 	github.com/metacubex/sing-mux v0.3.10
-	github.com/metacubex/sing-quic v0.0.0-20260527143057-68e10a6afdc3
+	github.com/metacubex/sing-quic v0.0.0-20260726014900-38b0e9295f51
 	github.com/metacubex/sing-shadowsocks v0.2.12
 	github.com/metacubex/sing-shadowsocks2 v0.2.7
 	github.com/metacubex/sing-shadowtls v0.0.0-20260517015314-c11c36474edc
