@@ -57,6 +57,7 @@ type SnellOption struct {
 	ShadowTLSSNI            string   `proxy:"shadow-tls-sni,omitempty"`
 	ShadowTLSVersion        int      `proxy:"shadow-tls-version,omitempty"`
 	ShadowTLSSkipCertVerify bool     `proxy:"shadow-tls-skip-cert-verify,omitempty"`
+	ShadowTLSNameCertVerify string   `proxy:"shadow-tls-name-cert-verify,omitempty"`
 	ShadowTLSFingerprint    string   `proxy:"shadow-tls-fingerprint,omitempty"`
 	ShadowTLSCertificate    string   `proxy:"shadow-tls-certificate,omitempty"`
 	ShadowTLSPrivateKey     string   `proxy:"shadow-tls-private-key,omitempty"`
@@ -102,6 +103,7 @@ type snellObfsOption struct {
 	PrivateKey        string            `obfs:"private-key,omitempty"`
 	Headers           map[string]string `obfs:"headers,omitempty"`
 	SkipCertVerify    bool              `obfs:"skip-cert-verify,omitempty"`
+	NameCertVerify    string            `obfs:"name-cert-verify,omitempty"`
 }
 
 const defaultSnellClientFingerprint = "chrome"
@@ -226,6 +228,7 @@ func snellShadowTLSOption(option SnellOption) (*shadowtls.ShadowTLSOption, error
 		Certificate:       option.ShadowTLSCertificate,
 		PrivateKey:        option.ShadowTLSPrivateKey,
 		ClientFingerprint: resolveSnellClientFingerprint(&snellObfsOption{}, option),
+		NameCertVerify:    option.ShadowTLSNameCertVerify,
 		SkipCertVerify:    option.ShadowTLSSkipCertVerify,
 		Version:           version,
 		ALPN:              alpn,
@@ -237,6 +240,7 @@ func hasSnellShadowTLSOption(option SnellOption) bool {
 		option.ShadowTLSSNI != "" ||
 		option.ShadowTLSVersion != 0 ||
 		option.ShadowTLSSkipCertVerify ||
+		option.ShadowTLSNameCertVerify != "" ||
 		option.ShadowTLSFingerprint != "" ||
 		option.ShadowTLSCertificate != "" ||
 		option.ShadowTLSPrivateKey != "" ||
@@ -538,6 +542,7 @@ func NewSnell(option SnellOption) (*Snell, error) {
 		s.echTLS = &vmess.TLSConfig{
 			Host:                 obfsOption.Host,
 			SkipCertVerify:       obfsOption.SkipCertVerify,
+			NameCertVerify:       obfsOption.NameCertVerify,
 			CAFile:               obfsOption.CAFile,
 			ClientFingerprint:    resolveSnellClientFingerprint(obfsOption, option),
 			FingerPrint:          obfsOption.Fingerprint,

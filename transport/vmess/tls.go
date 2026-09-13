@@ -18,6 +18,7 @@ type TLSConfig struct {
 	Restls               *restls.Config
 	Host                 string
 	SkipCertVerify       bool
+	NameCertVerify       string
 	CAFile               string
 	FingerPrint          string
 	Certificate          string
@@ -39,9 +40,10 @@ func (cfg *TLSConfig) ToStdConfig() (*tls.Config, error) {
 			NextProtos:         cfg.NextProtos,
 			ClientSessionCache: cfg.ClientSessionCache,
 		},
-		Fingerprint: cfg.FingerPrint,
-		Certificate: cfg.Certificate,
-		PrivateKey:  cfg.PrivateKey,
+		Fingerprint:    cfg.FingerPrint,
+		NameCertVerify: cfg.NameCertVerify,
+		Certificate:    cfg.Certificate,
+		PrivateKey:     cfg.PrivateKey,
 	})
 	if err != nil {
 		return nil, err
@@ -51,6 +53,9 @@ func (cfg *TLSConfig) ToStdConfig() (*tls.Config, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+	if cfg.CAFile != "" && cfg.NameCertVerify != "" && cfg.FingerPrint == "" {
+		ca.SetNameCertVerify(tlsConfig, cfg.NameCertVerify)
 	}
 	return tlsConfig, nil
 }
@@ -72,9 +77,12 @@ func StreamTLSConn(ctx context.Context, conn net.Conn, cfg *TLSConfig) (net.Conn
 			config.RootCAs = pool
 		}
 		if cfg.FingerPrint != "" {
-			if err := restls.SetFingerprint(config, cfg.FingerPrint); err != nil {
+			if err := restls.SetFingerprint(config, cfg.FingerPrint, cfg.NameCertVerify); err != nil {
 				return nil, err
 			}
+		}
+		if cfg.FingerPrint == "" && cfg.NameCertVerify != "" {
+			restls.SetNameCertVerify(config, cfg.NameCertVerify)
 		}
 		return restls.NewRestls(ctx, conn, config)
 	}

@@ -70,6 +70,7 @@ type v2rayObfsOption struct {
 	PrivateKey               string            `obfs:"private-key,omitempty"`
 	Headers                  map[string]string `obfs:"headers,omitempty"`
 	SkipCertVerify           bool              `obfs:"skip-cert-verify,omitempty"`
+	NameCertVerify           string            `obfs:"name-cert-verify,omitempty"`
 	Mux                      bool              `obfs:"mux,omitempty"`
 	V2rayHttpUpgrade         bool              `obfs:"v2ray-http-upgrade,omitempty"`
 	V2rayHttpUpgradeFastOpen bool              `obfs:"v2ray-http-upgrade-fast-open,omitempty"`
@@ -86,6 +87,7 @@ type gostObfsOption struct {
 	PrivateKey     string            `obfs:"private-key,omitempty"`
 	Headers        map[string]string `obfs:"headers,omitempty"`
 	SkipCertVerify bool              `obfs:"skip-cert-verify,omitempty"`
+	NameCertVerify string            `obfs:"name-cert-verify,omitempty"`
 	Mux            bool              `obfs:"mux,omitempty"`
 }
 
@@ -96,6 +98,7 @@ type shadowTLSOption struct {
 	Certificate    string   `obfs:"certificate,omitempty"`
 	PrivateKey     string   `obfs:"private-key,omitempty"`
 	SkipCertVerify bool     `obfs:"skip-cert-verify,omitempty"`
+	NameCertVerify string   `obfs:"name-cert-verify,omitempty"`
 	Version        int      `obfs:"version,omitempty"`
 	ALPN           []string `obfs:"alpn,omitempty"`
 }
@@ -107,6 +110,7 @@ type restlsOption struct {
 	RestlsScript   string `obfs:"restls-script,omitempty"`
 	Fingerprint    string `obfs:"fingerprint,omitempty"`
 	SkipCertVerify bool   `obfs:"skip-cert-verify,omitempty"`
+	NameCertVerify string `obfs:"name-cert-verify,omitempty"`
 	ForceTLS12     bool   `obfs:"force-tls12,omitempty"` // for test
 }
 
@@ -337,6 +341,7 @@ func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 		if opts.TLS {
 			v2rayOption.TLS = true
 			v2rayOption.SkipCertVerify = opts.SkipCertVerify
+			v2rayOption.NameCertVerify = opts.NameCertVerify
 			v2rayOption.Fingerprint = opts.Fingerprint
 			v2rayOption.Certificate = opts.Certificate
 			v2rayOption.PrivateKey = opts.PrivateKey
@@ -367,6 +372,7 @@ func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 		if opts.TLS {
 			gostOption.TLS = true
 			gostOption.SkipCertVerify = opts.SkipCertVerify
+			gostOption.NameCertVerify = opts.NameCertVerify
 			gostOption.Fingerprint = opts.Fingerprint
 			gostOption.Certificate = opts.Certificate
 			gostOption.PrivateKey = opts.PrivateKey
@@ -394,6 +400,7 @@ func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 			PrivateKey:        opt.PrivateKey,
 			ClientFingerprint: option.ClientFingerprint,
 			SkipCertVerify:    opt.SkipCertVerify,
+			NameCertVerify:    opt.NameCertVerify,
 			Version:           opt.Version,
 		}
 
@@ -415,9 +422,12 @@ func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 		}
 		restlsConfig.InsecureSkipVerify = restlsOpt.SkipCertVerify
 		if restlsOpt.Fingerprint != "" {
-			if err := restls.SetFingerprint(restlsConfig, restlsOpt.Fingerprint); err != nil {
+			if err := restls.SetFingerprint(restlsConfig, restlsOpt.Fingerprint, restlsOpt.NameCertVerify); err != nil {
 				return nil, fmt.Errorf("ss %s initialize restls-plugin error: %w", addr, err)
 			}
+		}
+		if restlsOpt.Fingerprint == "" && restlsOpt.NameCertVerify != "" {
+			restls.SetNameCertVerify(restlsConfig, restlsOpt.NameCertVerify)
 		}
 		restlsConfig.ForceTLS12 = restlsOpt.ForceTLS12
 	} else if option.Plugin == kcptun.Mode {

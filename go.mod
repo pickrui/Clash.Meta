@@ -157,3 +157,6 @@ replace github.com/metacubex/restls-client-go => ./third_party/restls-client-go
 
 // Own queued smux payloads after cancelled writes (see smux README.oix.md).
 replace github.com/metacubex/smux => ./third_party/smux
+
+// Serialize h2mux session closure (see sing-mux README.oix.md).
+replace github.com/metacubex/sing-mux => ./third_party/sing-mux

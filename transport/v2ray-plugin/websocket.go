@@ -22,6 +22,7 @@ type Option struct {
 	TLS                      bool
 	ECHConfig                *ech.Config
 	SkipCertVerify           bool
+	NameCertVerify           string
 	CAFile                   string
 	Fingerprint              string
 	ClientFingerprint        string
@@ -87,9 +88,10 @@ func newWebsocketConfig(option *Option) (*vmess.WebsocketConfig, error) {
 				InsecureSkipVerify: option.SkipCertVerify,
 				NextProtos:         []string{"http/1.1"},
 			},
-			Fingerprint: option.Fingerprint,
-			Certificate: option.Certificate,
-			PrivateKey:  option.PrivateKey,
+			Fingerprint:    option.Fingerprint,
+			NameCertVerify: option.NameCertVerify,
+			Certificate:    option.Certificate,
+			PrivateKey:     option.PrivateKey,
 		})
 		if err != nil {
 			return nil, err
@@ -99,6 +101,9 @@ func newWebsocketConfig(option *Option) (*vmess.WebsocketConfig, error) {
 			if err != nil {
 				return nil, err
 			}
+		}
+		if option.CAFile != "" && option.NameCertVerify != "" && option.Fingerprint == "" {
+			ca.SetNameCertVerify(config.TLSConfig, option.NameCertVerify)
 		}
 	}
 	return config, nil

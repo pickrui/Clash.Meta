@@ -22,7 +22,7 @@ import (
 )
 
 // Both the camouflage TLS target and the Restls peer are local test servers.
-func restlsTestPeer(t *testing.T, version uint16) (string, *x509.CertPool, string) {
+func restlsTestPeer(t *testing.T, version uint16, observeSNI ...func(string)) (string, *x509.CertPool, string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -38,6 +38,12 @@ func restlsTestPeer(t *testing.T, version uint16) (string, *x509.CertPool, strin
 	roots := x509.NewCertPool()
 	roots.AppendCertsFromPEM(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 	targetConfig := &stdtls.Config{Certificates: []stdtls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}, MinVersion: version, MaxVersion: version}
+	if len(observeSNI) > 0 {
+		targetConfig.GetConfigForClient = func(hello *stdtls.ClientHelloInfo) (*stdtls.Config, error) {
+			observeSNI[0](hello.ServerName)
+			return nil, nil
+		}
+	}
 	target := restlsTestListener(t, func(conn net.Conn) {
 		secured := stdtls.Server(conn, targetConfig)
 		defer secured.Close()
@@ -207,7 +213,7 @@ func TestClientLocalCertificateVerification(t *testing.T) {
 			}
 			config.InsecureSkipVerify = test.skip
 			if test.pin != "" {
-				if err := SetFingerprint(config, test.pin); err != nil {
+				if err := SetFingerprint(config, test.pin, ""); err != nil {
 					t.Fatal(err)
 				}
 			}

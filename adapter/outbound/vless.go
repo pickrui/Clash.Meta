@@ -74,6 +74,7 @@ type VlessOption struct {
 	XHTTPOpts         XHTTPOptions      `proxy:"xhttp-opts,omitempty"`
 	WSHeaders         map[string]string `proxy:"ws-headers,omitempty"`
 	SkipCertVerify    bool              `proxy:"skip-cert-verify,omitempty"`
+	NameCertVerify    string            `proxy:"name-cert-verify,omitempty"`
 	Fingerprint       string            `proxy:"fingerprint,omitempty"`
 	Certificate       string            `proxy:"certificate,omitempty"`
 	PrivateKey        string            `proxy:"private-key,omitempty"`
@@ -131,6 +132,7 @@ type XHTTPDownloadSettings struct {
 	ECHOpts           *ECHOptions     `proxy:"ech-opts,omitempty"`
 	RealityOpts       *RealityOptions `proxy:"reality-opts,omitempty"`
 	SkipCertVerify    *bool           `proxy:"skip-cert-verify,omitempty"`
+	NameCertVerify    *string         `proxy:"name-cert-verify,omitempty"`
 	Fingerprint       *string         `proxy:"fingerprint,omitempty"`
 	Certificate       *string         `proxy:"certificate,omitempty"`
 	PrivateKey        *string         `proxy:"private-key,omitempty"`
@@ -168,9 +170,10 @@ func (v *Vless) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.M
 					InsecureSkipVerify: v.option.SkipCertVerify,
 					NextProtos:         []string{"http/1.1"},
 				},
-				Fingerprint: v.option.Fingerprint,
-				Certificate: v.option.Certificate,
-				PrivateKey:  v.option.PrivateKey,
+				Fingerprint:    v.option.Fingerprint,
+				NameCertVerify: v.option.NameCertVerify,
+				Certificate:    v.option.Certificate,
+				PrivateKey:     v.option.PrivateKey,
 			})
 			if err != nil {
 				return nil, err
@@ -191,7 +194,8 @@ func (v *Vless) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.M
 			c, err = vmess.StreamTLSConn(ctx, c, &vmess.TLSConfig{
 				Host: wsOpts.TLSConfig.ServerName, SkipCertVerify: v.option.SkipCertVerify,
 				FingerPrint: v.option.Fingerprint, NextProtos: wsOpts.TLSConfig.NextProtos,
-				Restls: v.restlsConfig,
+				NameCertVerify: v.option.NameCertVerify,
+				Restls:         v.restlsConfig,
 			})
 			if err != nil {
 				return nil, err
@@ -287,6 +291,7 @@ func (v *Vless) streamTLSConn(ctx context.Context, conn net.Conn, isH2 bool) (ne
 		tlsOpts := vmess.TLSConfig{
 			Host:              host,
 			SkipCertVerify:    v.option.SkipCertVerify,
+			NameCertVerify:    v.option.NameCertVerify,
 			FingerPrint:       v.option.Fingerprint,
 			Certificate:       v.option.Certificate,
 			PrivateKey:        v.option.PrivateKey,
@@ -547,6 +552,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 			tlsConfig = &vmess.TLSConfig{
 				Host:              option.ServerName,
 				SkipCertVerify:    option.SkipCertVerify,
+				NameCertVerify:    option.NameCertVerify,
 				FingerPrint:       option.Fingerprint,
 				Certificate:       option.Certificate,
 				PrivateKey:        option.PrivateKey,
@@ -632,6 +638,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 					tlsOpts := &vmess.TLSConfig{
 						Host:              host,
 						SkipCertVerify:    v.option.SkipCertVerify,
+						NameCertVerify:    v.option.NameCertVerify,
 						FingerPrint:       v.option.Fingerprint,
 						Certificate:       v.option.Certificate,
 						PrivateKey:        v.option.PrivateKey,
@@ -698,6 +705,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 				}
 			}
 			downloadSkipCertVerify := lo.FromPtrOr(ds.SkipCertVerify, v.option.SkipCertVerify)
+			downloadNameCertVerify := lo.FromPtrOr(ds.NameCertVerify, v.option.NameCertVerify)
 			downloadFingerprint := lo.FromPtrOr(ds.Fingerprint, v.option.Fingerprint)
 			downloadCertificate := lo.FromPtrOr(ds.Certificate, v.option.Certificate)
 			downloadPrivateKey := lo.FromPtrOr(ds.PrivateKey, v.option.PrivateKey)
@@ -767,6 +775,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 							tlsOpts := vmess.TLSConfig{
 								Host:              host,
 								SkipCertVerify:    downloadSkipCertVerify,
+								NameCertVerify:    downloadNameCertVerify,
 								FingerPrint:       downloadFingerprint,
 								Certificate:       downloadCertificate,
 								PrivateKey:        downloadPrivateKey,
@@ -795,6 +804,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 						tlsOpts := &vmess.TLSConfig{
 							Host:              host,
 							SkipCertVerify:    downloadSkipCertVerify,
+							NameCertVerify:    downloadNameCertVerify,
 							FingerPrint:       downloadFingerprint,
 							Certificate:       downloadCertificate,
 							PrivateKey:        downloadPrivateKey,

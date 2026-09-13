@@ -68,6 +68,7 @@ type dnsOverHTTPS struct {
 	dialer         *dnsDialer
 	addr           string
 	skipCertVerify bool
+	nameCertVerify string
 }
 
 // type check
@@ -99,6 +100,7 @@ func newDoHClient(urlString string, r *Resolver, preferH3 bool, params map[strin
 	if params["skip-cert-verify"] == "true" {
 		doh.skipCertVerify = true
 	}
+	doh.nameCertVerify = params["name-cert-verify"]
 
 	runtime.SetFinalizer(doh, (*dnsOverHTTPS).Close)
 
@@ -405,6 +407,7 @@ func (doh *dnsOverHTTPS) createTransport(ctx context.Context) (t http.RoundTripp
 			MinVersion:             tls.VersionTLS12,
 			SessionTicketsDisabled: false,
 		},
+		NameCertVerify: doh.nameCertVerify,
 	})
 	if err != nil {
 		return nil, err

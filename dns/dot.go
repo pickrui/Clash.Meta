@@ -23,6 +23,7 @@ type dnsOverTLS struct {
 	host           string
 	dialer         *dnsDialer
 	skipCertVerify bool
+	nameCertVerify string
 	disableReuse   bool
 
 	access      sync.Mutex
@@ -127,6 +128,7 @@ func (t *dnsOverTLS) dialContext(ctx context.Context) (net.Conn, error) {
 			ServerName:         t.host,
 			InsecureSkipVerify: t.skipCertVerify,
 		},
+		NameCertVerify: t.nameCertVerify,
 	})
 	if err != nil {
 		_ = conn.Close()
@@ -170,6 +172,7 @@ func newDoTClient(addr string, resolver *Resolver, params map[string]string, pro
 	if params["skip-cert-verify"] == "true" {
 		c.skipCertVerify = true
 	}
+	c.nameCertVerify = params["name-cert-verify"]
 	if params["disable-reuse"] == "true" {
 		c.disableReuse = true
 	}

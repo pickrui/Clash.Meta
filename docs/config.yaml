@@ -301,6 +301,8 @@ dns:
   # DNS 主要域名配置
   # 支持 UDP，TCP，DoT，DoH，DoQ
   # 这部分为主要 DNS 配置，影响所有直连，确保使用对大陆解析精准的 DNS
+  # DoT/DoH/DoQ 可追加 #name-cert-verify=certificate.example.com，保留连接域名/SNI，单独指定证书验证名
+  # 例如 tls://front.example.com:853#name-cert-verify=certificate.example.com
   nameserver:
     - 114.114.114.114 # default value
     - 8.8.8.8 # default value
@@ -362,6 +364,13 @@ dns:
     ## 且 behavior 必须为 domain/classical，当为 classical 时仅会生效域名类规则
     # "rule-set:global,dns": 8.8.8.8
 
+# HTTP/SOCKS5、VMess/VLESS/Trojan、AnyTLS、Hysteria/2、TUIC、TrustTunnel 和 Gost relay 的 TLS
+# 可设置 name-cert-verify: certificate.example.com，验证指定名称并保留 sni/servername。
+# 不填或留空时沿用原来的校验行为；显式非空名称仍执行证书链、有效期、用途和名称校验。
+# 若同时配置 fingerprint，叶证书指纹匹配仍优先；CA 指纹则继续验证证书链及指定名称。
+# REALITY 仍使用其协议认证方式，此选项不替换 REALITY 校验。
+# SS 的 v2ray-plugin/gost-plugin/shadow-tls/restls 在 plugin-opts 中设置此选项。
+# Snell 的 ech-tls 在 obfs-opts 中设置；ShadowTLS 使用 shadow-tls-name-cert-verify。
 proxies: # socks5
   - name: "socks"
     type: socks5
@@ -587,6 +596,7 @@ proxies: # socks5
       # fingerprint: "SHA256_OF_CERTIFICATE"
       # Certificate verification stays enabled unless explicitly disabled.
       # skip-cert-verify: false
+      # name-cert-verify: certificate.example.com
       # Invalid script lengths/response counts return a configuration error.
       # Control your post-handshake traffic through restls-script
       # Hide proxy behaviors like "tls in tls".
@@ -946,6 +956,7 @@ proxies: # socks5
       #   alpn: ...
       #   ech-opts: ...
       #   reality-opts: ...
+      #   name-cert-verify: certificate.example.com # 省略继承上行；设为 "" 恢复下载侧 SNI 名称校验
       #   skip-cert-verify: false
       #   fingerprint: ...
       #   certificate: ...
@@ -1111,7 +1122,7 @@ proxies: # socks5
     #     - stun.nextcloud.com:3478
     #     - stun.sip.us:3478
     #     - global.stun.twilio.com:3478
-    #   # 下面支持填写针对server-url的TLS配置(sni, skip-cert-verify, fingerprint, certificate, private-key, alpn)
+    #   # 下面支持填写针对server-url的TLS配置(sni, skip-cert-verify, name-cert-verify, fingerprint, certificate, private-key, alpn)
     #   # skip-cert-verify： false
     #   # ......
     ###quic-go特殊配置项，不要随意修改除非你知道你在干什么###
@@ -2170,7 +2181,7 @@ listeners:
     #      - stun.sip.us:3478
     #      - global.stun.twilio.com:3478
     #    # proxy: DIRECT # 设置server-url通过哪个代理进行连接
-    #    # 下面支持填写针对server-url的TLS配置(sni, skip-cert-verify, fingerprint, certificate, private-key, alpn)
+    #    # 下面支持填写针对server-url的TLS配置(sni, skip-cert-verify, name-cert-verify, fingerprint, certificate, private-key, alpn)
     #    # skip-cert-verify： false
     #    # ......
 

@@ -162,9 +162,10 @@ func New(config LC.Hysteria2Server, tunnel C.Tunnel, additions ...inbound.Additi
 				InsecureSkipVerify: config.RealmOpts.SkipCertVerify,
 				NextProtos:         config.RealmOpts.ALPN,
 			},
-			Fingerprint: config.RealmOpts.Fingerprint,
-			Certificate: config.RealmOpts.Certificate,
-			PrivateKey:  config.RealmOpts.PrivateKey,
+			Fingerprint:    config.RealmOpts.Fingerprint,
+			NameCertVerify: config.RealmOpts.NameCertVerify,
+			Certificate:    config.RealmOpts.Certificate,
+			PrivateKey:     config.RealmOpts.PrivateKey,
 		})
 		if err != nil {
 			return nil, err
