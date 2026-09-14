@@ -25,6 +25,10 @@ type DialFunc func(ctx context.Context) (net.Conn, error)
 
 const http2NextProtoTLS = "h2"
 
+// Keep overlapping polls for duplex traffic, but bound retained request bodies
+// and goroutines when a peer is slow or stops reading responses.
+const maxSessionRequests = 32
+
 type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -322,6 +326,7 @@ func (c *Client) newSession() (*requestClientSession, error) {
 		readerChan:             make(chan []byte, 256),
 		deadlines:              newPipeDeadlines(),
 		rt:                     c.rt,
+		requests:               make(chan struct{}, maxSessionRequests),
 	}
 	go session.keepRunning()
 	return session, nil
@@ -365,6 +370,7 @@ type requestClientSession struct {
 	maxWriteDelay          int
 	writerChan             chan []byte
 	readerChan             chan []byte
+	requests               chan struct{}
 	nextWrite              []byte
 	deadlines              pipeDeadlines
 	addrMu                 sync.RWMutex
@@ -379,6 +385,17 @@ func (s *requestClientSession) keepRunning() {
 }
 
 func (s *requestClientSession) runOnce() {
+	select {
+	case <-s.ctx.Done():
+		return
+	case s.requests <- struct{}{}:
+	}
+	started := false
+	defer func() {
+		if !started {
+			<-s.requests
+		}
+	}()
 	requestBody := bytes.NewBuffer(nil)
 	waitTimer := time.NewTimer(time.Duration(s.currentPollingInterval) * time.Millisecond)
 	defer waitTimer.Stop()
@@ -423,7 +440,11 @@ copyFromChan:
 		}
 	}
 
-	go s.roundTrip(requestBody.Bytes())
+	started = true
+	go func() {
+		defer func() { <-s.requests }()
+		s.roundTrip(requestBody.Bytes())
+	}()
 }
 
 func (s *requestClientSession) writePacket(requestBody *bytes.Buffer, packet []byte) bool {

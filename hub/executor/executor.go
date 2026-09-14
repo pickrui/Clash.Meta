@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"github.com/metacubex/mihomo/component/updater"
 	"github.com/metacubex/mihomo/config"
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/constant/features"
 	P "github.com/metacubex/mihomo/constant/provider"
 	"github.com/metacubex/mihomo/dns"
 	"github.com/metacubex/mihomo/listener"
@@ -117,7 +119,14 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	loadProvider(cfg.Providers)
 	updateProfile(cfg)
 	loadProvider(cfg.RuleProviders)
-	runtime.GC()
+	if features.Android {
+		// Configuration parsing creates short-lived YAML and provider objects.
+		// Return their unused heap pages at this existing collection point so a
+		// freshly started Android service does not retain the loading peak.
+		debug.FreeOSMemory()
+	} else {
+		runtime.GC()
+	}
 	tunnel.OnRunning()
 	updateUpdater(cfg)
 
