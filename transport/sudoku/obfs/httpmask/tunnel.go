@@ -78,6 +78,10 @@ type TunnelDialOptions struct {
 	// When the server accepts the early payload, DialTunnel returns a conn that is already post-handshake.
 	// When the server does not echo early data, DialTunnel falls back to Upgrade.
 	EarlyHandshake *ClientEarlyHandshake
+	// NewEarlyHandshake creates independent protocol state for each authorization
+	// attempt, including retries and auto fallback. It takes precedence over
+	// EarlyHandshake so a lost response never causes a nonce to be replayed.
+	NewEarlyHandshake func() (*ClientEarlyHandshake, error)
 	// Upgrade optionally wraps the raw tunnel conn and/or writes a small prelude before DialTunnel returns.
 	// It is called with the raw tunnel conn; if it returns a non-nil conn, that conn is returned by DialTunnel.
 	Upgrade func(raw net.Conn) (net.Conn, error)
@@ -293,16 +297,17 @@ func newHTTPClient(serverAddress string, opts TunnelDialOptions, maxIdleConns in
 }
 
 type sessionDialInfo struct {
-	client     *http.Client
-	dialer     *preconnectDialer
-	tlsEnabled bool
-	multiplex  string
-	pushURL    string
-	pullURL    string
-	finURL     string
-	closeURL   string
-	headerHost string
-	auth       *tunnelAuth
+	client         *http.Client
+	dialer         *preconnectDialer
+	tlsEnabled     bool
+	multiplex      string
+	pushURL        string
+	pullURL        string
+	finURL         string
+	closeURL       string
+	headerHost     string
+	auth           *tunnelAuth
+	earlyHandshake *ClientEarlyHandshake
 }
 
 func sessionPreconnectCount(multiplex string) int {
@@ -357,14 +362,6 @@ func dialSessionWithClient(ctx context.Context, client *http.Client, dialer *pre
 
 	auth := newTunnelAuth(opts.AuthKey, 0)
 	authorizeURL := (&url.URL{Scheme: target.scheme, Host: target.urlHost, Path: joinPathRoot(opts.PathRoot, "/session")}).String()
-	if opts.EarlyHandshake != nil && len(opts.EarlyHandshake.RequestPayload) > 0 {
-		var err error
-		authorizeURL, err = setEarlyDataQuery(authorizeURL, opts.EarlyHandshake.RequestPayload)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	cancelPreconnect := func() {}
 	keepPreconnected := false
 	defer func() {
@@ -374,8 +371,21 @@ func dialSessionWithClient(ctx context.Context, client *http.Client, dialer *pre
 	}()
 
 	var bodyBytes []byte
+	var earlyHandshake *ClientEarlyHandshake
 	for attempt := 0; ; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, authorizeURL, nil)
+		var err error
+		earlyHandshake, err = opts.newEarlyHandshake()
+		if err != nil {
+			return nil, err
+		}
+		attemptURL := authorizeURL
+		if earlyHandshake != nil && len(earlyHandshake.RequestPayload) > 0 {
+			attemptURL, err = setEarlyDataQuery(attemptURL, earlyHandshake.RequestPayload)
+			if err != nil {
+				return nil, err
+			}
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, attemptURL, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -440,8 +450,8 @@ func dialSessionWithClient(ctx context.Context, client *http.Client, dialer *pre
 	if token == "" {
 		return nil, fmt.Errorf("%s authorize empty token", mode)
 	}
-	if opts.EarlyHandshake != nil && len(authResp.earlyPayload) > 0 && opts.EarlyHandshake.HandleResponse != nil {
-		if err := opts.EarlyHandshake.HandleResponse(authResp.earlyPayload); err != nil {
+	if earlyHandshake != nil && len(authResp.earlyPayload) > 0 && earlyHandshake.HandleResponse != nil {
+		if err := earlyHandshake.HandleResponse(authResp.earlyPayload); err != nil {
 			return nil, err
 		}
 	}
@@ -453,16 +463,17 @@ func dialSessionWithClient(ctx context.Context, client *http.Client, dialer *pre
 	keepPreconnected = true
 
 	return &sessionDialInfo{
-		client:     client,
-		dialer:     dialer,
-		tlsEnabled: target.scheme == "https",
-		multiplex:  opts.Multiplex,
-		pushURL:    pushURL,
-		pullURL:    pullURL,
-		finURL:     finURL,
-		closeURL:   closeURL,
-		headerHost: target.headerHost,
-		auth:       auth,
+		client:         client,
+		dialer:         dialer,
+		tlsEnabled:     target.scheme == "https",
+		multiplex:      opts.Multiplex,
+		pushURL:        pushURL,
+		pullURL:        pullURL,
+		finURL:         finURL,
+		closeURL:       closeURL,
+		headerHost:     target.headerHost,
+		auth:           auth,
+		earlyHandshake: earlyHandshake,
 	}, nil
 }
 
@@ -799,6 +810,7 @@ func dialStreamSplitWithClient(ctx context.Context, client *http.Client, dialer 
 	if c == nil {
 		return nil, fmt.Errorf("failed to build stream split conn")
 	}
+	opts.EarlyHandshake = info.earlyHandshake
 	outConn, err := applyEarlyHandshakeOrUpgrade(c, opts)
 	if err != nil {
 		_ = c.Close()
@@ -816,6 +828,7 @@ func dialStreamSplit(ctx context.Context, serverAddress string, opts TunnelDialO
 	if c == nil {
 		return nil, fmt.Errorf("failed to build stream split conn")
 	}
+	opts.EarlyHandshake = info.earlyHandshake
 	outConn, err := applyEarlyHandshakeOrUpgrade(c, opts)
 	if err != nil {
 		_ = c.Close()
@@ -1288,6 +1301,7 @@ func dialPollWithClient(ctx context.Context, client *http.Client, dialer *precon
 	if c == nil {
 		return nil, fmt.Errorf("failed to build poll conn")
 	}
+	opts.EarlyHandshake = info.earlyHandshake
 	outConn, err := applyEarlyHandshakeOrUpgrade(c, opts)
 	if err != nil {
 		_ = c.Close()
@@ -1305,6 +1319,7 @@ func dialPoll(ctx context.Context, serverAddress string, opts TunnelDialOptions)
 	if c == nil {
 		return nil, fmt.Errorf("failed to build poll conn")
 	}
+	opts.EarlyHandshake = info.earlyHandshake
 	outConn, err := applyEarlyHandshakeOrUpgrade(c, opts)
 	if err != nil {
 		_ = c.Close()

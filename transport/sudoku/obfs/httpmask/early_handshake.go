@@ -192,3 +192,10 @@ func applyEarlyHandshakeOrUpgrade(raw net.Conn, opts TunnelDialOptions) (net.Con
 	}
 	return out, nil
 }
+
+func (opts TunnelDialOptions) newEarlyHandshake() (*ClientEarlyHandshake, error) {
+	if opts.NewEarlyHandshake != nil {
+		return opts.NewEarlyHandshake()
+	}
+	return opts.EarlyHandshake, nil
+}

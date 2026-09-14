@@ -117,6 +117,10 @@ func dialWS(ctx context.Context, serverAddress string, opts TunnelDialOptions) (
 		Host:   urlHost,
 		Path:   joinPathRoot(opts.PathRoot, "/ws"),
 	}
+	opts.EarlyHandshake, err = opts.newEarlyHandshake()
+	if err != nil {
+		return nil, err
+	}
 	if opts.EarlyHandshake != nil && len(opts.EarlyHandshake.RequestPayload) > 0 {
 		rawURL, err := setEarlyDataQuery(u.String(), opts.EarlyHandshake.RequestPayload)
 		if err != nil {
