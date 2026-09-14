@@ -1344,7 +1344,10 @@ func (c *pollConn) pullLoop() {
 		}
 
 		pullStarted := time.Now()
-		reqCtx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
+		// A poll response stays open while data arrives. Tie its lifetime to
+		// the connection, like stream mode, so an active multiplexed tunnel
+		// is not cut off by a fixed total request deadline.
+		reqCtx, cancel := context.WithCancel(c.ctx)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, c.pullURL, nil)
 		if err != nil {
 			cancel()
