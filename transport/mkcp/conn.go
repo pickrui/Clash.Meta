@@ -140,11 +140,18 @@ func (c *Conn) elapsed() uint32 {
 }
 
 func (c *Conn) Read(b []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
 	for {
 		c.mu.Lock()
 		if len(c.readBuf) > 0 {
 			n := copy(b, c.readBuf)
 			c.readBuf = c.readBuf[n:]
+			if len(c.readBuf) == 0 {
+				c.readBuf = nil
+			}
+			c.deliverLocked()
 			c.mu.Unlock()
 			c.wakeFlush()
 			return n, nil
@@ -391,7 +398,9 @@ func (c *Conn) deliverLocked() {
 	delivered := false
 	for {
 		seg := c.recvCache[c.recvNext]
-		if seg == nil {
+		// Leave data in the receive window when the application is not reading.
+		// Keep room for at least one segment when the configured buffer is tiny.
+		if seg == nil || (len(c.readBuf) > 0 && uint64(len(c.readBuf))+uint64(len(seg.payload)) > uint64(c.cfg.readBuffer())) {
 			break
 		}
 		delete(c.recvCache, c.recvNext)
@@ -400,6 +409,7 @@ func (c *Conn) deliverLocked() {
 		delivered = true
 	}
 	if delivered {
+		c.ackDirty = true
 		c.signalReadLocked()
 	}
 }
@@ -429,6 +439,7 @@ func (c *Conn) processReceivingNextLocked(next uint32) {
 		}
 		filtered = append(filtered, seg)
 	}
+	clear(c.sendWindow[len(filtered):])
 	c.sendWindow = filtered
 	c.findFirstUnackedLocked()
 	if changed {
@@ -570,7 +581,7 @@ func (c *Conn) flush() {
 }
 
 func (c *Conn) flushAcksLocked(current uint32) []segment {
-	if len(c.ackList) == 0 {
+	if len(c.ackList) == 0 && !c.ackDirty {
 		return nil
 	}
 	segments := make([]segment, 0, 1)
