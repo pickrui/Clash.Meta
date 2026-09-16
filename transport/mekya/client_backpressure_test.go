@@ -3,6 +3,7 @@ package mekya
 import (
 	"context"
 	"io"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -46,6 +47,78 @@ func (b *blockedResponseBody) Read([]byte) (int, error) {
 	return 0, io.EOF
 }
 func (b *blockedResponseBody) Close() error { b.active.Add(-1); return nil }
+
+func TestRoundTripperConcurrentDials(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	roundTripper := newRoundTripper(func(ctx context.Context) (net.Conn, error) {
+		if calls.Add(1) == 1 {
+			close(firstStarted)
+			<-ctx.Done()
+		} else {
+			close(secondStarted)
+		}
+		return nil, io.EOF
+	}, 8).(*alpnAwareRoundTripper)
+	defer roundTripper.Close()
+	results := make(chan error, 2)
+	dial := func() {
+		_, err := roundTripper.dialOrGetTLSWithExpectedALPN(ctx, "fixture.invalid:443", true)
+		results <- err
+	}
+	go dial()
+	<-firstStarted
+	go dial()
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Error("a stalled TLS dial blocks other pooled connections")
+	}
+	cancel()
+	require.ErrorIs(t, <-results, io.EOF)
+	require.ErrorIs(t, <-results, io.EOF)
+}
+
+func TestRoundTripperCloseDuringDial(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	conn, peer := net.Pipe()
+	defer conn.Close()
+	defer peer.Close()
+	require.NoError(t, peer.SetReadDeadline(time.Now().Add(5*time.Second)))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	roundTripper := newRoundTripper(func(ctx context.Context) (net.Conn, error) {
+		close(started)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return conn, nil
+	}, 8).(*alpnAwareRoundTripper)
+	defer roundTripper.Close()
+	result := make(chan error, 1)
+	go func() {
+		_, err := roundTripper.dialOrGetTLSWithExpectedALPN(ctx, "fixture.invalid:443", true)
+		result <- err
+	}()
+	<-started
+	closed := make(chan error, 1)
+	go func() { closed <- roundTripper.Close() }()
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Error("closing the transport waits for an in-flight dial")
+	}
+	close(release)
+	require.ErrorIs(t, <-result, net.ErrClosed)
+	_, err := peer.Read(make([]byte, 1))
+	require.ErrorIs(t, err, io.EOF)
+}
 
 func TestSessionBackpressure(t *testing.T) {
 	for _, body := range []bool{false, true} {

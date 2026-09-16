@@ -188,16 +188,19 @@ func (r *alpnAwareRoundTripper) shouldConnectWithH1(addr string) bool {
 
 func (r *alpnAwareRoundTripper) dialOrGetTLSWithExpectedALPN(ctx context.Context, addr string, expectedH2 bool) (net.Conn, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.pendingConn == nil {
+		r.mu.Unlock()
 		return nil, net.ErrClosed
 	}
 	if r.connectWithH1[addr] == expectedH2 {
+		r.mu.Unlock()
 		return nil, errUnexpectedALPN
 	}
 	if conn := r.getPendingConnLocked(addr, expectedH2); conn != nil {
+		r.mu.Unlock()
 		return conn, nil
 	}
+	r.mu.Unlock()
 
 	conn, err := r.dial(ctx)
 	if err != nil {
@@ -206,6 +209,12 @@ func (r *alpnAwareRoundTripper) dialOrGetTLSWithExpectedALPN(ctx context.Context
 	tlsState := tlsC.GetTLSConnectionState(conn)
 	protocolIsH2 := tlsState.NegotiatedProtocol == http2NextProtoTLS
 
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pendingConn == nil {
+		_ = conn.Close()
+		return nil, net.ErrClosed
+	}
 	if !tlsState.HandshakeComplete || protocolIsH2 == expectedH2 {
 		return conn, nil
 	}
