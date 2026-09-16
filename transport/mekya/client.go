@@ -112,6 +112,7 @@ func newH2RoundTripper(h2PoolSize int, dialTLSContext func(context.Context, stri
 		return &http.Transport{
 			DialTLSContext:     dialTLSContext,
 			DisableCompression: true,
+			MaxConnsPerHost:    1,
 			Protocols:          protocols,
 		}
 	}
@@ -336,6 +337,8 @@ func (c *Client) newSession() (*requestClientSession, error) {
 		deadlines:              newPipeDeadlines(),
 		rt:                     c.rt,
 		requests:               make(chan struct{}, maxSessionRequests),
+		responseDone:           make(chan struct{}, 1),
+		uploads:                make(chan struct{}, 1),
 	}
 	go session.keepRunning()
 	return session, nil
@@ -380,6 +383,8 @@ type requestClientSession struct {
 	writerChan             chan []byte
 	readerChan             chan []byte
 	requests               chan struct{}
+	responseDone           chan struct{}
+	uploads                chan struct{}
 	nextWrite              []byte
 	deadlines              pipeDeadlines
 	addrMu                 sync.RWMutex
@@ -405,10 +410,21 @@ func (s *requestClientSession) runOnce() {
 			<-s.requests
 		}
 	}()
+	select {
+	case <-s.ctx.Done():
+		return
+	case s.uploads <- struct{}{}:
+	}
+	defer func() {
+		if !started {
+			<-s.uploads
+		}
+	}()
 	requestBody := bytes.NewBuffer(nil)
 	waitTimer := time.NewTimer(time.Duration(s.currentPollingInterval) * time.Millisecond)
 	defer waitTimer.Stop()
 	seenPacket := false
+	var waitForResponse <-chan struct{}
 
 	if s.nextWrite != nil {
 		seenPacket = true
@@ -431,10 +447,20 @@ copyFromChan:
 		case <-s.ctx.Done():
 			return
 		case <-waitTimer.C:
+			if !seenPacket && len(s.requests) > 1 {
+				waitForResponse = s.responseDone
+				continue
+			}
+			break copyFromChan
+		case <-waitForResponse:
+			if len(s.requests) > 1 {
+				continue
+			}
 			break copyFromChan
 		case packet := <-s.writerChan:
 			if !seenPacket {
 				seenPacket = true
+				waitForResponse = nil
 				if !waitTimer.Stop() {
 					select {
 					case <-waitTimer.C:
@@ -451,7 +477,13 @@ copyFromChan:
 
 	started = true
 	go func() {
-		defer func() { <-s.requests }()
+		defer func() {
+			<-s.requests
+			select {
+			case s.responseDone <- struct{}{}:
+			default:
+			}
+		}()
 		s.roundTrip(requestBody.Bytes())
 	}()
 }
@@ -469,7 +501,15 @@ func (s *requestClientSession) writePacket(requestBody *bytes.Buffer, packet []b
 }
 
 func (s *requestClientSession) roundTrip(body []byte) {
+	var written sync.Once
+	releaseUpload := func() {
+		written.Do(func() { <-s.uploads })
+	}
+	defer releaseUpload()
 	trace := &httptrace.ClientTrace{
+		WroteRequest: func(httptrace.WroteRequestInfo) {
+			releaseUpload()
+		},
 		GotConn: func(info httptrace.GotConnInfo) {
 			if info.Conn != nil {
 				s.setUnderlyingAddr(info.Conn)
