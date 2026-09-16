@@ -15,6 +15,8 @@ var (
 	level  = INFO
 )
 
+var EventFilter func(Event) bool
+
 func init() {
 	log.SetOutput(os.Stdout)
 	log.SetLevel(log.DebugLevel)
@@ -35,30 +37,33 @@ func (e *Event) Type() string {
 }
 
 func Infoln(format string, v ...any) {
-	event := newLog(INFO, format, v...)
-	logCh <- event
-	print(event)
+	emit(newLog(INFO, format, v...))
 }
 
 func Warnln(format string, v ...any) {
-	event := newLog(WARNING, format, v...)
-	logCh <- event
-	print(event)
+	emit(newLog(WARNING, format, v...))
 }
 
 func Errorln(format string, v ...any) {
-	event := newLog(ERROR, format, v...)
-	logCh <- event
-	print(event)
+	emit(newLog(ERROR, format, v...))
 }
 
 func Debugln(format string, v ...any) {
-	event := newLog(DEBUG, format, v...)
+	emit(newLog(DEBUG, format, v...))
+}
+
+func emit(event Event) {
+	if EventFilter != nil && !EventFilter(event) {
+		return
+	}
 	logCh <- event
 	print(event)
 }
 
 func Fatalln(format string, v ...any) {
+	if EventFilter != nil && !EventFilter(newLog(ERROR, format, v...)) {
+		os.Exit(1)
+	}
 	log.Fatalf(format, v...)
 }
 

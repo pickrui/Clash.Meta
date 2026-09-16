@@ -11,6 +11,8 @@ import (
 
 var DefaultManager *Manager
 
+var TrackerInfoFilter func(*TrackerInfo) bool
+
 func init() {
 	DefaultManager = &Manager{
 		uploadTemp:    atomic.NewInt64(0),
@@ -44,7 +46,7 @@ type Manager struct {
 }
 
 func (m *Manager) Join(c Tracker) {
-	if DefaultRequestNotify != nil {
+	if DefaultRequestNotify != nil && (TrackerInfoFilter == nil || TrackerInfoFilter(c.Info())) {
 		DefaultRequestNotify(c)
 	}
 	m.connections.Store(c.ID(), c)
@@ -101,7 +103,10 @@ func (m *Manager) Memory() uint64 {
 func (m *Manager) Snapshot() *Snapshot {
 	var connections []*TrackerInfo
 	m.Range(func(c Tracker) bool {
-		connections = append(connections, c.Info())
+		info := c.Info()
+		if TrackerInfoFilter == nil || TrackerInfoFilter(info) {
+			connections = append(connections, info)
+		}
 		return true
 	})
 	return &Snapshot{
