@@ -90,6 +90,10 @@ func Dial(ctx context.Context, raw net.Conn, cfg Config) (*Conn, error) {
 			for {
 				n, err := raw.Read(buf)
 				if err != nil {
+					// The transport session is gone. Terminate now so readers
+					// and writers fail promptly instead of waiting for the
+					// dead-link timer while the flush loop keeps ticking.
+					conn.terminate()
 					return
 				}
 				payload := append([]byte(nil), buf[:n]...)

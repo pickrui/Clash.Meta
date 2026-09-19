@@ -167,10 +167,6 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 	var satisfied bool
 
 	defer func() {
-		if UrlTestHook != nil {
-			UrlTestHook(url, p.Name(), t)
-		}
-
 		alive := err == nil
 		record := C.DelayHistory{Time: time.Now()}
 		if alive {
@@ -201,6 +197,11 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 			state.history.Pop()
 		}
 
+		// Publish after the state is stored so a listener that refreshes group
+		// data on this event observes the new alive flag.
+		if UrlTestHook != nil {
+			UrlTestHook(url, p.Name(), t, alive)
+		}
 	}()
 
 	unifiedDelay := UnifiedDelay.Load()

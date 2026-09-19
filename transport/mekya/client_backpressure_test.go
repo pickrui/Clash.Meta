@@ -36,9 +36,11 @@ func (r *blockedRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	defer r.active.Add(-1)
 	select {
 	case <-req.Context().Done():
+		return nil, req.Context().Err()
 	case <-r.release:
 	}
-	return nil, io.EOF
+	// A released poll completes like a server that had nothing to send.
+	return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
 }
 
 type blockedResponseBody struct {
@@ -63,6 +65,7 @@ func TestSessionBackpressuresBlockedUpload(t *testing.T) {
 	client := &Client{ctx: ctx, cfg: Config{PollingIntervalInitial: 1, MaxRequestSize: 8, MaxWriteDelay: 1}, url: "https://fixture.invalid/", rt: roundTripper}
 	session, err := client.newSession()
 	require.NoError(t, err)
+	session.startPolling()
 	defer session.Close()
 	for packetIndex := 0; packetIndex < 32; packetIndex++ {
 		_, err := session.Write([]byte("packet"))
@@ -114,6 +117,7 @@ func TestSessionIdlePollingCoalesces(t *testing.T) {
 	client := &Client{ctx: ctx, cfg: Config{PollingIntervalInitial: 1}, url: "https://fixture.invalid/", rt: roundTripper}
 	session, err := client.newSession()
 	require.NoError(t, err)
+	session.startPolling()
 	defer session.Close()
 	require.Eventually(t, func() bool { return roundTripper.calls.Load() == 1 }, time.Second, time.Millisecond)
 	require.Never(t, func() bool { return roundTripper.calls.Load() > 1 }, 100*time.Millisecond, time.Millisecond,
@@ -213,6 +217,7 @@ func TestSessionBackpressure(t *testing.T) {
 			client := &Client{ctx: ctx, cfg: Config{PollingIntervalInitial: 1, MaxRequestSize: 8, MaxWriteDelay: 1}, url: "https://fixture.invalid/", rt: rt}
 			session, err := client.newSession()
 			require.NoError(t, err)
+			session.startPolling()
 			defer session.Close()
 			go func() {
 				for {

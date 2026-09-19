@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/common/httputils"
@@ -28,6 +29,21 @@ const http2NextProtoTLS = "h2"
 // Keep overlapping polls for duplex traffic, but bound retained request bodies
 // and goroutines when a peer is slow or stops reading responses.
 const maxSessionRequests = 32
+
+// A session that has not completed a poll yet fails on its first transport
+// error, so an unreachable or rejecting server fails the dial instead of
+// polling until the caller's deadline. An established session tolerates
+// transient errors up to this many in a row.
+const maxConsecutiveRequestFailures = 8
+
+// Pause between polls after a failed request so a struggling server is not
+// hammered at the polling interval.
+const requestFailureBackoff = 250 * time.Millisecond
+
+// After a graceful KCP close the session keeps polling only long enough for
+// the terminate handshake; the KCP layer closes it earlier when the peer
+// acknowledges.
+const sessionCloseGrace = 3 * time.Second
 
 type Client struct {
 	ctx    context.Context
@@ -66,6 +82,14 @@ func (c *Client) Dial(ctx context.Context) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Complete the first poll with the caller's deadline: a server that cannot
+	// be reached or rejects the session fails the dial here instead of stalling
+	// the caller's first read until its own timeout.
+	if err := raw.connect(ctx); err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	raw.startPolling()
 	conn, err := mkcp.Dial(ctx, raw, c.cfg.KCP)
 	if err != nil {
 		_ = raw.Close()
@@ -340,7 +364,6 @@ func (c *Client) newSession() (*requestClientSession, error) {
 		responseDone:           make(chan struct{}, 1),
 		uploads:                make(chan struct{}, 1),
 	}
-	go session.keepRunning()
 	return session, nil
 }
 
@@ -351,10 +374,14 @@ type clientConn struct {
 }
 
 func (c *clientConn) Close() error {
+	// Close the KCP conn first so its terminate handshake can still use the
+	// session; the KCP conn closes the session once it terminates. The grace
+	// timer bounds polling when the peer never acknowledges.
+	err := c.Conn.Close()
 	c.once.Do(func() {
-		_ = c.raw.Close()
+		time.AfterFunc(sessionCloseGrace, func() { _ = c.raw.Close() })
 	})
-	return c.Conn.Close()
+	return err
 }
 
 func (c *clientConn) LocalAddr() net.Addr {
@@ -390,12 +417,92 @@ type requestClientSession struct {
 	addrMu                 sync.RWMutex
 	localAddr              net.Addr
 	remoteAddr             net.Addr
+	established            atomic.Bool
+	failures               atomic.Int32
+	errMu                  sync.Mutex
+	err                    error
+}
+
+func (s *requestClientSession) startPolling() {
+	go s.keepRunning()
 }
 
 func (s *requestClientSession) keepRunning() {
 	for s.ctx.Err() == nil {
 		s.runOnce()
+		if s.failures.Load() > 0 {
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-time.After(requestFailureBackoff):
+			}
+		}
 	}
+}
+
+// connect performs the session's first poll and waits for its response
+// headers, bounded by ctx. The response body then streams like any poll.
+func (s *requestClientSession) connect(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.ctx.Done():
+		return s.closeErr()
+	case s.requests <- struct{}{}:
+	}
+	select {
+	case <-ctx.Done():
+		<-s.requests
+		return ctx.Err()
+	case <-s.ctx.Done():
+		<-s.requests
+		return s.closeErr()
+	case s.uploads <- struct{}{}:
+	}
+	ready := make(chan error, 1)
+	go func() {
+		defer func() {
+			<-s.requests
+			select {
+			case s.responseDone <- struct{}{}:
+			default:
+			}
+		}()
+		s.roundTrip(nil, ready)
+	}()
+	select {
+	case err := <-ready:
+		return err
+	case <-ctx.Done():
+		s.fail(ctx.Err())
+		return ctx.Err()
+	}
+}
+
+// fail records a request failure. Before the first successful poll any
+// failure closes the session; afterwards only a run of failures does.
+func (s *requestClientSession) fail(err error) {
+	failures := s.failures.Add(1)
+	if s.established.Load() && failures < maxConsecutiveRequestFailures {
+		return
+	}
+	s.errMu.Lock()
+	if s.err == nil {
+		s.err = err
+	}
+	s.errMu.Unlock()
+	s.cancel()
+}
+
+// closeErr reports why the session stopped: the transport failure that
+// closed it, or the plain cancellation of a deliberate Close.
+func (s *requestClientSession) closeErr() error {
+	s.errMu.Lock()
+	defer s.errMu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	return s.ctx.Err()
 }
 
 func (s *requestClientSession) runOnce() {
@@ -484,13 +591,15 @@ copyFromChan:
 			default:
 			}
 		}()
-		s.roundTrip(requestBody.Bytes())
+		s.roundTrip(requestBody.Bytes(), nil)
 	}()
 }
 
 func (s *requestClientSession) writePacket(requestBody *bytes.Buffer, packet []byte) bool {
 	sizeOffset := packetBundleOverhead + len(packet)
-	if s.maxRequestSize > 0 && requestBody.Len()+sizeOffset > s.maxRequestSize {
+	// The limit bounds coalescing, not a single packet: a packet larger than
+	// the limit must still go out alone, or it would be deferred forever.
+	if s.maxRequestSize > 0 && requestBody.Len() > 0 && requestBody.Len()+sizeOffset > s.maxRequestSize {
 		s.nextWrite = packet
 		return false
 	}
@@ -500,12 +609,20 @@ func (s *requestClientSession) writePacket(requestBody *bytes.Buffer, packet []b
 	return true
 }
 
-func (s *requestClientSession) roundTrip(body []byte) {
+// roundTrip sends one poll. When ready is not nil it receives the outcome of
+// the response headers exactly once: nil for an accepted poll, else the error.
+func (s *requestClientSession) roundTrip(body []byte, ready chan<- error) {
 	var written sync.Once
 	releaseUpload := func() {
 		written.Do(func() { <-s.uploads })
 	}
 	defer releaseUpload()
+	report := func(err error) {
+		if ready != nil {
+			ready <- err
+			ready = nil
+		}
+	}
 	trace := &httptrace.ClientTrace{
 		WroteRequest: func(httptrace.WroteRequestInfo) {
 			releaseUpload()
@@ -519,14 +636,28 @@ func (s *requestClientSession) roundTrip(body []byte) {
 	ctx := httptrace.WithClientTrace(s.ctx, trace)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url, bytes.NewReader(body))
 	if err != nil {
+		report(err)
 		return
 	}
 	req.Header.Set("X-Session-ID", base64.RawURLEncoding.EncodeToString(s.sessionID))
 	resp, err := s.rt.RoundTrip(req)
 	if err != nil {
+		if s.ctx.Err() == nil {
+			s.fail(err)
+		}
+		report(err)
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		err := fmt.Errorf("mekya: unexpected response status %d", resp.StatusCode)
+		s.fail(err)
+		report(err)
+		return
+	}
+	s.established.Store(true)
+	s.failures.Store(0)
+	report(nil)
 	for {
 		packet, err := readPacketBundle(resp.Body)
 		if err != nil {
@@ -541,9 +672,14 @@ func (s *requestClientSession) roundTrip(body []byte) {
 }
 
 func (s *requestClientSession) Read(p []byte) (int, error) {
+	// Check first: a ready channel would otherwise be chosen at random over a
+	// closed session, hiding the transport failure from the caller.
+	if s.ctx.Err() != nil {
+		return 0, s.closeErr()
+	}
 	select {
 	case <-s.ctx.Done():
-		return 0, s.ctx.Err()
+		return 0, s.closeErr()
 	case <-s.deadlines.read.Wait():
 		return 0, os.ErrDeadlineExceeded
 	case packet := <-s.readerChan:
@@ -552,10 +688,14 @@ func (s *requestClientSession) Read(p []byte) (int, error) {
 }
 
 func (s *requestClientSession) Write(p []byte) (int, error) {
+	if s.ctx.Err() != nil {
+		// Buffering into a dead session would drop the data silently.
+		return 0, s.closeErr()
+	}
 	packet := append([]byte(nil), p...)
 	select {
 	case <-s.ctx.Done():
-		return 0, s.ctx.Err()
+		return 0, s.closeErr()
 	case <-s.deadlines.write.Wait():
 		return 0, os.ErrDeadlineExceeded
 	case s.writerChan <- packet:

@@ -53,6 +53,17 @@ func (u *URLTest) ForceSet(name string) {
 	u.fastSingle.Reset()
 }
 
+// ResetSelection discards the cached fastest node so the next Now or dial
+// re-evaluates member health, for example after a manual probe changed it.
+func (u *URLTest) ResetSelection() {
+	u.fastSingle.Reset()
+}
+
+// TestURL is the URL whose per-proxy health this group selects on.
+func (u *URLTest) TestURL() string {
+	return u.testUrl
+}
+
 // DialContext implements C.ProxyAdapter
 func (u *URLTest) DialContext(ctx context.Context, metadata *C.Metadata) (c C.Conn, err error) {
 	proxy := u.fast(true)
