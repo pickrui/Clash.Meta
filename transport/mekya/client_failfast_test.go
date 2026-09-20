@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/metacubex/http"
+	"github.com/metacubex/http/httptrace"
 	"github.com/stretchr/testify/require"
 )
 
@@ -198,4 +199,67 @@ func TestClosedConnReleasesSessionAfterGrace(t *testing.T) {
 	require.NoError(t, conn.Close())
 	require.Eventually(t, func() bool { return raw.ctx.Err() != nil }, sessionCloseGrace+2*time.Second, 10*time.Millisecond,
 		"closing the conn must stop the session polling")
+}
+
+// The real server buffers headers until it has KCP data or the poll expires.
+func TestDialDoesNotWaitForLongPollHeaders(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	cfg := testConfig()
+	cfg.MaxWriteDurationMs = 5000
+	server, err := Listen(ctx, ln, cfg)
+	require.NoError(t, err)
+	defer server.Close()
+	go func() {
+		conn, err := server.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_ = echo(conn)
+	}()
+	client, err := NewClient(ctx, func(ctx context.Context) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", server.Addr().String())
+	}, cfg)
+	require.NoError(t, err)
+	defer client.Close()
+	dialCtx, end := context.WithTimeout(ctx, time.Second)
+	defer end()
+	conn, err := client.Dial(dialCtx)
+	require.NoError(t, err, "the first poll must not wait for data KCP cannot send yet")
+	defer conn.Close()
+	require.NoError(t, conn.SetDeadline(time.Now().Add(2*time.Second)))
+	_, err = conn.Write([]byte("probe"))
+	require.NoError(t, err)
+	got := make([]byte, 5)
+	_, err = io.ReadFull(conn, got)
+	require.NoError(t, err)
+	require.Equal(t, "probe", string(got))
+}
+
+func TestRejectionAfterRequestWriteClosesReturnedConn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reject := make(chan struct{})
+	rt := &scriptedRoundTripper{respond: func(_ int, req *http.Request) (*http.Response, error) {
+		httptrace.ContextClientTrace(req.Context()).WroteRequest(httptrace.WroteRequestInfo{})
+		select {
+		case <-reject:
+			return &http.Response{StatusCode: 403, Body: http.NoBody}, nil
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
+	}}
+	client := newScriptedClient(ctx, rt, Config{})
+	conn, err := client.Dial(ctx)
+	require.NoError(t, err)
+	defer conn.Close()
+	close(reject)
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(time.Second)))
+	_, err = conn.Read(make([]byte, 1))
+	require.Error(t, err)
+	require.NotErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorContains(t, conn.(*clientConn).raw.closeErr(), "403")
 }

@@ -82,9 +82,9 @@ func (c *Client) Dial(ctx context.Context) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Complete the first poll with the caller's deadline: a server that cannot
-	// be reached or rejects the session fails the dial here instead of stalling
-	// the caller's first read until its own timeout.
+	// Wait until the first request reaches the transport, not until a long
+	// poll returns headers: the server may need KCP data before replying.
+	// Later HTTP rejection still closes the session and wakes its readers.
 	if err := raw.connect(ctx); err != nil {
 		_ = raw.Close()
 		return nil, err
@@ -440,8 +440,8 @@ func (s *requestClientSession) keepRunning() {
 	}
 }
 
-// connect performs the session's first poll and waits for its response
-// headers, bounded by ctx. The response body then streams like any poll.
+// connect performs the first poll and waits until its request is written,
+// bounded by ctx. The response may remain open until KCP sends data.
 func (s *requestClientSession) connect(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
@@ -609,23 +609,24 @@ func (s *requestClientSession) writePacket(requestBody *bytes.Buffer, packet []b
 	return true
 }
 
-// roundTrip sends one poll. When ready is not nil it receives the outcome of
-// the response headers exactly once: nil for an accepted poll, else the error.
+// roundTrip sends one poll. ready receives the first completed request write
+// or response/error exactly once; some custom transports do not fire traces.
 func (s *requestClientSession) roundTrip(body []byte, ready chan<- error) {
 	var written sync.Once
 	releaseUpload := func() {
 		written.Do(func() { <-s.uploads })
 	}
 	defer releaseUpload()
+	var reported sync.Once
 	report := func(err error) {
 		if ready != nil {
-			ready <- err
-			ready = nil
+			reported.Do(func() { ready <- err })
 		}
 	}
 	trace := &httptrace.ClientTrace{
-		WroteRequest: func(httptrace.WroteRequestInfo) {
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
 			releaseUpload()
+			report(info.Err)
 		},
 		GotConn: func(info httptrace.GotConnInfo) {
 			if info.Conn != nil {

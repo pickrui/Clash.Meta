@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -167,6 +168,12 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 	var satisfied bool
 
 	defer func() {
+		// Superseded/manual cancellation says nothing about reachability. In
+		// particular, it must not overwrite a newer probe's successful state.
+		// A real probe deadline still records a failure.
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		alive := err == nil
 		record := C.DelayHistory{Time: time.Now()}
 		if alive {

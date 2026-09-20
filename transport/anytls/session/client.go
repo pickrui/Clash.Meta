@@ -189,9 +189,9 @@ func (c *Client) idleCleanup() {
 
 func (c *Client) idleCleanupExpTime(expTime time.Time) {
 	activeCount := 0
-	sessionToClose := make([]*Session, 0, c.idleSession.Len())
-
 	c.idleSessionLock.Lock()
+	// The size belongs to the same protected pool as iteration and removal.
+	sessionToClose := make([]*Session, 0, c.idleSession.Len())
 	it := c.idleSession.Iterate()
 	for it.IsNotEnd() {
 		session := it.Value()

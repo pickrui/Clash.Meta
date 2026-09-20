@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/transport/anytls/padding"
+	"github.com/metacubex/mihomo/transport/anytls/skiplist"
 	"github.com/metacubex/mihomo/transport/anytls/util"
 )
 
@@ -188,5 +189,32 @@ func TestAnyTLSClientCancelsHandshake(t *testing.T) {
 				t.Fatal("handshake ignored client close")
 			}
 		})
+	}
+}
+
+func TestIdleCleanupConcurrentPoolRemoval(t *testing.T) {
+	c := &Client{idleSession: skiplist.NewSkipList[uint64, *Session]()}
+	session := &Session{idleSince: time.Now()}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-start
+		for range 10000 {
+			c.idleSessionLock.Lock()
+			c.idleSession.Insert(1, session)
+			c.idleSession.Remove(1)
+			c.idleSessionLock.Unlock()
+		}
+	})
+	wg.Go(func() {
+		<-start
+		for range 10000 {
+			c.idleCleanupExpTime(time.Time{})
+		}
+	})
+	close(start)
+	wg.Wait()
+	if c.idleSession.Len() != 0 {
+		t.Fatal("removed session remained in the idle pool")
 	}
 }
