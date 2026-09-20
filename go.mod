@@ -161,3 +161,7 @@ replace github.com/metacubex/sing-mux => ./third_party/sing-mux
 
 // Publish Shadowsocks 2022 request salt before fast replies can arrive.
 replace github.com/metacubex/sing-shadowsocks2 => ./third_party/sing-shadowsocks2
+
+// Retain the mips low-memory storage policy and TUN socket profile.
+replace github.com/metacubex/mipstack => ./third_party/mipstack
+replace github.com/metacubex/sing-tun => ./third_party/sing-tun
