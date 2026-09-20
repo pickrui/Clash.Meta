@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
@@ -28,15 +29,19 @@ const (
 )
 
 type internalProxyState struct {
-	alive   atomic.Bool
-	history *queue.Queue[C.DelayHistory]
+	lastTest uint64
+	alive    atomic.Bool
+	history  *queue.Queue[C.DelayHistory]
 }
 
 type Proxy struct {
 	C.ProxyAdapter
-	alive   atomic.Bool
-	history *queue.Queue[C.DelayHistory]
-	extra   xsync.Map[string, *internalProxyState]
+	testSequence atomic.Uint64
+	testMu       sync.Mutex
+	lastTest     uint64
+	alive        atomic.Bool
+	history      *queue.Queue[C.DelayHistory]
+	extra        xsync.Map[string, *internalProxyState]
 }
 
 // Adapter implements C.Proxy
@@ -165,6 +170,7 @@ func (p *Proxy) MarshalJSON() ([]byte, error) {
 // URLTest get the delay for the specified URL
 // implements C.Proxy
 func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (t uint16, err error) {
+	probe := p.testSequence.Add(1)
 	var satisfied bool
 
 	defer func() {
@@ -174,24 +180,33 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 		if errors.Is(err, context.Canceled) {
 			return
 		}
-		alive := err == nil
-		record := C.DelayHistory{Time: time.Now()}
-		if alive {
-			record.Delay = t
-		}
-
-		p.alive.Store(alive)
-		p.history.Put(record)
-		if p.history.Len() > defaultHistoriesNum {
-			p.history.Pop()
-		}
-
+		// Keep health state and event publication ordered by probe start.
+		p.testMu.Lock()
+		defer p.testMu.Unlock()
 		state, _ := p.extra.LoadOrStoreFn(url, func() *internalProxyState {
 			return &internalProxyState{
 				history: queue.New[C.DelayHistory](defaultHistoriesNum),
 				alive:   atomic.NewBool(true),
 			}
 		})
+		if probe < state.lastTest {
+			return
+		}
+		state.lastTest = probe
+		alive := err == nil
+		record := C.DelayHistory{Time: time.Now()}
+		if alive {
+			record.Delay = t
+		}
+
+		if probe > p.lastTest {
+			p.lastTest = probe
+			p.alive.Store(alive)
+			p.history.Put(record)
+			if p.history.Len() > defaultHistoriesNum {
+				p.history.Pop()
+			}
+		}
 
 		if !satisfied {
 			record.Delay = 0
