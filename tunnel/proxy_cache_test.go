@@ -84,3 +84,28 @@ func TestAllProxiesCacheConcurrentProviderRefresh(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestProxiesSnapshotDuringConfigReplacement(t *testing.T) {
+	oldProxies, oldProviders := ProxiesSnapshot(), ProvidersSnapshot()
+	defer UpdateProxies(oldProxies, oldProviders)
+	first := &cacheTestProxy{name: "node"}
+	UpdateProxies(map[string]C.Proxy{"node": first}, nil)
+	before := ProxiesSnapshot()
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Go(func() {
+			for range 1000 {
+				if ProxiesSnapshot()["node"] == nil {
+					t.Error("snapshot lost configured proxy")
+				}
+			}
+		})
+	}
+	for range 1000 {
+		UpdateProxies(map[string]C.Proxy{"node": &cacheTestProxy{name: "node"}}, nil)
+	}
+	readers.Wait()
+	if before["node"] != first {
+		t.Fatal("config replacement mutated a published snapshot")
+	}
+}

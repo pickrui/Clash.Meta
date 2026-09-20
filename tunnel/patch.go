@@ -87,6 +87,12 @@ func invalidateAllProxies() {
 	allProxiesVersions = nil
 }
 
+func ProxiesSnapshot() map[string]C.Proxy {
+	configMux.RLock()
+	defer configMux.RUnlock()
+	return proxies
+}
+
 // ProvidersSnapshot returns the proxy providers the tunnel holds, read under
 // the lock an apply installs them with — Providers() takes none. The maps are
 // never written in place, so the result stays valid after the lock is dropped.
