@@ -256,10 +256,9 @@ func TestRejectionAfterRequestWriteClosesReturnedConn(t *testing.T) {
 	conn, err := client.Dial(ctx)
 	require.NoError(t, err)
 	defer conn.Close()
-	close(reject)
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(time.Second)))
+	close(reject)
 	_, err = conn.Read(make([]byte, 1))
-	require.Error(t, err)
-	require.NotErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorIs(t, err, io.EOF)
 	require.ErrorContains(t, conn.(*clientConn).raw.closeErr(), "403")
 }
