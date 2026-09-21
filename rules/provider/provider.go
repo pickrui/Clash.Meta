@@ -9,12 +9,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/pool"
 	"github.com/metacubex/mihomo/common/yaml"
 	"github.com/metacubex/mihomo/component/resource"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
 	"github.com/metacubex/mihomo/rules/common"
+	yamlv3 "gopkg.in/yaml.v3"
 )
 
 var tunnel P.Tunnel
@@ -61,7 +63,7 @@ type mrsRuleStrategy interface {
 
 type baseProvider struct {
 	behavior P.RuleBehavior
-	strategy ruleStrategy
+	strategy atomic.TypedValue[ruleStrategy]
 }
 
 func (bp *baseProvider) Type() P.ProviderType {
@@ -73,15 +75,16 @@ func (bp *baseProvider) Behavior() P.RuleBehavior {
 }
 
 func (bp *baseProvider) Count() int {
-	return bp.strategy.Count()
+	return bp.strategy.Load().Count()
 }
 
 func (bp *baseProvider) Match(metadata *C.Metadata, helper C.RuleMatchHelper) bool {
-	return bp.strategy != nil && bp.strategy.Match(metadata, helper)
+	strategy := bp.strategy.Load()
+	return strategy != nil && strategy.Match(metadata, helper)
 }
 
 func (bp *baseProvider) Strategy() any {
-	return bp.strategy
+	return bp.strategy.Load()
 }
 
 type ruleSetProvider struct {
@@ -110,7 +113,7 @@ func (rp *ruleSetProvider) MarshalJSON() ([]byte, error) {
 			Behavior:    rp.behavior.String(),
 			Format:      rp.format.String(),
 			Name:        rp.Fetcher.Name(),
-			RuleCount:   rp.strategy.Count(),
+			RuleCount:   rp.Count(),
 			Type:        rp.Type().String(),
 			UpdatedAt:   rp.UpdatedAt(),
 			VehicleType: rp.VehicleType().String(),
@@ -131,14 +134,15 @@ func NewRuleSetProvider(name string, behavior P.RuleBehavior, format P.RuleForma
 	}
 
 	onUpdate := func(strategy ruleStrategy) {
-		rp.strategy = strategy
+		rp.strategy.Store(strategy)
 		tunnel.RuleUpdateCallback().Emit(rp)
 	}
 
-	rp.strategy = newStrategy(behavior, parse)
+	strategy := newStrategy(behavior, parse)
 	if len(payload) > 0 { // using as fallback rules
-		rp.strategy = rulesParseInline(payload, rp.strategy)
+		strategy = rulesParseInline(payload, strategy)
 	}
+	rp.strategy.Store(strategy)
 	rp.Fetcher = resource.NewFetcher(name, interval, vehicle, bundleFile, func(bytes []byte) (ruleStrategy, error) {
 		return rulesParse(bytes, newStrategy(behavior, parse), format)
 	}, onUpdate)
@@ -183,6 +187,7 @@ func rulesParse(buf []byte, strategy ruleStrategy, format P.RuleFormat) (ruleStr
 	firstLineBuffer := pool.GetBuffer()
 	defer pool.PutBuffer(firstLineBuffer)
 	firstLineLength := 0
+	sequenceIndent := -1
 
 	s := 0 // search start index
 	for s < len(buf) {
@@ -195,7 +200,7 @@ func rulesParse(buf []byte, strategy ruleStrategy, format P.RuleFormat) (ruleStr
 		} else {
 			s = len(buf)                                      // stop loop in next step
 			if firstLineLength == 0 && format == P.YamlRule { // no head or only one line body
-				return nil, ErrNoPayload
+				return rulesParseYAMLDocument(buf, strategy)
 			}
 		}
 		var str string
@@ -231,17 +236,22 @@ func rulesParse(buf []byte, strategy ruleStrategy, format P.RuleFormat) (ruleStr
 					continue
 				}
 
-				// not found or err!=nil
-				firstLineBuffer.Truncate(0)
-				firstLineLength = 0
-				continue
+				return rulesParseYAMLDocument(buf, strategy)
 			}
 
-			// parse payload body
+			indent := len(line) - len(bytes.TrimLeft(line, " "))
+			if indent >= len(line) || line[indent] != '-' ||
+				(len(trimLine) > 1 && trimLine[1] != ' ' && trimLine[1] != '\t') ||
+				(sequenceIndent >= 0 && sequenceIndent != indent) {
+				return rulesParseYAMLDocument(buf, strategy)
+			}
+			sequenceIndent = indent
+			// Uncertain syntax must be validated as a complete document before publication.
+			*schema = RulePayload{}
 			err := yaml.Unmarshal(firstLineBuffer.Bytes(), schema)
 			firstLineBuffer.Truncate(firstLineLength)
-			if err != nil {
-				continue
+			if err != nil || len(schema.Rules)+len(schema.Payload) != 1 {
+				return rulesParseYAMLDocument(buf, strategy)
 			}
 
 			if len(schema.Rules) > 0 {
@@ -261,9 +271,35 @@ func rulesParse(buf []byte, strategy ruleStrategy, format P.RuleFormat) (ruleStr
 		strategy.Insert(str)
 	}
 
+	if format == P.YamlRule && strategy.Count() == 0 {
+		return rulesParseYAMLDocument(buf, strategy)
+	}
 	strategy.FinishInsert()
 
 	return strategy, nil
+}
+
+func rulesParseYAMLDocument(buf []byte, strategy ruleStrategy) (ruleStrategy, error) {
+	var schema RulePayload
+	decoder := yamlv3.NewDecoder(bytes.NewReader(buf))
+	if err := decoder.Decode(&schema); err != nil {
+		return nil, err
+	}
+	var extra yamlv3.Node
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return nil, err
+		}
+		return nil, ErrInvalidFormat
+	}
+	rules := schema.Payload
+	if rules == nil {
+		rules = schema.Rules
+	}
+	if rules == nil {
+		return nil, ErrNoPayload
+	}
+	return rulesParseInline(rules, strategy), nil
 }
 
 func rulesParseInline(rs []string, strategy ruleStrategy) ruleStrategy {
@@ -311,7 +347,7 @@ func (i *inlineProvider) MarshalJSON() ([]byte, error) {
 		providerForApi{
 			Behavior:    i.behavior.String(),
 			Name:        i.Name(),
-			RuleCount:   i.strategy.Count(),
+			RuleCount:   i.Count(),
 			Type:        i.Type().String(),
 			VehicleType: i.VehicleType().String(),
 			UpdatedAt:   i.updateAt,
@@ -323,13 +359,12 @@ func NewInlineProvider(name string, behavior P.RuleBehavior, payload []string, p
 	ip := &inlineProvider{
 		baseProvider: baseProvider{
 			behavior: behavior,
-			strategy: newStrategy(behavior, parse),
 		},
 		payload:  payload,
 		name:     name,
 		updateAt: time.Now(),
 	}
-	ip.strategy = rulesParseInline(payload, ip.strategy)
+	ip.strategy.Store(rulesParseInline(payload, newStrategy(behavior, parse)))
 
 	wrapper := &InlineProvider{
 		ip,

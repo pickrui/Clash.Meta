@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter"
@@ -124,7 +125,7 @@ type ProxySetProvider struct {
 type proxySetProvider struct {
 	baseProvider
 	*resource.Fetcher[[]C.Proxy]
-	subscriptionInfo *SubscriptionInfo
+	subscriptionInfo atomic.Pointer[SubscriptionInfo]
 }
 
 func (pp *proxySetProvider) MarshalJSON() ([]byte, error) {
@@ -136,7 +137,7 @@ func (pp *proxySetProvider) MarshalJSON() ([]byte, error) {
 		TestUrl:          pp.healthCheck.url,
 		ExpectedStatus:   pp.healthCheck.expectedStatus.String(),
 		UpdatedAt:        pp.UpdatedAt(),
-		SubscriptionInfo: pp.subscriptionInfo,
+		SubscriptionInfo: pp.subscriptionInfo.Load(),
 	})
 }
 
@@ -158,7 +159,7 @@ func (pp *proxySetProvider) Initial() error {
 		return err
 	}
 	if subscriptionInfo := cachefile.Cache().GetSubscriptionInfo(pp.Name()); subscriptionInfo != "" {
-		pp.subscriptionInfo = NewSubscriptionInfo(subscriptionInfo)
+		pp.subscriptionInfo.Store(NewSubscriptionInfo(subscriptionInfo))
 	}
 	pp.closeAllConnections()
 	return nil
@@ -216,7 +217,7 @@ func NewProxySetProvider(name string, interval time.Duration, payload []map[stri
 		httpVehicle.SetInRead(func(resp *http.Response) {
 			if subscriptionInfo := resp.Header.Get("subscription-userinfo"); subscriptionInfo != "" {
 				cachefile.Cache().SetSubscriptionInfo(name, subscriptionInfo)
-				pd.subscriptionInfo = NewSubscriptionInfo(subscriptionInfo)
+				pd.subscriptionInfo.Store(NewSubscriptionInfo(subscriptionInfo))
 			}
 		})
 	}

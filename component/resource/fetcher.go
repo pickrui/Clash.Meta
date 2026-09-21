@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/slowdown"
 	P "github.com/metacubex/mihomo/constant/provider"
@@ -27,7 +28,7 @@ type Fetcher[V any] struct {
 	name         string
 	vehicle      P.Vehicle
 	bundleFile   BundleFile
-	updatedAt    time.Time
+	updatedAt    atomic.TypedValue[time.Time]
 	hash         utils.HashType
 	parser       Parser[V]
 	interval     time.Duration
@@ -51,7 +52,7 @@ func (f *Fetcher[V]) VehicleType() P.VehicleType {
 }
 
 func (f *Fetcher[V]) UpdatedAt() time.Time {
-	return f.updatedAt
+	return f.updatedAt.Load()
 }
 
 func (f *Fetcher[V]) Initial() (V, error) {
@@ -62,7 +63,7 @@ func (f *Fetcher[V]) Initial() (V, error) {
 		var contents V
 		if err == nil {
 			contents, _, err = f.loadBuf(buf, utils.MakeHash(buf), false)
-			f.updatedAt = modTime // reset updatedAt to file's modTime
+			f.updatedAt.Store(modTime) // reset updatedAt to file's modTime
 		}
 
 		if err == nil {
@@ -87,7 +88,7 @@ func (f *Fetcher[V]) Initial() (V, error) {
 			var contents V
 			if err == nil {
 				contents, _, err = f.loadBuf(buf, utils.MakeHash(buf), true)
-				f.updatedAt = modTime // reset updatedAt to file's modTime
+				f.updatedAt.Store(modTime) // reset updatedAt to file's modTime
 			}
 
 			if err == nil {
@@ -126,6 +127,9 @@ func (f *Fetcher[V]) SetDiscard(discard func(V)) { f.discard = discard }
 func (f *Fetcher[V]) Update() (V, bool, error) {
 	f.loadBufMutex.Lock()
 	defer f.loadBufMutex.Unlock()
+	if err := f.ctx.Err(); err != nil {
+		return lo.Empty[V](), false, err
+	}
 	var buf []byte
 	var hash utils.HashType
 	var contents V
@@ -181,7 +185,7 @@ func (f *Fetcher[V]) loadBufLocked(buf []byte, hash utils.HashType, updateFile b
 		if updateFile {
 			_ = os.Chtimes(f.vehicle.Path(), now, now)
 		}
-		f.updatedAt = now
+		f.updatedAt.Store(now)
 		f.backoff.Reset() // no error, reset backoff
 		return lo.Empty[V](), true, nil
 	}
@@ -216,7 +220,10 @@ func (f *Fetcher[V]) loadBufLocked(buf []byte, hash utils.HashType, updateFile b
 			return lo.Empty[V](), false, err
 		}
 	}
-	f.updatedAt = now
+	if err := f.ctx.Err(); err != nil {
+		return lo.Empty[V](), false, err
+	}
+	f.updatedAt.Store(now)
 	f.hash = hash
 
 	if f.onUpdate != nil {
@@ -235,8 +242,14 @@ func (f *Fetcher[V]) Close() error {
 	return nil
 }
 
+// WaitForUpdates drains in-flight writes after Close; parsers may call Close themselves.
+func (f *Fetcher[V]) WaitForUpdates() {
+	f.loadBufMutex.Lock()
+	f.loadBufMutex.Unlock()
+}
+
 func (f *Fetcher[V]) pullLoop(forceUpdate bool) {
-	initialInterval := f.interval - time.Since(f.updatedAt)
+	initialInterval := f.interval - time.Since(f.UpdatedAt())
 	if initialInterval > f.interval {
 		initialInterval = f.interval
 	}

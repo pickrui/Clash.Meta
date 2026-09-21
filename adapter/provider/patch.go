@@ -1,5 +1,5 @@
 package provider
 
 func (pp *proxySetProvider) GetSubscriptionInfo() *SubscriptionInfo {
-	return pp.subscriptionInfo
+	return pp.subscriptionInfo.Load()
 }
