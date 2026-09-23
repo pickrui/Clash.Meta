@@ -17,6 +17,7 @@ import (
 	"github.com/metacubex/mihomo/component/ech/echparser"
 	tlsC "github.com/metacubex/mihomo/component/tls"
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/transport/jls"
 	"github.com/metacubex/mihomo/transport/restls"
 	newshadowtls "github.com/metacubex/mihomo/transport/shadowtls"
@@ -165,6 +166,20 @@ func resolveSnellClientFingerprint(obfsOption *snellObfsOption, option SnellOpti
 		return globalFingerprint
 	}
 	return defaultSnellClientFingerprint
+}
+
+// snellECHTLSClientFingerprint resolves the fingerprint of an ech-tls
+// connection. Without a uTLS fingerprint crypto/tls copies the inner ALPN
+// (snell-ech/1) into the ClientHelloOuter, which is sent in the clear and would
+// identify every connection to a passive observer, so none falls back to the
+// default instead.
+func snellECHTLSClientFingerprint(obfsOption *snellObfsOption, option SnellOption) string {
+	fingerprint := resolveSnellClientFingerprint(obfsOption, option)
+	if strings.EqualFold(fingerprint, "none") {
+		log.Warnln("[Snell] %s ignores client-fingerprint none, using %s", snellECHTLSALPN, defaultSnellClientFingerprint)
+		return defaultSnellClientFingerprint
+	}
+	return fingerprint
 }
 
 func snellECHTLSConfig(obfsOption *snellObfsOption) (*ech.Config, error) {
@@ -640,7 +655,7 @@ func NewSnell(option SnellOption) (*Snell, error) {
 			SkipCertVerify:       obfsOption.SkipCertVerify,
 			NameCertVerify:       obfsOption.NameCertVerify,
 			CAFile:               obfsOption.CAFile,
-			ClientFingerprint:    resolveSnellClientFingerprint(obfsOption, option),
+			ClientFingerprint:    snellECHTLSClientFingerprint(obfsOption, option),
 			FingerPrint:          obfsOption.Fingerprint,
 			Certificate:          obfsOption.Certificate,
 			PrivateKey:           obfsOption.PrivateKey,
