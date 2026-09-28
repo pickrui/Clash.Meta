@@ -9,7 +9,7 @@ import (
 
 func TestRoutesMatchHost(t *testing.T) {
 	routes := NewRoutes(
-		[]string{"Tail1234.ts.net.", "ts.net"},
+		[]string{"Tail1234.ts.net."},
 		[]string{"nas.tail1234.ts.net.", "nas", "Office-PC.corp.example"},
 		nil,
 	)

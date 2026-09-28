@@ -37,26 +37,40 @@ const (
 	tailscaleWatchRetryDelay = time.Second
 )
 
+// tailscaleOutboundSeq orders outbounds by parse time: a later outbound may
+// replace the session of an earlier one, never the reverse.
+var tailscaleOutboundSeq atomic.Uint64
+
 type tailscaleSessionPool struct {
-	mu        sync.Mutex
-	byDir     map[string]*tailscaleSession
-	forgotten map[string]struct{}
+	mu    sync.Mutex
+	byDir map[string]*tailscaleSession
+	// closing holds the last session taken out of byDir, so the next server on
+	// that directory starts only after the previous one released it.
+	closing map[string]*tailscaleSession
+	// forgotten maps a removed directory to the last outbound parsed before
+	// its removal; only outbounds parsed later may use it again.
+	forgotten map[string]uint64
 }
 
-var tailscaleSessions = &tailscaleSessionPool{
-	byDir:     map[string]*tailscaleSession{},
-	forgotten: map[string]struct{}{},
+var tailscaleSessions = newTailscaleSessionPool()
+
+func newTailscaleSessionPool() *tailscaleSessionPool {
+	return &tailscaleSessionPool{
+		byDir:     map[string]*tailscaleSession{},
+		closing:   map[string]*tailscaleSession{},
+		forgotten: map[string]uint64{},
+	}
 }
 
-func (p *tailscaleSessionPool) acquire(stateDir, key string, create func() *tailscaleSession) (*tailscaleSession, error) {
+func (p *tailscaleSessionPool) acquire(stateDir, key string, seq uint64, create func() *tailscaleSession) (*tailscaleSession, error) {
 	p.mu.Lock()
-	if _, ok := p.forgotten[stateDir]; ok {
+	if removedAt, ok := p.forgotten[stateDir]; ok && seq <= removedAt {
 		p.mu.Unlock()
 		return nil, errTailscaleRemoved
 	}
-	var superseded *tailscaleSession
-	if current := p.byDir[stateDir]; current != nil {
-		if current.key == key && !current.isClosed() {
+	current := p.byDir[stateDir]
+	if current != nil && !current.isClosed() {
+		if current.key == key {
 			current.refs++
 			if current.linger != nil {
 				current.linger.Stop()
@@ -65,14 +79,23 @@ func (p *tailscaleSessionPool) acquire(stateDir, key string, create func() *tail
 			p.mu.Unlock()
 			return current, nil
 		}
-		superseded = current
+		if seq < current.ownerSeq {
+			p.mu.Unlock()
+			return nil, errTailscaleSuperseded
+		}
 	}
 	session := create()
 	session.refs = 1
+	session.ownerSeq = seq
+	session.predecessor = p.closing[stateDir]
+	if current != nil {
+		session.predecessor = current
+		p.closing[stateDir] = current
+	}
 	p.byDir[stateDir] = session
 	p.mu.Unlock()
-	if superseded != nil {
-		superseded.close(errTailscaleSuperseded)
+	if current != nil {
+		go current.close(errTailscaleSuperseded)
 	}
 	return session, nil
 }
@@ -87,6 +110,16 @@ func (p *tailscaleSessionPool) peek(stateDir, key string) *tailscaleSession {
 	return nil
 }
 
+// takeLocked removes session from the pool and records it as closing.
+func (p *tailscaleSessionPool) takeLocked(session *tailscaleSession) bool {
+	if p.byDir[session.stateDir] != session {
+		return false
+	}
+	delete(p.byDir, session.stateDir)
+	p.closing[session.stateDir] = session
+	return true
+}
+
 func (p *tailscaleSessionPool) release(session *tailscaleSession) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -96,37 +129,44 @@ func (p *tailscaleSessionPool) release(session *tailscaleSession) {
 	}
 	session.linger = time.AfterFunc(tailscaleSessionLinger, func() {
 		p.mu.Lock()
-		if session.refs > 0 || p.byDir[session.stateDir] != session {
-			p.mu.Unlock()
-			return
-		}
-		delete(p.byDir, session.stateDir)
+		taken := session.refs == 0 && p.takeLocked(session)
 		p.mu.Unlock()
-		session.close(errTailscaleClosed)
+		if taken {
+			session.close(errTailscaleClosed)
+		}
 	})
+}
+
+// retire closes a session whose outbounds should start a fresh one on their
+// next use, keeping the configured options that a logout discards.
+func (p *tailscaleSessionPool) retire(session *tailscaleSession) {
+	p.mu.Lock()
+	p.takeLocked(session)
+	p.mu.Unlock()
+	session.close(errTailscaleRetired)
 }
 
 func (p *tailscaleSessionPool) drop(session *tailscaleSession) {
 	p.mu.Lock()
-	if p.byDir[session.stateDir] == session {
-		delete(p.byDir, session.stateDir)
-	}
+	p.takeLocked(session)
 	p.mu.Unlock()
 }
 
 func (p *tailscaleSessionPool) forget(stateDir string) {
 	p.mu.Lock()
-	p.forgotten[stateDir] = struct{}{}
-	session := p.byDir[stateDir]
-	delete(p.byDir, stateDir)
+	p.forgotten[stateDir] = tailscaleOutboundSeq.Load()
+	if current := p.byDir[stateDir]; current != nil {
+		p.takeLocked(current)
+	}
+	closing := p.closing[stateDir]
 	p.mu.Unlock()
-	if session != nil {
-		session.close(errTailscaleRemoved)
+	if closing != nil {
+		closing.close(errTailscaleRemoved)
 	}
 }
 
 // ForgetTailscaleState stops the session of a removed network and deletes its
-// node identity. The directory can never be used again by this process.
+// node identity. Outbounds parsed before the removal can no longer use it.
 func ForgetTailscaleState(stateDir string) error {
 	resolved, err := resolveTailscaleStateDir(stateDir)
 	if err != nil {
@@ -140,23 +180,41 @@ func resolveTailscaleStateDir(stateDir string) (string, error) {
 	if strings.TrimSpace(stateDir) == "" {
 		return "", errors.New("missing tailscale state-dir")
 	}
-	resolved := C.Path.Resolve(stateDir)
+	resolved := filepath.Clean(C.Path.Resolve(stateDir))
 	if !C.Path.IsSafePath(resolved) {
 		return "", C.Path.ErrNotSafePath(resolved)
 	}
 	return resolved, nil
 }
 
-func tailscaleStateExists(stateDir string) bool {
-	info, err := os.Stat(filepath.Join(stateDir, tailscaleStateFileName))
-	return err == nil && info.Size() > 0
+// tailscaleSignedIn reports whether the state directory holds a login
+// profile. The file exists as soon as tsnet starts, and a logout keeps the
+// machine key while deleting the profile.
+func tailscaleSignedIn(stateDir string) bool {
+	data, err := os.ReadFile(filepath.Join(stateDir, tailscaleStateFileName))
+	if err != nil {
+		return false
+	}
+	var state map[ipn.StateKey][]byte
+	if json.Unmarshal(data, &state) != nil {
+		return false
+	}
+	var profiles map[string]json.RawMessage
+	return json.Unmarshal(state[ipn.KnownProfilesStateKey], &profiles) == nil && len(profiles) > 0
 }
 
 type tailscaleSession struct {
 	stateDir  string
 	key       string
 	option    TailscaleOption
+	authKey   string
 	newServer func(authKey string) *tsnet.Server
+
+	// ownerSeq, predecessor, refs and linger are guarded by the pool.
+	ownerSeq    uint64
+	predecessor *tailscaleSession
+	refs        int
+	linger      *time.Timer
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -167,36 +225,37 @@ type tailscaleSession struct {
 	started       bool
 	serverRunning bool
 	closeErr      error
+	closed        atomic.Bool
+	done          chan struct{}
 
 	backendInitOnce sync.Once
 	backendInitCh   chan struct{}
 	backendInitErr  error
 
-	// refs and linger are guarded by the pool.
-	refs   int
-	linger *time.Timer
-
-	closed atomic.Bool
-
 	routes        atomic.Pointer[tailnet.Routes]
 	refreshRoutes chan struct{}
 }
 
-func newTailscaleSession(option TailscaleOption, key string, newServer func(string) *tsnet.Server) *tailscaleSession {
+func newTailscaleSession(option TailscaleOption, key, authKey string, newServer func(string) *tsnet.Server) *tailscaleSession {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &tailscaleSession{
 		stateDir:      option.StateDir,
 		key:           key,
 		option:        option,
+		authKey:       authKey,
 		newServer:     newServer,
 		ctx:           ctx,
 		cancel:        cancel,
+		done:          make(chan struct{}),
 		backendInitCh: make(chan struct{}),
 		refreshRoutes: make(chan struct{}, 1),
 	}
 }
 
 func (s *tailscaleSession) Routes() *tailnet.Routes {
+	if s.isClosed() {
+		return nil
+	}
 	return s.routes.Load()
 }
 
@@ -219,8 +278,15 @@ func (s *tailscaleSession) isStarted() bool {
 	return s.started
 }
 
-// start launches tsnet once. authKey is only used when this call starts it.
-func (s *tailscaleSession) start(authKey string) (startedNow bool, err error) {
+// start launches tsnet once, after any previous server on the directory has
+// stopped, using the auth key the session was created with.
+func (s *tailscaleSession) start() (startedNow bool, err error) {
+	if s.predecessor != nil {
+		select {
+		case <-s.predecessor.done:
+		case <-s.ctx.Done():
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.isClosed() {
@@ -230,7 +296,7 @@ func (s *tailscaleSession) start(authKey string) (startedNow bool, err error) {
 		return false, nil
 	}
 	s.started = true
-	s.server = s.newServer(authKey)
+	s.server = s.newServer(s.authKey)
 	if err = s.server.Start(); err != nil {
 		s.failLocked(err)
 		return true, err
@@ -255,6 +321,9 @@ func (s *tailscaleSession) failLocked(err error) {
 }
 
 func (s *tailscaleSession) close(reason error) {
+	if s.predecessor != nil {
+		<-s.predecessor.done
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closeLocked(reason)
@@ -275,6 +344,7 @@ func (s *tailscaleSession) closeLocked(reason error) {
 			log.Warnln("[Tailscale] close %s: %v", s.stateDir, err)
 		}
 	}
+	close(s.done)
 }
 
 func (s *tailscaleSession) setBackendInitialized(err error) {
@@ -376,16 +446,17 @@ func (s *tailscaleSession) applyExitNodePrefs(ctx context.Context) error {
 	return err
 }
 
-// watchRoutes rebuilds the TAILNET routes whenever peers or the backend state
-// change. Legacy netmap notifications are not emitted on every platform, so
-// peer-change notifications only trigger a fresh status read.
+// watchRoutes rebuilds the TAILNET routes when peers join, leave or change,
+// or the backend state changes. Legacy netmap notifications are not emitted on
+// every platform, and per-field peer patches (online, endpoints) arrive
+// separately so they do not trigger a rebuild.
 func (s *tailscaleSession) watchRoutes() {
 	lc, err := s.server.LocalClient()
 	if err != nil {
 		return
 	}
 	go s.refreshRoutesLoop()
-	mask := ipn.NotifyInitialState | ipn.NotifyPeerChanges | ipn.NotifyNoNetMap
+	mask := ipn.NotifyInitialState | ipn.NotifyPeerChanges | ipn.NotifyPeerPatches | ipn.NotifyNoNetMap
 	for s.ctx.Err() == nil {
 		watcher, err := lc.WatchIPNBus(s.ctx, mask)
 		if err != nil {
@@ -397,8 +468,12 @@ func (s *tailscaleSession) watchRoutes() {
 			}
 		}
 		for {
-			if _, err := watcher.Next(); err != nil {
+			n, err := watcher.Next()
+			if err != nil {
 				break
+			}
+			if n.State == nil && n.SelfChange == nil && len(n.PeersChanged) == 0 && len(n.PeersRemoved) == 0 {
+				continue
 			}
 			select {
 			case s.refreshRoutes <- struct{}{}:
@@ -440,27 +515,24 @@ func (s *tailscaleSession) updateRoutes() {
 	if err != nil {
 		return
 	}
-	if s.isClosed() {
-		return
-	}
 	s.routes.Store(buildTailnetRoutes(status))
 }
 
 func tailscaleMagicDNSSuffix(status *ipnstate.Status) string {
 	if status.CurrentTailnet != nil && status.CurrentTailnet.MagicDNSSuffix != "" {
-		return status.CurrentTailnet.MagicDNSSuffix
+		return tailnet.NormalizeName(status.CurrentTailnet.MagicDNSSuffix)
 	}
-	return status.MagicDNSSuffix
+	return tailnet.NormalizeName(status.MagicDNSSuffix)
 }
 
-// buildTailnetRoutes lists peer addresses, their MagicDNS names, the short
-// names no two peers share, and the tailnet suffix. Subnet routes and exit
-// traffic are left to explicit rules.
+// buildTailnetRoutes lists peer addresses, their MagicDNS names and the short
+// names no two peers share. The whole suffix is claimed only for a Tailscale
+// assigned tailnet domain: a custom Headscale base domain may also serve
+// public sites. Subnet routes and exit traffic are left to explicit rules.
 func buildTailnetRoutes(status *ipnstate.Status) *tailnet.Routes {
 	if status.BackendState != ipn.Running.String() {
 		return nil
 	}
-	suffix := tailnet.NormalizeName(tailscaleMagicDNSSuffix(status))
 	var names []string
 	var addrs []netip.Addr
 	shortNames := map[string]int{}
@@ -481,7 +553,7 @@ func buildTailnetRoutes(status *ipnstate.Status) *tailnet.Routes {
 		}
 	}
 	var suffixes []string
-	if suffix != "" {
+	if suffix := tailscaleMagicDNSSuffix(status); strings.HasSuffix(suffix, ".ts.net") {
 		suffixes = append(suffixes, suffix)
 	}
 	return tailnet.NewRoutes(suffixes, names, addrs)
@@ -491,7 +563,7 @@ func tailscaleStatusFrom(status *ipnstate.Status) *TailscaleStatus {
 	result := &TailscaleStatus{
 		State:          status.BackendState,
 		AuthURL:        status.AuthURL,
-		MagicDNSSuffix: tailnet.NormalizeName(tailscaleMagicDNSSuffix(status)),
+		MagicDNSSuffix: tailscaleMagicDNSSuffix(status),
 		Health:         status.Health,
 		Peers:          []TailscaleDevice{},
 	}
@@ -503,9 +575,6 @@ func tailscaleStatusFrom(status *ipnstate.Status) *TailscaleStatus {
 		self.Addresses = tailscaleAddresses(status.TailscaleIPs)
 		result.Self = &self
 		result.KeyExpired = status.Self.Expired
-		if status.Self.KeyExpiry != nil {
-			result.KeyExpiry = status.Self.KeyExpiry.UnixMilli()
-		}
 	}
 	for _, peer := range status.Peer {
 		result.Peers = append(result.Peers, tailscaleDeviceFrom(peer))

@@ -37,18 +37,19 @@ import (
 
 type Tailscale struct {
 	*Base
-	dnsResolver *dns.Resolver
-	option      TailscaleOption
-	sessionKey  string
-	ctx         context.Context
-	cancel      context.CancelFunc
+	dnsResolver  *dns.Resolver
+	dnsTransport tailscaleDNSTransport
+	option       TailscaleOption
+	sessionKey   string
+	seq          uint64
+	ctx          context.Context
+	cancel       context.CancelFunc
 
 	mu      sync.Mutex
 	session *tailscaleSession
 	closed  bool
-
-	unregisterDNSResolver func()
-	unregisterRoutes      func()
+	// unregister removes the routes and DNS client published for session.
+	unregister func()
 }
 
 type TailscaleOption struct {
@@ -118,10 +119,11 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	if option.StateDir == "" {
 		option.StateDir = "tailscale"
 	}
-	option.StateDir = C.Path.Resolve(option.StateDir)
-	if !C.Path.IsSafePath(option.StateDir) {
-		return nil, C.Path.ErrNotSafePath(option.StateDir)
+	stateDir, err := resolveTailscaleStateDir(option.StateDir)
+	if err != nil {
+		return nil, err
 	}
+	option.StateDir = stateDir
 
 	addr := option.ControlURL
 	if addr == "" {
@@ -141,13 +143,13 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 		}),
 		option:     option,
 		sessionKey: tailscaleSessionKey(option),
+		seq:        tailscaleOutboundSeq.Add(1),
 		ctx:        ctx,
 		cancel:     cancel,
 	}
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
-	dnsTransport := tailscaleDNSTransport{tailscale: outbound}
-	outbound.dnsResolver = dns.NewResolverFromClient(dnsTransport)
-	outbound.unregisterDNSResolver = dns.RegisterTailscaleDnsClient(option.Name, dnsTransport)
+	outbound.dnsTransport = tailscaleDNSTransport{tailscale: outbound}
+	outbound.dnsResolver = dns.NewResolverFromClient(outbound.dnsTransport)
 	return outbound, nil
 }
 
@@ -195,45 +197,75 @@ func (t *Tailscale) serverFactory() func(authKey string) *tsnet.Server {
 	}
 }
 
-func (t *Tailscale) acquireSession() (*tailscaleSession, error) {
+// acquireSession returns the session serving this outbound. The routes and
+// the tailscale:// DNS client are published only then, so an outbound parsed
+// just to validate a config never replaces the running one's. authKey applies
+// only if this call creates the session.
+func (t *Tailscale) acquireSession(authKey string) (*tailscaleSession, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
 		return nil, errTailscaleClosed
 	}
-	if t.session != nil {
-		return t.session, nil
+	if session := t.session; session != nil {
+		if !session.isClosed() {
+			return session, nil
+		}
+		if err := session.closeError(); !errors.Is(err, errTailscaleRetired) {
+			return nil, err
+		}
+		t.releaseLocked()
 	}
 	option := t.option
+	key := t.sessionKey
 	newServer := t.serverFactory()
-	session, err := tailscaleSessions.acquire(option.StateDir, t.sessionKey, func() *tailscaleSession {
-		return newTailscaleSession(option, t.sessionKey, newServer)
+	session, err := tailscaleSessions.acquire(option.StateDir, key, t.seq, func() *tailscaleSession {
+		return newTailscaleSession(option, key, authKey, newServer)
 	})
 	if err != nil {
 		return nil, err
 	}
 	t.session = session
-	t.unregisterRoutes = tailnet.Register(t.Name(), session)
+	unregisterRoutes := tailnet.Register(t.Name(), session)
+	unregisterDNS := dns.RegisterTailscaleDnsClient(t.Name(), t.dnsTransport)
+	t.unregister = func() {
+		unregisterRoutes()
+		unregisterDNS()
+	}
 	return session, nil
 }
 
-// currentSession returns the session serving this outbound without starting one.
+func (t *Tailscale) releaseLocked() {
+	if t.session == nil {
+		return
+	}
+	t.unregister()
+	tailscaleSessions.release(t.session)
+	t.session = nil
+	t.unregister = nil
+}
+
+// currentSession returns the live session serving this outbound without
+// starting one.
 func (t *Tailscale) currentSession() *tailscaleSession {
 	t.mu.Lock()
 	session := t.session
 	t.mu.Unlock()
-	if session != nil {
+	if session != nil && !session.isClosed() {
 		return session
 	}
-	return tailscaleSessions.peek(t.option.StateDir, t.sessionKey)
+	if current := tailscaleSessions.peek(t.option.StateDir, t.sessionKey); current != nil {
+		return current
+	}
+	return session
 }
 
 func (t *Tailscale) ensureStarted(ctx context.Context) (*tailscaleSession, error) {
-	session, err := t.acquireSession()
+	session, err := t.acquireSession("")
 	if err != nil {
 		return nil, err
 	}
-	if _, err = session.start(""); err != nil {
+	if _, err = session.start(); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -249,11 +281,11 @@ func (t *Tailscale) ensureStarted(ctx context.Context) (*tailscaleSession, error
 	return session, nil
 }
 
-// Warm starts a network that can come up without the user: one that already
-// holds a node identity or has an auth key. An interactive network waits for
-// Login so a new login page is not requested on every config apply.
+// Warm starts a network that can come up without the user: one that is signed
+// in or has an auth key. Any other network waits for Login, so a config apply
+// never requests a login page.
 func (t *Tailscale) Warm() {
-	if t.option.AuthKey == "" && !tailscaleStateExists(t.option.StateDir) {
+	if t.option.AuthKey == "" && !tailscaleSignedIn(t.option.StateDir) {
 		return
 	}
 	go func() {
@@ -265,15 +297,14 @@ func (t *Tailscale) Warm() {
 	}()
 }
 
-// Login starts the session if needed and asks control to authorize it, with
-// authKey when given and interactively otherwise. The login page appears in
-// Status as AuthURL.
+// Login asks control to authorize this device, with authKey when given and
+// interactively otherwise; the login page then appears in Status as AuthURL.
 func (t *Tailscale) Login(ctx context.Context, authKey string) error {
-	session, err := t.acquireSession()
+	session, err := t.acquireSession(authKey)
 	if err != nil {
 		return err
 	}
-	startedNow, err := session.start(authKey)
+	startedNow, err := session.start()
 	if err != nil {
 		return err
 	}
@@ -281,23 +312,20 @@ func (t *Tailscale) Login(ctx context.Context, authKey string) error {
 		return err
 	}
 	if startedNow {
-		// tsnet already started interactive login or used the key.
+		// tsnet begins the login itself, with the key or interactively.
 		return nil
 	}
 	lc, err := session.server.LocalClient()
 	if err != nil {
 		return err
 	}
-	if authKey != "" {
-		return lc.Start(ctx, ipn.Options{AuthKey: authKey})
-	}
 	status, err := lc.StatusWithoutPeers(ctx)
 	if err != nil {
 		return err
 	}
 	switch status.BackendState {
-	case ipn.NeedsLogin.String(), ipn.NoState.String():
-		return lc.StartLoginInteractive(ctx)
+	case ipn.Running.String(), ipn.Starting.String():
+		return nil
 	case ipn.Stopped.String():
 		_, err = lc.EditPrefs(ctx, &ipn.MaskedPrefs{
 			Prefs:          ipn.Prefs{WantRunning: true},
@@ -305,26 +333,46 @@ func (t *Tailscale) Login(ctx context.Context, authKey string) error {
 		})
 		return err
 	}
-	return nil
+	if authKey == "" && status.AuthURL != "" {
+		return nil
+	}
+	// A key only reaches control when a control client starts, and asking a
+	// running backend for another interactive login registers a second node
+	// key. A fresh session starts exactly one login either way.
+	tailscaleSessions.retire(session)
+	session, err = t.acquireSession(authKey)
+	if err != nil {
+		return err
+	}
+	if session.authKey != authKey {
+		return errors.New("tailscale login is already in progress, try again")
+	}
+	_, err = session.start()
+	return err
 }
 
-// Logout deregisters this device from its tailnet. It never starts a session.
+// Logout signs this device out. The session is then retired, because a
+// logout resets the control URL and hostname a fresh session restores.
 func (t *Tailscale) Logout(ctx context.Context) error {
 	session := t.currentSession()
-	if session == nil || !session.isStarted() || session.isClosed() {
-		return nil
+	if session == nil || session.isClosed() || !session.isStarted() {
+		return errTailscaleNotRunning
 	}
 	lc, err := session.server.LocalClient()
 	if err != nil {
 		return err
 	}
-	return lc.Logout(ctx)
+	if err = lc.Logout(ctx); err != nil {
+		return err
+	}
+	tailscaleSessions.retire(session)
+	return nil
 }
 
 // Status reports the session without starting it.
 func (t *Tailscale) Status(ctx context.Context) (*TailscaleStatus, error) {
 	session := t.currentSession()
-	if session == nil || !session.isStarted() {
+	if session == nil || (session.isClosed() && errors.Is(session.closeError(), errTailscaleRetired)) || !session.isStarted() {
 		return &TailscaleStatus{State: TailscaleIdle, Peers: []TailscaleDevice{}}, nil
 	}
 	if session.isClosed() {
@@ -348,7 +396,7 @@ func (t *Tailscale) HasExitNode() bool {
 }
 
 // PingPeers measures the tailnet itself: the first disco pong from up to three
-// online peers, preferring direct paths. It needs no Internet egress.
+// peers, online and direct ones first. It needs no Internet egress.
 func (t *Tailscale) PingPeers(ctx context.Context) (time.Duration, error) {
 	session, err := t.ensureStarted(ctx)
 	if err != nil {
@@ -367,14 +415,19 @@ func (t *Tailscale) PingPeers(ctx context.Context) (time.Duration, error) {
 	}
 	var candidates []*ipnstate.PeerStatus
 	for _, peer := range status.Peer {
-		if peer.Online && len(peer.TailscaleIPs) > 0 {
+		if len(peer.TailscaleIPs) > 0 {
 			candidates = append(candidates, peer)
 		}
 	}
 	if len(candidates) == 0 {
-		return 0, errors.New("no online tailscale peer")
+		return 0, errors.New("no tailscale peer")
 	}
+	// Control's online flag is advisory: a peer it calls offline may only have
+	// lost its control connection, so it is tried after the online ones.
 	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Online != candidates[j].Online {
+			return candidates[i].Online
+		}
 		return candidates[i].CurAddr != "" && candidates[j].CurAddr == ""
 	})
 	if len(candidates) > 3 {
@@ -572,23 +625,10 @@ func (t *Tailscale) IsL3Protocol(metadata *C.Metadata) bool {
 func (t *Tailscale) Close() error {
 	t.cancel()
 	t.mu.Lock()
-	if t.closed {
-		t.mu.Unlock()
-		return nil
-	}
-	t.closed = true
-	session := t.session
-	t.session = nil
-	unregisterRoutes := t.unregisterRoutes
-	t.mu.Unlock()
-	if t.unregisterDNSResolver != nil {
-		t.unregisterDNSResolver()
-	}
-	if unregisterRoutes != nil {
-		unregisterRoutes()
-	}
-	if session != nil {
-		tailscaleSessions.release(session)
+	defer t.mu.Unlock()
+	if !t.closed {
+		t.closed = true
+		t.releaseLocked()
 	}
 	return nil
 }

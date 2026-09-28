@@ -4,8 +4,11 @@ package outbound
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	C "github.com/metacubex/mihomo/constant"
@@ -43,7 +46,7 @@ func (t *Tailscale) Login(ctx context.Context, authKey string) error {
 }
 
 func (t *Tailscale) Logout(ctx context.Context) error {
-	return nil
+	return errTailscaleDisabled
 }
 
 func (t *Tailscale) Status(ctx context.Context) (*TailscaleStatus, error) {
@@ -59,7 +62,10 @@ func (t *Tailscale) PingPeers(ctx context.Context) (time.Duration, error) {
 }
 
 func ForgetTailscaleState(stateDir string) error {
-	resolved := C.Path.Resolve(stateDir)
+	if strings.TrimSpace(stateDir) == "" {
+		return errors.New("missing tailscale state-dir")
+	}
+	resolved := filepath.Clean(C.Path.Resolve(stateDir))
 	if !C.Path.IsSafePath(resolved) {
 		return C.Path.ErrNotSafePath(resolved)
 	}

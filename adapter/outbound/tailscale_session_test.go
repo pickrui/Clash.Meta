@@ -3,6 +3,7 @@
 package outbound
 
 import (
+	"encoding/json"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -16,40 +17,40 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newTestSessionPool() *tailscaleSessionPool {
-	return &tailscaleSessionPool{
-		byDir:     map[string]*tailscaleSession{},
-		forgotten: map[string]struct{}{},
-	}
-}
-
 func testSessionFactory(dir, key string) func() *tailscaleSession {
 	return func() *tailscaleSession {
-		return newTailscaleSession(TailscaleOption{StateDir: dir}, key, nil)
+		return newTailscaleSession(TailscaleOption{StateDir: dir}, key, "", nil)
 	}
 }
 
 func TestTailscaleSessionPoolSharesMatchingSession(t *testing.T) {
-	pool := newTestSessionPool()
-	first, err := pool.acquire("/state/a", "key", testSessionFactory("/state/a", "key"))
+	pool := newTailscaleSessionPool()
+	first, err := pool.acquire("/state/a", "key", 1, testSessionFactory("/state/a", "key"))
 	require.NoError(t, err)
-	second, err := pool.acquire("/state/a", "key", testSessionFactory("/state/a", "key"))
+	second, err := pool.acquire("/state/a", "key", 2, testSessionFactory("/state/a", "key"))
 	require.NoError(t, err)
 	require.Same(t, first, second)
 	require.Same(t, first, pool.peek("/state/a", "key"))
 	require.Nil(t, pool.peek("/state/a", "other"))
 }
 
-func TestTailscaleSessionPoolSupersedesChangedOptions(t *testing.T) {
-	pool := newTestSessionPool()
-	old, err := pool.acquire("/state/a", "old", testSessionFactory("/state/a", "old"))
+func TestTailscaleSessionPoolLetsOnlyNewerOutboundsReplace(t *testing.T) {
+	pool := newTailscaleSessionPool()
+	current, err := pool.acquire("/state/a", "current", 5, testSessionFactory("/state/a", "current"))
 	require.NoError(t, err)
-	replacement, err := pool.acquire("/state/a", "new", testSessionFactory("/state/a", "new"))
+
+	// An outbound parsed earlier, such as one an old config still holds,
+	// cannot take the directory back.
+	_, err = pool.acquire("/state/a", "stale", 4, testSessionFactory("/state/a", "stale"))
+	require.ErrorIs(t, err, errTailscaleSuperseded)
+	require.False(t, current.isClosed())
+
+	replacement, err := pool.acquire("/state/a", "changed", 6, testSessionFactory("/state/a", "changed"))
 	require.NoError(t, err)
-	require.NotSame(t, old, replacement)
-	require.True(t, old.isClosed())
-	require.ErrorIs(t, old.closeError(), errTailscaleSuperseded)
-	_, err = old.start("")
+	require.Same(t, current, replacement.predecessor, "the new server waits for the old one")
+	require.Eventually(t, current.isClosed, time.Second, 5*time.Millisecond)
+	require.ErrorIs(t, current.closeError(), errTailscaleSuperseded)
+	_, err = current.start()
 	require.ErrorIs(t, err, errTailscaleSuperseded)
 }
 
@@ -58,13 +59,13 @@ func TestTailscaleSessionPoolLingersBeforeClosing(t *testing.T) {
 	tailscaleSessionLinger = 20 * time.Millisecond
 	defer func() { tailscaleSessionLinger = previous }()
 
-	pool := newTestSessionPool()
-	session, err := pool.acquire("/state/a", "key", testSessionFactory("/state/a", "key"))
+	pool := newTailscaleSessionPool()
+	session, err := pool.acquire("/state/a", "key", 1, testSessionFactory("/state/a", "key"))
 	require.NoError(t, err)
 	pool.release(session)
 
 	// A newer outbound picking the session up inside the linger keeps it.
-	again, err := pool.acquire("/state/a", "key", testSessionFactory("/state/a", "key"))
+	again, err := pool.acquire("/state/a", "key", 2, testSessionFactory("/state/a", "key"))
 	require.NoError(t, err)
 	require.Same(t, session, again)
 	time.Sleep(3 * tailscaleSessionLinger)
@@ -73,6 +74,20 @@ func TestTailscaleSessionPoolLingersBeforeClosing(t *testing.T) {
 	pool.release(again)
 	require.Eventually(t, session.isClosed, time.Second, 5*time.Millisecond)
 	require.Nil(t, pool.peek("/state/a", "key"))
+	require.Nil(t, session.Routes(), "a closed session publishes no routes")
+}
+
+func TestTailscaleSessionPoolRetiresForAFreshStart(t *testing.T) {
+	pool := newTailscaleSessionPool()
+	session, err := pool.acquire("/state/a", "key", 1, testSessionFactory("/state/a", "key"))
+	require.NoError(t, err)
+	pool.retire(session)
+	require.ErrorIs(t, session.closeError(), errTailscaleRetired)
+
+	fresh, err := pool.acquire("/state/a", "key", 1, testSessionFactory("/state/a", "key"))
+	require.NoError(t, err)
+	require.NotSame(t, session, fresh)
+	require.Same(t, session, fresh.predecessor)
 }
 
 func TestForgetTailscaleStateDeletesIdentity(t *testing.T) {
@@ -84,20 +99,46 @@ func TestForgetTailscaleStateDeletesIdentity(t *testing.T) {
 	stateDir := filepath.Join(home, "tailscale-networks", "network")
 	require.NoError(t, os.MkdirAll(stateDir, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(stateDir, tailscaleStateFileName), []byte("{}"), 0o600))
-	require.True(t, tailscaleStateExists(stateDir))
 
-	session, err := tailscaleSessions.acquire(stateDir, "key", testSessionFactory(stateDir, "key"))
+	parsedBefore := tailscaleOutboundSeq.Add(1)
+	session, err := tailscaleSessions.acquire(stateDir, "key", parsedBefore, testSessionFactory(stateDir, "key"))
 	require.NoError(t, err)
 
-	require.NoError(t, ForgetTailscaleState("tailscale-networks/network"))
+	require.NoError(t, ForgetTailscaleState("tailscale-networks/network/"))
 	require.True(t, session.isClosed())
 	require.ErrorIs(t, session.closeError(), errTailscaleRemoved)
 	_, err = os.Stat(stateDir)
 	require.True(t, os.IsNotExist(err))
-	_, err = tailscaleSessions.acquire(stateDir, "key", testSessionFactory(stateDir, "key"))
+	_, err = tailscaleSessions.acquire(stateDir, "key", parsedBefore, testSessionFactory(stateDir, "key"))
 	require.ErrorIs(t, err, errTailscaleRemoved)
 
+	// A network restored later is parsed again and may use the directory.
+	restored, err := tailscaleSessions.acquire(stateDir, "key", tailscaleOutboundSeq.Add(1), testSessionFactory(stateDir, "key"))
+	require.NoError(t, err)
+	tailscaleSessions.retire(restored)
+
 	require.Error(t, ForgetTailscaleState(""))
+}
+
+func TestTailscaleSignedInNeedsALoginProfile(t *testing.T) {
+	dir := t.TempDir()
+	require.False(t, tailscaleSignedIn(dir), "no state file")
+
+	write := func(profiles string) {
+		t.Helper()
+		data, err := json.Marshal(map[string][]byte{
+			"_machinekey": []byte("privkey:00"),
+			"_profiles":   []byte(profiles),
+		})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, tailscaleStateFileName), data, 0o600))
+	}
+	write(`{}`)
+	require.False(t, tailscaleSignedIn(dir), "a node that never signed in, or logged out")
+	write(`{"a1b2":{"ID":"a1b2"}}`)
+	require.True(t, tailscaleSignedIn(dir))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, tailscaleStateFileName), []byte("not json"), 0o600))
+	require.False(t, tailscaleSignedIn(dir))
 }
 
 func TestTailscaleSessionKeyTracksServerOptions(t *testing.T) {
@@ -139,7 +180,7 @@ func TestBuildTailnetRoutes(t *testing.T) {
 		},
 	}
 	routes := buildTailnetRoutes(status)
-	for _, host := range []string{"nas", "nas.tail1234.ts.net", "printer.tail1234.ts.net", "office.shared.ts.net"} {
+	for _, host := range []string{"nas", "nas.tail1234.ts.net", "printer.tail1234.ts.net", "tail1234.ts.net", "office.shared.ts.net"} {
 		require.True(t, routes.MatchHost(host), host)
 	}
 	// Two peers share the short name, so it stays ambiguous.
@@ -149,27 +190,36 @@ func TestBuildTailnetRoutes(t *testing.T) {
 	}
 	require.False(t, routes.MatchAddr(netip.MustParseAddr("100.64.0.9")))
 
+	// A Headscale base domain may also serve public sites, so only its peers
+	// are claimed, not the whole domain.
+	status.CurrentTailnet.MagicDNSSuffix = "example.com"
+	status.Peer[key.NewNode().Public()] = testPeer("vault.example.com.", true, "100.64.0.5")
+	routes = buildTailnetRoutes(status)
+	require.True(t, routes.MatchHost("vault.example.com"))
+	require.True(t, routes.MatchHost("vault"))
+	require.False(t, routes.MatchHost("www.example.com"))
+	require.False(t, routes.MatchHost("example.com"))
+
 	status.BackendState = ipn.NeedsLogin.String()
 	require.Nil(t, buildTailnetRoutes(status))
 }
 
 func TestTailscaleStatusOmitsCredentials(t *testing.T) {
-	expiry := time.UnixMilli(1_800_000_000_000)
 	status := tailscaleStatusFrom(&ipnstate.Status{
 		BackendState:   ipn.Running.String(),
 		TailscaleIPs:   []netip.Addr{netip.MustParseAddr("100.64.0.1")},
 		CurrentTailnet: &ipnstate.TailnetStatus{Name: "user@example.com", MagicDNSSuffix: "tail1234.ts.net"},
-		Self:           &ipnstate.PeerStatus{DNSName: "phone.tail1234.ts.net.", KeyExpiry: &expiry},
+		Self:           &ipnstate.PeerStatus{DNSName: "phone.tail1234.ts.net."},
 		Peer: map[key.NodePublic]*ipnstate.PeerStatus{
 			key.NewNode().Public(): testPeer("b.tail1234.ts.net.", false, "100.64.0.3"),
 			key.NewNode().Public(): testPeer("a.tail1234.ts.net.", true, "100.64.0.2"),
 		},
 	})
 	require.Equal(t, "Running", status.State)
+	require.Equal(t, "user@example.com", status.Tailnet)
 	require.Equal(t, "tail1234.ts.net", status.MagicDNSSuffix)
 	require.Equal(t, "phone.tail1234.ts.net", status.Self.Name)
 	require.Equal(t, []string{"100.64.0.1"}, status.Self.Addresses)
-	require.Equal(t, expiry.UnixMilli(), status.KeyExpiry)
 	require.Equal(t, "a.tail1234.ts.net", status.Peers[0].Name, "online peers first")
 	require.Equal(t, "b.tail1234.ts.net", status.Peers[1].Name)
 }

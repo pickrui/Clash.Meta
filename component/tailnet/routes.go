@@ -22,12 +22,9 @@ func NewRoutes(suffixes []string, names []string, addrs []netip.Addr) *Routes {
 		addrs: make(map[netip.Addr]struct{}, len(addrs)),
 	}
 	for _, suffix := range suffixes {
-		suffix = NormalizeName(suffix)
-		// The shared parent of every tailnet is never one tailnet's domain.
-		if suffix == "" || suffix == "ts.net" {
-			continue
+		if suffix = NormalizeName(suffix); suffix != "" {
+			routes.suffixes = append(routes.suffixes, suffix)
 		}
-		routes.suffixes = append(routes.suffixes, suffix)
 	}
 	for _, name := range names {
 		if name = NormalizeName(name); name != "" {

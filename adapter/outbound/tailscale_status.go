@@ -13,6 +13,8 @@ var (
 	errTailscaleClosed     = errors.New("tailscale outbound closed")
 	errTailscaleSuperseded = errors.New("tailscale state-dir is used by a newer outbound")
 	errTailscaleRemoved    = errors.New("tailscale network was removed")
+	errTailscaleRetired    = errors.New("tailscale session restarted")
+	errTailscaleNotRunning = errors.New("tailscale network is not running")
 )
 
 // TailscaleStatus is the credential-free view of one outbound's session.
@@ -24,7 +26,6 @@ type TailscaleStatus struct {
 	Tailnet        string            `json:"tailnet,omitempty"`
 	MagicDNSSuffix string            `json:"magicDnsSuffix,omitempty"`
 	KeyExpired     bool              `json:"keyExpired,omitempty"`
-	KeyExpiry      int64             `json:"keyExpiry,omitempty"`
 	Health         []string          `json:"health,omitempty"`
 	Self           *TailscaleDevice  `json:"self,omitempty"`
 	Peers          []TailscaleDevice `json:"peers"`
