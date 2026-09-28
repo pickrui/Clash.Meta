@@ -51,8 +51,9 @@ func startTailscaleFixture(t *testing.T, args ...string) tailscaleFixture {
 		t.Skip("set MIHOMO_TAILSCALE_FIXTURE=1 to run against the Tailscale test control server")
 	}
 	tailscaleFixtureBuild.Do(func() {
-		dir, err := os.MkdirTemp("", "tailscale-fixture-bin-")
-		if err != nil {
+		// One path reused by every run, so repeated runs leave one binary.
+		dir := filepath.Join(os.TempDir(), "mihomo-tailscale-fixture")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			tailscaleFixtureErr = err
 			return
 		}
