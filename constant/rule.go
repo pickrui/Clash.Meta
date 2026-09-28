@@ -41,6 +41,7 @@ const (
 	AND
 	OR
 	NOT
+	Tailnet
 )
 
 type RuleType int
@@ -121,6 +122,8 @@ func (rt RuleType) String() string {
 		return "OR"
 	case NOT:
 		return "NOT"
+	case Tailnet:
+		return "Tailnet"
 	default:
 		return "Unknown"
 	}

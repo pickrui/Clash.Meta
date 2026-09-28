@@ -2,7 +2,14 @@
 
 package outbound
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	C "github.com/metacubex/mihomo/constant"
+)
 
 type Tailscale struct {
 	*Base
@@ -23,6 +30,38 @@ type TailscaleOption struct {
 	ExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`
 }
 
+var errTailscaleDisabled = fmt.Errorf("tailscale support is disabled by \"no_tailscale\" build tag or not include \"with_gvisor\" build tag")
+
 func NewTailscale(option TailscaleOption) (*Tailscale, error) {
-	return nil, fmt.Errorf("tailscale support is disabled by \"no_tailscale\" build tag or not include \"with_gvisor\" build tag")
+	return nil, errTailscaleDisabled
+}
+
+func (t *Tailscale) Warm() {}
+
+func (t *Tailscale) Login(ctx context.Context, authKey string) error {
+	return errTailscaleDisabled
+}
+
+func (t *Tailscale) Logout(ctx context.Context) error {
+	return nil
+}
+
+func (t *Tailscale) Status(ctx context.Context) (*TailscaleStatus, error) {
+	return nil, errTailscaleDisabled
+}
+
+func (t *Tailscale) HasExitNode() bool {
+	return false
+}
+
+func (t *Tailscale) PingPeers(ctx context.Context) (time.Duration, error) {
+	return 0, errTailscaleDisabled
+}
+
+func ForgetTailscaleState(stateDir string) error {
+	resolved := C.Path.Resolve(stateDir)
+	if !C.Path.IsSafePath(resolved) {
+		return C.Path.ErrNotSafePath(resolved)
+	}
+	return os.RemoveAll(resolved)
 }
