@@ -71,6 +71,7 @@ func (p *tailscaleSessionPool) acquire(stateDir, key string, seq uint64, create 
 	current := p.byDir[stateDir]
 	if current != nil && !current.isClosed() {
 		if current.key == key {
+			current.ownerSeq = max(current.ownerSeq, seq)
 			current.refs++
 			if current.linger != nil {
 				current.linger.Stop()
@@ -87,15 +88,16 @@ func (p *tailscaleSessionPool) acquire(stateDir, key string, seq uint64, create 
 	session := create()
 	session.refs = 1
 	session.ownerSeq = seq
-	session.predecessor = p.closing[stateDir]
 	if current != nil {
-		session.predecessor = current
 		p.closing[stateDir] = current
+	}
+	if closing := p.closing[stateDir]; closing != nil {
+		session.predecessor = closing.done
 	}
 	p.byDir[stateDir] = session
 	p.mu.Unlock()
 	if current != nil {
-		go current.close(errTailscaleSuperseded)
+		go p.close(current, errTailscaleSuperseded)
 	}
 	return session, nil
 }
@@ -132,7 +134,7 @@ func (p *tailscaleSessionPool) release(session *tailscaleSession) {
 		taken := session.refs == 0 && p.takeLocked(session)
 		p.mu.Unlock()
 		if taken {
-			session.close(errTailscaleClosed)
+			p.close(session, errTailscaleClosed)
 		}
 	})
 }
@@ -143,12 +145,23 @@ func (p *tailscaleSessionPool) retire(session *tailscaleSession) {
 	p.mu.Lock()
 	p.takeLocked(session)
 	p.mu.Unlock()
-	session.close(errTailscaleRetired)
+	p.close(session, errTailscaleRetired)
+}
+
+func (p *tailscaleSessionPool) close(session *tailscaleSession, reason error) {
+	session.close(reason)
+	p.mu.Lock()
+	if p.closing[session.stateDir] == session {
+		delete(p.closing, session.stateDir)
+	}
+	p.mu.Unlock()
 }
 
 func (p *tailscaleSessionPool) drop(session *tailscaleSession) {
 	p.mu.Lock()
-	p.takeLocked(session)
+	if p.takeLocked(session) {
+		delete(p.closing, session.stateDir)
+	}
 	p.mu.Unlock()
 }
 
@@ -161,7 +174,7 @@ func (p *tailscaleSessionPool) forget(stateDir string) {
 	closing := p.closing[stateDir]
 	p.mu.Unlock()
 	if closing != nil {
-		closing.close(errTailscaleRemoved)
+		p.close(closing, errTailscaleRemoved)
 	}
 }
 
@@ -212,7 +225,7 @@ type tailscaleSession struct {
 
 	// ownerSeq, predecessor, refs and linger are guarded by the pool.
 	ownerSeq    uint64
-	predecessor *tailscaleSession
+	predecessor <-chan struct{}
 	refs        int
 	linger      *time.Timer
 
@@ -283,7 +296,7 @@ func (s *tailscaleSession) isStarted() bool {
 func (s *tailscaleSession) start() (startedNow bool, err error) {
 	if s.predecessor != nil {
 		select {
-		case <-s.predecessor.done:
+		case <-s.predecessor:
 		case <-s.ctx.Done():
 		}
 	}
@@ -322,7 +335,7 @@ func (s *tailscaleSession) failLocked(err error) {
 
 func (s *tailscaleSession) close(reason error) {
 	if s.predecessor != nil {
-		<-s.predecessor.done
+		<-s.predecessor
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -405,13 +418,7 @@ func (s *tailscaleSession) watchBackendState() {
 }
 
 func (s *tailscaleSession) applyPrefs(ctx context.Context) error {
-	mp, err := buildTailscaleMaskedPrefs(s.option)
-	if err != nil {
-		return err
-	}
-	if mp == nil {
-		return nil
-	}
+	mp := buildTailscaleMaskedPrefs(s.option)
 	lc, err := s.server.LocalClient()
 	if err != nil {
 		return err

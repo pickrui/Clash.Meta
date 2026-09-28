@@ -47,7 +47,7 @@ func TestTailscaleSessionPoolLetsOnlyNewerOutboundsReplace(t *testing.T) {
 
 	replacement, err := pool.acquire("/state/a", "changed", 6, testSessionFactory("/state/a", "changed"))
 	require.NoError(t, err)
-	require.Same(t, current, replacement.predecessor, "the new server waits for the old one")
+	require.Equal(t, (<-chan struct{})(current.done), replacement.predecessor, "the new server waits for the old one")
 	require.Eventually(t, current.isClosed, time.Second, 5*time.Millisecond)
 	require.ErrorIs(t, current.closeError(), errTailscaleSuperseded)
 	_, err = current.start()
@@ -87,7 +87,8 @@ func TestTailscaleSessionPoolRetiresForAFreshStart(t *testing.T) {
 	fresh, err := pool.acquire("/state/a", "key", 1, testSessionFactory("/state/a", "key"))
 	require.NoError(t, err)
 	require.NotSame(t, session, fresh)
-	require.Same(t, session, fresh.predecessor)
+	require.Nil(t, fresh.predecessor)
+	require.Empty(t, pool.closing)
 }
 
 func TestForgetTailscaleStateDeletesIdentity(t *testing.T) {
@@ -222,4 +223,54 @@ func TestTailscaleStatusOmitsCredentials(t *testing.T) {
 	require.Equal(t, []string{"100.64.0.1"}, status.Self.Addresses)
 	require.Equal(t, "a.tail1234.ts.net", status.Peers[0].Name, "online peers first")
 	require.Equal(t, "b.tail1234.ts.net", status.Peers[1].Name)
+}
+
+func TestTailscaleSharedSessionKeepsNewestOwner(t *testing.T) {
+	pool := newTailscaleSessionPool()
+	current, err := pool.acquire("/state/a", "key", 1, testSessionFactory("/state/a", "key"))
+	require.NoError(t, err)
+	shared, err := pool.acquire("/state/a", "key", 3, testSessionFactory("/state/a", "key"))
+	require.NoError(t, err)
+	require.Same(t, current, shared)
+	_, err = pool.acquire("/state/a", "stale", 2, testSessionFactory("/state/a", "stale"))
+	require.ErrorIs(t, err, errTailscaleSuperseded)
+	require.False(t, current.isClosed())
+}
+
+func TestTailscalePrefsClearSavedExitNode(t *testing.T) {
+	for _, exit := range []string{"", "auto:any", "100.64.0.2"} {
+		t.Run(exit, func(t *testing.T) {
+			prefs := &ipn.Prefs{
+				ExitNodeID:             "old-exit",
+				ExitNodeIP:             netip.MustParseAddr("100.64.0.9"),
+				AutoExitNode:           "any",
+				ExitNodeAllowLANAccess: true,
+			}
+			patch := buildTailscaleMaskedPrefs(TailscaleOption{ExitNode: exit})
+			require.NotNil(t, patch)
+			prefs.ApplyEdits(patch)
+			require.Empty(t, prefs.ExitNodeID)
+			require.False(t, prefs.ExitNodeIP.IsValid())
+			require.False(t, prefs.ExitNodeAllowLANAccess)
+			if exit == "auto:any" {
+				require.Equal(t, "any", string(prefs.AutoExitNode))
+			} else {
+				require.Empty(t, prefs.AutoExitNode)
+			}
+		})
+	}
+}
+
+func TestTailscaleSessionPoolReleasesClosedSessions(t *testing.T) {
+	pool := newTailscaleSessionPool()
+	session, err := pool.acquire("/state/a", "first", 1, testSessionFactory("/state/a", "first"))
+	require.NoError(t, err)
+	next, err := pool.acquire("/state/a", "second", 2, testSessionFactory("/state/a", "second"))
+	require.NoError(t, err)
+	<-session.done
+	pool.retire(next)
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	require.Empty(t, pool.byDir)
+	require.Empty(t, pool.closing)
 }

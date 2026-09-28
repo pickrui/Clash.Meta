@@ -113,9 +113,6 @@ func init() {
 }
 
 func NewTailscale(option TailscaleOption) (*Tailscale, error) {
-	if _, err := buildTailscaleMaskedPrefs(option); err != nil {
-		return nil, err
-	}
 	if option.StateDir == "" {
 		option.StateDir = "tailscale"
 	}
@@ -464,31 +461,25 @@ func (t *Tailscale) PingPeers(ctx context.Context) (time.Duration, error) {
 	return 0, lastErr
 }
 
-func buildTailscaleMaskedPrefs(option TailscaleOption) (*ipn.MaskedPrefs, error) {
-	var mp ipn.MaskedPrefs
-	changed := false
-
+func buildTailscaleMaskedPrefs(option TailscaleOption) *ipn.MaskedPrefs {
+	// The state directory retains preferences across server replacements.
+	mp := &ipn.MaskedPrefs{
+		ExitNodeIDSet:             true,
+		ExitNodeIPSet:             true,
+		AutoExitNodeSet:           true,
+		ExitNodeAllowLANAccessSet: true,
+	}
 	if option.AcceptRoutes != nil {
 		mp.RouteAll = *option.AcceptRoutes
 		mp.RouteAllSet = true
-		changed = true
 	}
-	if option.ExitNode != "" {
-		if autoExitNode, ok := ipn.ParseAutoExitNodeString(option.ExitNode); ok {
-			mp.AutoExitNode = autoExitNode
-			mp.AutoExitNodeSet = true
-			changed = true
-		}
+	if autoExitNode, ok := ipn.ParseAutoExitNodeString(option.ExitNode); ok {
+		mp.AutoExitNode = autoExitNode
 	}
 	if option.ExitNodeAllowLANAccess != nil && !tailscaleExitNodeNeedsStatus(option) {
 		mp.ExitNodeAllowLANAccess = *option.ExitNodeAllowLANAccess
-		mp.ExitNodeAllowLANAccessSet = true
-		changed = true
 	}
-	if !changed {
-		return nil, nil
-	}
-	return &mp, nil
+	return mp
 }
 
 func tailscaleExitNodeNeedsStatus(option TailscaleOption) bool {
