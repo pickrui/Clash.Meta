@@ -413,7 +413,6 @@ func (s *Snell) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 
 	c, err = s.StreamConnContext(ctx, c, metadata)
 	if err != nil {
-		_ = c.Close()
 		return nil, err
 	}
 
