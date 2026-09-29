@@ -4,6 +4,8 @@ Source: github.com/metacubex/mipstack v0.0.0-20260919101445-802d64336f8c, copied
 
 Backport: https://github.com/MetaCubeX/mipstack/pull/3 at commit `456a89053ab2a5b08cc9e90be294871f2505027a`. The source baseline is newer than the PR; the benchmark helper preserves its newer MTU argument. Production changes otherwise match the upstream storage policy.
 
+Backport the effective send MSS fix from mipstack v0.0.0-20260924131027-976adac53932 (mihomo commit 41b8a059). The peer's SYN MSS is clamped to the fixed-header path MSS before the negotiated timestamp option is charged, so timestamped segments no longer exceed a smaller peer MSS by 12 bytes. The tcp.go and tcp_test.go hunks match that version; keep this fix when updating the source.
+
 `with_mips_low_memory` is an additional selector for the same policy as upstream `with_low_memory`. FlClash uses the dedicated tag so other mihomo stacks and shared buffer pools keep their existing behavior. Builds without either tag retain the original policy. Socket window defaults remain unchanged here; sing-tun supplies the smaller TUN profile explicitly.
 
 The first send allocation is 1 KiB, an acknowledged reusable send chunk is at most 16 KiB, and drained receive metadata retains at most 32 slots. The small-spare fit check avoids a 16 KiB tail allocation. Live, unread and unacknowledged data remain intact. No forced GC or runtime memory polling is added.
