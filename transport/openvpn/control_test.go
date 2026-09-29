@@ -497,7 +497,7 @@ func TestClientClosesOnSoftReset(t *testing.T) {
 			case "tls-auth":
 				config.TLSAuthKey = testStaticKey()
 				config.KeyDirection = "1"
-				serverCrypt, err = NewTLSAuth(testStaticKey(), "0")
+				serverCrypt, err = NewTLSAuth(testStaticKey(), "0", config.Auth)
 			case "tls-crypt":
 				config.TLSCryptKey = testStaticKey()
 				serverCrypt, err = NewTLSCrypt(testStaticKey(), false)
