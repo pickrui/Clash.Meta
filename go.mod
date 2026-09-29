@@ -10,7 +10,7 @@ require (
 	github.com/bahlo/generic-list-go v0.2.0
 	github.com/coreos/go-iptables v0.8.0
 	github.com/dlclark/regexp2 v1.12.0
-	github.com/enfein/mieru/v3 v3.37.0
+	github.com/enfein/mieru/v3 v3.38.0
 	github.com/gobwas/ws v1.4.0
 	github.com/gofrs/uuid/v5 v5.5.1
 	github.com/golang/snappy v1.0.0
@@ -37,7 +37,7 @@ require (
 	github.com/metacubex/randv2 v0.2.0
 	github.com/metacubex/restls-client-go v0.1.9
 	github.com/metacubex/sevenzip v1.6.4
-	github.com/metacubex/sing v0.5.7
+	github.com/metacubex/sing v0.5.8
 	github.com/metacubex/sing-mux v0.3.10
 	github.com/metacubex/sing-quic v0.0.0-20260904234848-1c242664697a
 	github.com/metacubex/sing-shadowsocks v0.2.13
@@ -70,7 +70,7 @@ require (
 
 require (
 	github.com/insomniacslk/dhcp v0.0.0-20260901064844-234b97448fae
-	github.com/klauspost/compress v1.20.0
+	github.com/klauspost/compress v1.20.1
 	github.com/mdlayher/netlink v1.11.2
 	github.com/miekg/dns v1.1.73
 	github.com/oschwald/maxminddb-golang v1.13.1
@@ -79,7 +79,7 @@ require (
 	golang.org/x/net v0.59.0
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.48.0
-	google.golang.org/protobuf v1.34.2
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
@@ -87,7 +87,7 @@ require (
 	github.com/Yawning/aez v0.0.0-20211027044916-e49e68abd344 // indirect
 	github.com/ajg/form v1.9.0 // indirect
 	github.com/akutz/memconn v0.1.0 // indirect
-	github.com/andybalholm/brotli v1.2.4 // indirect
+	github.com/andybalholm/brotli v1.2.5 // indirect
 	github.com/bodgit/plumbing v1.3.0 // indirect
 	github.com/bodgit/windows v1.0.1 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
@@ -105,14 +105,14 @@ require (
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/pprof v0.0.0-20260906184651-6331bc6350fe // indirect
+	github.com/google/pprof v0.0.0-20260926063103-aaccee046517 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/jsimonetti/rtnetlink v1.4.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/klauspost/reedsolomon v1.14.2 // indirect
 	github.com/mdlayher/socket v0.7.0 // indirect
 	github.com/metacubex/ascon v0.1.0 // indirect
-	github.com/metacubex/gvisor v0.0.0-20260826100401-79317d808312 // indirect
+	github.com/metacubex/gvisor v0.0.0-20260922041103-e2cbcd6e7400 // indirect
 	github.com/metacubex/hkdf v0.1.0 // indirect
 	github.com/metacubex/hpke v0.1.0 // indirect
 	github.com/metacubex/jsonv2 v0.0.0-20260721082349-16b4998c8f89 // indirect
@@ -122,7 +122,7 @@ require (
 	github.com/metacubex/yamux v0.0.0-20250918083631-dd5f17c0be49 // indirect
 	github.com/mitchellh/go-ps v1.0.0 // indirect
 	github.com/oasisprotocol/deoxysii v0.0.0-20220228165953-2091330c22b7 // indirect
-	github.com/pierrec/lz4/v4 v4.1.30 // indirect
+	github.com/pierrec/lz4/v4 v4.1.31 // indirect
 	github.com/pires/go-proxyproto v0.15.0 // indirect
 	github.com/safchain/ethtool v0.7.0 // indirect
 	github.com/sagernet/netlink v0.0.0-20260919000536-5d76abd97cf7 // indirect
