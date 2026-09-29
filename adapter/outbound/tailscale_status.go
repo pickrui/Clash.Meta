@@ -15,6 +15,7 @@ var (
 	errTailscaleRemoved    = errors.New("tailscale network was removed")
 	errTailscaleRetired    = errors.New("tailscale session restarted")
 	errTailscaleNotRunning = errors.New("tailscale network is not running")
+	errTailscaleNeedsLogin = errors.New("tailscale network needs login")
 )
 
 // TailscaleStatus is the credential-free view of one outbound's session.

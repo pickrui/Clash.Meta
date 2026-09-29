@@ -257,7 +257,32 @@ func (t *Tailscale) currentSession() *tailscaleSession {
 	return session
 }
 
+// startsUnattended reports a network that can come up without the user: one
+// that is signed in or has an auth key.
+func (t *Tailscale) startsUnattended() bool {
+	return t.option.AuthKey != "" || tailscaleSignedIn(t.option.StateDir)
+}
+
+// needsLogin reports that serving traffic would start a session the user must
+// sign in to. A session that ended for good keeps reporting its own error.
+func (t *Tailscale) needsLogin() bool {
+	t.mu.Lock()
+	closed, own := t.closed, t.session
+	t.mu.Unlock()
+	if closed || (own != nil && own.isClosed() && !errors.Is(own.closeError(), errTailscaleRetired)) {
+		return false
+	}
+	if session := t.currentSession(); session != nil && !session.isClosed() && session.isStarted() {
+		return false
+	}
+	return !t.startsUnattended()
+}
+
 func (t *Tailscale) ensureStarted(ctx context.Context) (*tailscaleSession, error) {
+	// Traffic, health checks and DNS never begin a login; only Login does.
+	if t.needsLogin() {
+		return nil, errTailscaleNeedsLogin
+	}
 	session, err := t.acquireSession("")
 	if err != nil {
 		return nil, err
@@ -278,11 +303,10 @@ func (t *Tailscale) ensureStarted(ctx context.Context) (*tailscaleSession, error
 	return session, nil
 }
 
-// Warm starts a network that can come up without the user: one that is signed
-// in or has an auth key. Any other network waits for Login, so a config apply
-// never requests a login page.
+// Warm starts a network that can come up without the user. Any other network
+// waits for Login, so a config apply never requests a login page.
 func (t *Tailscale) Warm() {
-	if t.option.AuthKey == "" && !tailscaleSignedIn(t.option.StateDir) {
+	if !t.startsUnattended() {
 		return
 	}
 	go func() {
@@ -557,8 +581,8 @@ func (t *Tailscale) ListenPacketContext(ctx context.Context, metadata *C.Metadat
 
 // Tailnet DNS answers public names only through an exit node or a global
 // nameserver, so a public name pointing into the tailnet may be unknown to
-// it. Such a host is reached at the address the rules resolved, or at the
-// local answer when tailnet DNS has none.
+// it. Such a host is reached at the address the rules resolved, or, without
+// an exit node, at DIRECT's answer when tailnet DNS has none.
 func (t *Tailscale) routedAddr(ctx context.Context, metadata *C.Metadata) (netip.Addr, bool) {
 	routes := tailnet.Lookup(t.Name())
 	if metadata.Host == "" || routes == nil || routes.MatchHost(metadata.Host) {
@@ -567,14 +591,22 @@ func (t *Tailscale) routedAddr(ctx context.Context, metadata *C.Metadata) (netip
 	if routes.Contains(metadata.DstIP) {
 		return metadata.DstIP, true
 	}
+	if t.HasExitNode() {
+		return netip.Addr{}, false
+	}
 	if _, err := resolveIPWithResolver(ctx, metadata.Host, t.prefer, t.dnsResolver); err == nil {
 		return netip.Addr{}, false
 	}
-	addr, err := resolveIPWithResolver(ctx, metadata.Host, t.prefer, resolver.DefaultResolver)
-	if err != nil || !routes.Contains(addr) {
+	addrs, err := resolver.LookupIPWithResolver(ctx, metadata.Host, resolver.DirectHostResolver)
+	if err != nil {
 		return netip.Addr{}, false
 	}
-	return addr, true
+	for _, addr := range addrs {
+		if routes.Contains(addr) {
+			return addr.Unmap(), true
+		}
+	}
+	return netip.Addr{}, false
 }
 
 func (t *Tailscale) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {

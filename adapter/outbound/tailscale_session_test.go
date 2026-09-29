@@ -3,6 +3,7 @@
 package outbound
 
 import (
+	"context"
 	"encoding/json"
 	"net/netip"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/metacubex/mihomo/component/resolver"
+	"github.com/metacubex/mihomo/component/tailnet"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/tailscale/ipn"
 	"github.com/metacubex/tailscale/ipn/ipnstate"
@@ -299,4 +302,46 @@ func TestTailscaleSessionPoolReleasesClosedSessions(t *testing.T) {
 	defer pool.mu.Unlock()
 	require.Empty(t, pool.byDir)
 	require.Empty(t, pool.closing)
+}
+
+type testTailnetRoutes struct{ routes *tailnet.Routes }
+
+func (s testTailnetRoutes) Routes() *tailnet.Routes { return s.routes }
+
+func TestTailscaleTrafficNeverBeginsALogin(t *testing.T) {
+	useTailscaleHome(t)
+	tailscale, err := NewTailscale(TailscaleOption{Name: "Idle", StateDir: "tailscale-networks/idle"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tailscale.Close() })
+	_, err = tailscale.DialContext(context.Background(), &C.Metadata{
+		NetWork: C.TCP, DstIP: netip.MustParseAddr("100.64.0.2"), DstPort: 80,
+	})
+	require.ErrorIs(t, err, errTailscaleNeedsLogin)
+	status, err := tailscale.Status(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, TailscaleIdle, status.State, "a dial started the network")
+}
+
+func TestTailscaleExitNodeKeepsPublicNamesInTheTailnet(t *testing.T) {
+	useTailscaleHome(t)
+	tailscale, err := NewTailscale(TailscaleOption{
+		Name: "Exit", StateDir: "tailscale-networks/exit", ExitNode: "auto",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tailscale.Close() })
+	subnetHost := netip.MustParseAddr("198.51.100.1")
+	unregister := tailnet.Register("Exit", testTailnetRoutes{tailnet.NewRoutes(
+		nil, nil, nil, []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")},
+	)})
+	t.Cleanup(unregister)
+	previous := resolver.DirectHostResolver
+	resolver.DirectHostResolver = fixtureLocalResolver{"nas.fixture.invalid": subnetHost}
+	t.Cleanup(func() { resolver.DirectHostResolver = previous })
+
+	// The exit node's DNS answers public names, so the local answer is unused.
+	_, ok := tailscale.routedAddr(context.Background(), &C.Metadata{Host: "nas.fixture.invalid"})
+	require.False(t, ok)
+	addr, ok := tailscale.routedAddr(context.Background(), &C.Metadata{Host: "nas.fixture.invalid", DstIP: subnetHost})
+	require.True(t, ok, "an address the rules resolved into the tailnet is still dialed")
+	require.Equal(t, subnetHost, addr)
 }
