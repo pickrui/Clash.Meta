@@ -54,6 +54,13 @@ func (r *RuleWrapper) Miss() {
 	r.missAt.Store(time.Now())
 }
 
+// Claimed turns the miss Match just recorded into a hit: the rule claimed a
+// host it could only judge once the address was known.
+func (r *RuleWrapper) Claimed() {
+	r.missCount.Add(^uint64(0))
+	r.Hit()
+}
+
 func (r *RuleWrapper) Match(metadata *C.Metadata, helper C.RuleMatchHelper) (bool, string) {
 	if r.IsDisabled() {
 		return false, ""

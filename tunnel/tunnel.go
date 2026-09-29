@@ -685,17 +685,43 @@ func passesOn(proxy C.Proxy, metadata *C.Metadata) bool {
 	return false
 }
 
+// pendingDirectClaims settles the claims on a host that goes DIRECT with the
+// address DIRECT's own resolver gives it.
+type pendingDirectClaims func(addr netip.Addr) (C.Proxy, C.Rule, bool)
+
 func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, error) {
+	proxy, rule, pending, err := matchRules(metadata, helper)
+	if err != nil || pending == nil {
+		return proxy, rule, err
+	}
+	// Resolved outside configMux, so a slow answer cannot hold up a config
+	// apply; DIRECT reuses the cached answer when it dials.
+	ctx, cancel := context.WithTimeout(context.Background(), resolver.DefaultDNSTimeout)
+	addr, lookupErr := directLookup(ctx, metadata.Host)
+	cancel()
+	if lookupErr == nil {
+		if claimed, claimRule, ok := pending(addr); ok {
+			metadata.DstIP = addr
+			return claimed, claimRule, nil
+		}
+	}
+	return proxy, rule, nil
+}
+
+func matchRules(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, pendingDirectClaims, error) {
 	configMux.RLock()
 	defer configMux.RUnlock()
 
+	// Maps are replaced, never written in place, so a pending claim may read
+	// this one after the lock is released.
+	table := proxies
 	var (
 		claims  []resolvedClaim
 		current C.Rule
 	)
 	helper.ClaimResolved = func(rule C.Rule, matchAddr func(netip.Addr) bool) {
 		// A nested rule without a target of its own can never take the host.
-		if _, ok := proxies[rule.Adapter()]; ok {
+		if _, ok := table[rule.Adapter()]; ok {
 			claims = append(claims, resolvedClaim{rule: rule, owner: current, matchAddr: matchAddr})
 		}
 	}
@@ -707,13 +733,13 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 			if !claim.matchAddr(addr) {
 				continue
 			}
-			adapter := proxies[claim.rule.Adapter()]
+			adapter := table[claim.rule.Adapter()]
 			if (metadata.NetWork == C.UDP && !adapter.SupportUDP()) || passesOn(adapter, metadata) {
 				continue
 			}
 			if wrapper, ok := claim.owner.(C.RuleWrapper); ok && wrapper.Unwrap() == claim.rule {
-				if counter, ok := wrapper.(interface{ Hit() }); ok {
-					counter.Hit()
+				if counter, ok := wrapper.(interface{ Claimed() }); ok {
+					counter.Claimed()
 				}
 				return adapter, wrapper, true
 			}
@@ -721,21 +747,14 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 		}
 		return nil, nil, false
 	}
-	// DIRECT resolves the host anyway; looking it up the same way first lets
-	// a claim take it without an extra query or touching unclaimed metadata.
-	finish := func(adapter C.Proxy, rule C.Rule) (C.Proxy, C.Rule, error) {
+	// DIRECT resolves the host anyway, so the caller looks it up the same way
+	// and settles the claims without an extra query or touching unclaimed
+	// metadata.
+	finish := func(adapter C.Proxy, rule C.Rule) (C.Proxy, C.Rule, pendingDirectClaims, error) {
 		if len(claims) > 0 && !metadata.Resolved() && metadata.Host != "" && dialsDirect(adapter, metadata) {
-			ctx, cancel := context.WithTimeout(context.Background(), resolver.DefaultDNSTimeout)
-			addr, err := directLookup(ctx, metadata.Host)
-			cancel()
-			if err == nil {
-				if claimed, claimRule, ok := settle(addr); ok {
-					metadata.DstIP = addr
-					return claimed, claimRule, nil
-				}
-			}
+			return adapter, rule, settle, nil
 		}
-		return adapter, rule, nil
+		return adapter, rule, nil, nil
 	}
 
 	var rematchChain []string
@@ -749,7 +768,7 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 			matched, ada := rule.Match(metadata, helper)
 			if len(claims) > 0 && metadata.Resolved() {
 				if claimed, claimRule, ok := settle(metadata.DstIP); ok {
-					return claimed, claimRule, nil
+					return claimed, claimRule, nil, nil
 				}
 			}
 			if matched {
@@ -783,7 +802,7 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 		if rematchProxy != nil {
 			if slices.Contains(rematchChain, rematchProxy.Name()) {
 				log.Warnln("[Rule] rematch cycle detected on %s", rematchProxy.Name())
-				return rematchProxy, rematchRule, nil
+				return rematchProxy, rematchRule, nil, nil
 			}
 			rematchChain = append(rematchChain, rematchProxy.Name())
 			conn, err := rematchProxy.DialContext(context.Background(), metadata) // not a real connection, just for metadata update
@@ -792,7 +811,7 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 			}
 			if err != nil {
 				log.Warnln("[Rule] rematch proxy %s failed to update metadata: %s", rematchProxy.Name(), err)
-				return rematchProxy, rematchRule, nil
+				return rematchProxy, rematchRule, nil, nil
 			}
 			log.Debugln("[Rule] rematch proxy %s update metadata to rematch-name=%q sub-rule=%q", rematchProxy.Name(), metadata.InName, metadata.SpecialRules)
 			continue

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/metacubex/mihomo/component/tailnet"
 	C "github.com/metacubex/mihomo/constant"
@@ -138,7 +139,28 @@ func TestTailnetClaimFollowsTheFirstResolution(t *testing.T) {
 			}
 		})
 	}
-	if hits := wrapped.HitCount(); hits != 1 {
-		t.Fatalf("the claimed rule counted %d hits", hits)
+	if hits, misses := wrapped.HitCount(), wrapped.MissCount(); hits != 1 || misses != 0 {
+		t.Fatalf("the claimed rule counted %d hits and %d misses", hits, misses)
+	}
+
+	// A config apply waiting for configMux must not wait on DIRECT's lookup.
+	UpdateRules([]C.Rule{tailnetRule, common.NewMatch("DIRECT")}, nil, nil)
+	directLookup = func(context.Context, string) (netip.Addr, error) {
+		locked := make(chan struct{})
+		go func() {
+			configMux.Lock()
+			configMux.Unlock()
+			close(locked)
+		}()
+		select {
+		case <-locked:
+		case <-time.After(2 * time.Second):
+			t.Error("DIRECT's lookup ran under configMux")
+		}
+		return netip.MustParseAddr("198.51.100.7"), nil
+	}
+	proxy, _, err := match(&C.Metadata{NetWork: C.TCP, Host: "nas.example.com", DstPort: 443}, C.RuleMatchHelper{})
+	if err != nil || proxy != home {
+		t.Fatalf("routed to %v, %v", proxy, err)
 	}
 }
