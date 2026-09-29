@@ -517,8 +517,12 @@ func (t *Tailscale) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.
 		}
 		return tcpConn, nil
 	})))
+	address := metadata.RemoteAddress()
+	if addr, ok := t.routedAddr(ctx, metadata); ok {
+		address = netip.AddrPortFrom(addr, metadata.DstPort).String()
+	}
 	var conn net.Conn
-	conn, err = dialer.NewDialer(options...).DialContext(ctx, "tcp", metadata.RemoteAddress())
+	conn, err = dialer.NewDialer(options...).DialContext(ctx, "tcp", address)
 	if err != nil {
 		return nil, err
 	}
@@ -551,7 +555,33 @@ func (t *Tailscale) ListenPacketContext(ctx context.Context, metadata *C.Metadat
 	return NewPacketConn(pc, t), nil
 }
 
+// Tailnet DNS answers public names only through an exit node or a global
+// nameserver, so a public name pointing into the tailnet may be unknown to
+// it. Such a host is reached at the address the rules resolved, or at the
+// local answer when tailnet DNS has none.
+func (t *Tailscale) routedAddr(ctx context.Context, metadata *C.Metadata) (netip.Addr, bool) {
+	routes := tailnet.Lookup(t.Name())
+	if metadata.Host == "" || routes == nil || routes.MatchHost(metadata.Host) {
+		return netip.Addr{}, false
+	}
+	if routes.Contains(metadata.DstIP) {
+		return metadata.DstIP, true
+	}
+	if _, err := resolveIPWithResolver(ctx, metadata.Host, t.prefer, t.dnsResolver); err == nil {
+		return netip.Addr{}, false
+	}
+	addr, err := resolveIPWithResolver(ctx, metadata.Host, t.prefer, resolver.DefaultResolver)
+	if err != nil || !routes.Contains(addr) {
+		return netip.Addr{}, false
+	}
+	return addr, true
+}
+
 func (t *Tailscale) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
+	if addr, ok := t.routedAddr(ctx, metadata); ok {
+		metadata.DstIP = addr
+		return nil
+	}
 	if metadata.Host != "" {
 		ip, err := resolveIPWithResolver(ctx, metadata.Host, t.prefer, t.dnsResolver)
 		if err != nil {

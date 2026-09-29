@@ -50,3 +50,29 @@ func TestTailnetRuleFollowsRegisteredRoutes(t *testing.T) {
 		require.False(t, matched, "%+v", metadata)
 	}
 }
+
+func TestTailnetRuleClaimsAnUnresolvedHost(t *testing.T) {
+	rule := NewTailnet("Home", "Home")
+	unregister := tailnet.Register("Home", tailnetSource{tailnet.NewRoutes(
+		nil, nil, nil, []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")},
+	)})
+	defer unregister()
+
+	var claims []func(netip.Addr) bool
+	helper := C.RuleMatchHelper{
+		ResolveIP: func() { t.Fatal("the rule resolved a host itself") },
+		ClaimResolved: func(claimed C.Rule, matchAddr func(netip.Addr) bool) {
+			require.Same(t, rule, claimed)
+			claims = append(claims, matchAddr)
+		},
+	}
+	matched, _ := rule.Match(&C.Metadata{Host: "nas.example"}, helper)
+	require.False(t, matched)
+	require.Len(t, claims, 1)
+	require.True(t, claims[0](netip.MustParseAddr("198.51.100.7")))
+	require.False(t, claims[0](netip.MustParseAddr("203.0.113.7")))
+
+	matched, _ = rule.Match(&C.Metadata{Host: "nas.example", DstIP: netip.MustParseAddr("198.51.100.7")}, helper)
+	require.True(t, matched, "a resolved host is judged by its address")
+	require.Len(t, claims, 1)
+}

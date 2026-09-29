@@ -98,19 +98,32 @@ func (r *Routes) MatchHost(host string) bool {
 // unless it is also inside a network this device is attached to: a LAN numbered
 // like a remote subnet stays local, and an explicit rule can still claim it.
 func (r *Routes) MatchAddr(addr netip.Addr) bool {
+	peer, subnet := r.lookupAddr(addr)
+	return peer || (subnet && !isLocalNetwork(addr.Unmap()))
+}
+
+// Contains reports a peer address or an address inside an approved subnet,
+// including one a local network also uses: traffic already sent to this
+// network should reach the remote side.
+func (r *Routes) Contains(addr netip.Addr) bool {
+	peer, subnet := r.lookupAddr(addr)
+	return peer || subnet
+}
+
+func (r *Routes) lookupAddr(addr netip.Addr) (peer bool, subnet bool) {
 	if r == nil || !addr.IsValid() {
-		return false
+		return false, false
 	}
 	addr = addr.Unmap()
 	if _, ok := r.addrs[addr]; ok {
-		return true
+		return true, false
 	}
-	for _, subnet := range r.subnets {
-		if subnet.Contains(addr) {
-			return !isLocalNetwork(addr)
+	for _, prefix := range r.subnets {
+		if prefix.Contains(addr) {
+			return false, true
 		}
 	}
-	return false
+	return false, false
 }
 
 func (r *Routes) Empty() bool {

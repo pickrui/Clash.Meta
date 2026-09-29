@@ -1,6 +1,9 @@
 package constant
 
-import "time"
+import (
+	"net/netip"
+	"time"
+)
 
 // Rule Type
 const (
@@ -162,6 +165,10 @@ type RuleMatchHelper struct {
 	ResolveIP     func()
 	FindProcess   func()
 	CheckPassRule func(adapterName string) bool
+	// ClaimResolved lets a rule claim a host it cannot judge before the
+	// address is known. The claim wins once a later rule resolves the host,
+	// or before DIRECT would resolve it; it never adds a DNS query itself.
+	ClaimResolved func(rule Rule, matchAddr func(netip.Addr) bool)
 }
 
 type RuleGroup interface {

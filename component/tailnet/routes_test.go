@@ -85,6 +85,9 @@ func TestRoutesMatchSubnetsOutsideLocalNetworks(t *testing.T) {
 	} {
 		require.Equal(t, want, routes.MatchAddr(netip.MustParseAddr(addr)), addr)
 	}
+	require.True(t, routes.Contains(netip.MustParseAddr("192.168.30.7")), "an explicit route still reaches the remote side")
+	require.False(t, routes.Contains(netip.MustParseAddr("192.169.0.1")))
+	require.False(t, routes.Contains(netip.MustParseAddr("8.8.8.8")))
 	require.True(t, NewRoutes(nil, nil, nil, []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}).Empty())
 }
 

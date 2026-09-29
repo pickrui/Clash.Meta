@@ -20,9 +20,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/tailnet"
 	C "github.com/metacubex/mihomo/constant"
 	RC "github.com/metacubex/mihomo/rules/common"
+	D "github.com/miekg/dns"
 	"github.com/stretchr/testify/require"
 )
 
@@ -302,7 +304,50 @@ func TestTailscaleFixtureSubnetRoute(t *testing.T) {
 	require.True(t, matched)
 	require.Equal(t, "Office", adapter)
 	requireTCPEcho(t, ctx, tailscale, &C.Metadata{NetWork: C.TCP, DstIP: host, DstPort: 8080})
+
+	// This tailnet has no global nameserver, so its DNS cannot answer a public
+	// name that points into the subnet: the rules' address is dialed instead,
+	// and without one the local answer is used.
+	requireTCPEcho(t, ctx, tailscale, &C.Metadata{NetWork: C.TCP, Host: "nas.fixture.invalid", DstIP: host, DstPort: 8080})
+	previous := resolver.DefaultResolver
+	resolver.DefaultResolver = fixtureLocalResolver{"nas.fixture.invalid": host}
+	t.Cleanup(func() { resolver.DefaultResolver = previous })
+	requireTCPEcho(t, ctx, tailscale, &C.Metadata{NetWork: C.TCP, Host: "nas.fixture.invalid", DstPort: 8080})
+	udp := &C.Metadata{NetWork: C.UDP, Host: "nas.fixture.invalid", DstPort: 8080}
+	require.NoError(t, tailscale.ResolveUDP(ctx, udp))
+	require.Equal(t, host, udp.DstIP)
 }
+
+type fixtureLocalResolver map[string]netip.Addr
+
+func (r fixtureLocalResolver) lookup(host string) ([]netip.Addr, error) {
+	if addr, ok := r[host]; ok {
+		return []netip.Addr{addr}, nil
+	}
+	return nil, resolver.ErrIPNotFound
+}
+
+func (r fixtureLocalResolver) LookupIP(_ context.Context, host string) ([]netip.Addr, error) {
+	return r.lookup(host)
+}
+
+func (r fixtureLocalResolver) LookupIPv4(_ context.Context, host string) ([]netip.Addr, error) {
+	return r.lookup(host)
+}
+
+func (r fixtureLocalResolver) LookupIPv6(context.Context, string) ([]netip.Addr, error) {
+	return nil, resolver.ErrIPNotFound
+}
+
+func (fixtureLocalResolver) ResolveECH(context.Context, string) ([]byte, error) { return nil, nil }
+
+func (fixtureLocalResolver) ExchangeContext(context.Context, *D.Msg) (*D.Msg, error) {
+	return nil, resolver.ErrIPNotFound
+}
+
+func (fixtureLocalResolver) Invalid() bool    { return true }
+func (fixtureLocalResolver) ClearCache()      {}
+func (fixtureLocalResolver) ResetConnection() {}
 
 func TestTailscaleFixtureAuthKeyAfterInteractiveStart(t *testing.T) {
 	const authKey = "tskey-auth-fixture"

@@ -656,17 +656,103 @@ func logMetadata(metadata *C.Metadata, rule C.Rule, remoteConn C.Connection) {
 	}
 }
 
+type resolvedClaim struct {
+	rule      C.Rule
+	owner     C.Rule
+	matchAddr func(netip.Addr) bool
+}
+
+// directLookup resolves as DIRECT's own dial would, so the dial reuses it.
+var directLookup = func(ctx context.Context, host string) (netip.Addr, error) {
+	return resolver.ResolveIPWithResolver(ctx, host, resolver.DirectHostResolver)
+}
+
+func dialsDirect(proxy C.Proxy, metadata *C.Metadata) bool {
+	for adapter := proxy; adapter != nil; adapter = adapter.Unwrap(metadata, false) {
+		if adapter.Type() == C.Direct {
+			return true
+		}
+	}
+	return false
+}
+
+func passesOn(proxy C.Proxy, metadata *C.Metadata) bool {
+	for adapter := proxy; adapter != nil; adapter = adapter.Unwrap(metadata, false) {
+		if adapter.Type() == C.Pass || adapter.Type() == C.Rematch {
+			return true
+		}
+	}
+	return false
+}
+
 func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, error) {
 	configMux.RLock()
 	defer configMux.RUnlock()
+
+	var (
+		claims  []resolvedClaim
+		current C.Rule
+	)
+	helper.ClaimResolved = func(rule C.Rule, matchAddr func(netip.Addr) bool) {
+		// A nested rule without a target of its own can never take the host.
+		if _, ok := proxies[rule.Adapter()]; ok {
+			claims = append(claims, resolvedClaim{rule: rule, owner: current, matchAddr: matchAddr})
+		}
+	}
+	// Claims are settled once, by the first address the host resolves to.
+	settle := func(addr netip.Addr) (C.Proxy, C.Rule, bool) {
+		pending := claims
+		claims = nil
+		for _, claim := range pending {
+			if !claim.matchAddr(addr) {
+				continue
+			}
+			adapter := proxies[claim.rule.Adapter()]
+			if (metadata.NetWork == C.UDP && !adapter.SupportUDP()) || passesOn(adapter, metadata) {
+				continue
+			}
+			if wrapper, ok := claim.owner.(C.RuleWrapper); ok && wrapper.Unwrap() == claim.rule {
+				if counter, ok := wrapper.(interface{ Hit() }); ok {
+					counter.Hit()
+				}
+				return adapter, wrapper, true
+			}
+			return adapter, claim.rule, true
+		}
+		return nil, nil, false
+	}
+	// DIRECT resolves the host anyway; looking it up the same way first lets
+	// a claim take it without an extra query or touching unclaimed metadata.
+	finish := func(adapter C.Proxy, rule C.Rule) (C.Proxy, C.Rule, error) {
+		if len(claims) > 0 && !metadata.Resolved() && metadata.Host != "" && dialsDirect(adapter, metadata) {
+			ctx, cancel := context.WithTimeout(context.Background(), resolver.DefaultDNSTimeout)
+			addr, err := directLookup(ctx, metadata.Host)
+			cancel()
+			if err == nil {
+				if claimed, claimRule, ok := settle(addr); ok {
+					metadata.DstIP = addr
+					return claimed, claimRule, nil
+				}
+			}
+		}
+		return adapter, rule, nil
+	}
 
 	var rematchChain []string
 	for {
 		var rematchProxy C.Proxy
 		var rematchRule C.Rule
+		claims = nil
 	GetRules:
 		for _, rule := range getRules(metadata) {
-			if matched, ada := rule.Match(metadata, helper); matched {
+			current = rule
+			matched, ada := rule.Match(metadata, helper)
+			if len(claims) > 0 && metadata.Resolved() {
+				if claimed, claimRule, ok := settle(metadata.DstIP); ok {
+					return claimed, claimRule, nil
+				}
+			}
+			if matched {
 				adapter, ok := proxies[ada]
 				if !ok {
 					continue
@@ -691,7 +777,7 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 					continue
 				}
 
-				return adapter, rule, nil
+				return finish(adapter, rule)
 			}
 		}
 		if rematchProxy != nil {
@@ -711,7 +797,7 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 			log.Debugln("[Rule] rematch proxy %s update metadata to rematch-name=%q sub-rule=%q", rematchProxy.Name(), metadata.InName, metadata.SpecialRules)
 			continue
 		}
-		return proxies["DIRECT"], nil, nil
+		return finish(proxies["DIRECT"], nil)
 	}
 }
 

@@ -27,6 +27,12 @@ func (t *Tailnet) Match(metadata *C.Metadata, helper C.RuleMatchHelper) (bool, s
 	if routes.MatchHost(metadata.RuleHost()) {
 		return true, t.adapter
 	}
+	// Resolving here would query DNS for every domain ahead of the profile's
+	// rules, so a public name pointing into a subnet is claimed until then.
+	if !metadata.Resolved() && metadata.Host != "" && helper.ClaimResolved != nil {
+		helper.ClaimResolved(t, routes.MatchAddr)
+		return false, t.adapter
+	}
 	return routes.MatchAddr(metadata.DstIP), t.adapter
 }
 
