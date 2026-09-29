@@ -88,6 +88,10 @@ func (c *noneConn) WriteBuffer(buffer *buf.Buffer) error {
 	return c.ExtendedConn.WriteBuffer(buffer)
 }
 
+func (c *noneConn) NeedHandshake() bool {
+	return !c.requestWritten
+}
+
 func (c *noneConn) FrontHeadroom() int {
 	return M.MaxSocksaddrLength
 }
