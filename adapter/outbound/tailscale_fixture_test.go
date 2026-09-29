@@ -269,6 +269,41 @@ func TestTailscaleFixtureInteractiveLogin(t *testing.T) {
 	require.ErrorIs(t, err, errTailscaleRemoved)
 }
 
+func TestTailscaleFixtureSubnetRoute(t *testing.T) {
+	const authKey = "tskey-auth-fixture"
+	fixture := startTailscaleFixture(t, "-auth-key", authKey, "-subnet", "198.51.100.0/24")
+	useTailscaleHome(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	host := netip.MustParseAddr("198.51.100.1")
+
+	acceptRoutes := true
+	tailscale, err := NewTailscale(TailscaleOption{
+		Name:         "Office",
+		ControlURL:   fixture.Control,
+		StateDir:     "tailscale-networks/subnet",
+		Hostname:     "flclash",
+		AuthKey:      authKey,
+		AcceptRoutes: &acceptRoutes,
+		UDP:          true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tailscale.Close() })
+	tailscale.Warm()
+	waitTailscaleStatus(t, ctx, tailscale, runningWithPeer)
+
+	// The approved subnet joins the automatic routes, so the TAILNET rule sends
+	// it into this network, and tsnet reaches it through the subnet router.
+	require.Eventually(t, func() bool {
+		return tailnet.Lookup("Office").MatchAddr(host)
+	}, 30*time.Second, 100*time.Millisecond, "routes follow the approved subnet")
+	require.False(t, tailnet.Lookup("Office").MatchAddr(netip.MustParseAddr("198.51.101.1")))
+	matched, adapter := RC.NewTailnet("Office", "Office").Match(&C.Metadata{DstIP: host}, C.RuleMatchHelper{})
+	require.True(t, matched)
+	require.Equal(t, "Office", adapter)
+	requireTCPEcho(t, ctx, tailscale, &C.Metadata{NetWork: C.TCP, DstIP: host, DstPort: 8080})
+}
+
 func TestTailscaleFixtureAuthKeyAfterInteractiveStart(t *testing.T) {
 	const authKey = "tskey-auth-fixture"
 	fixture := startTailscaleFixture(t, "-auth-key", authKey)

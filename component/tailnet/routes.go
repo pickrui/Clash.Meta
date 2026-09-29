@@ -3,20 +3,46 @@
 package tailnet
 
 import (
+	"net"
 	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/metacubex/mihomo/component/iface"
 )
 
-// Routes is an immutable snapshot of one tailnet's known peers.
+// Routes is an immutable snapshot of one tailnet's known peers and the subnet
+// routes it has approved.
 type Routes struct {
 	suffixes []string
 	names    map[string]struct{}
 	addrs    map[netip.Addr]struct{}
+	subnets  []netip.Prefix
 }
 
-func NewRoutes(suffixes []string, names []string, addrs []netip.Addr) *Routes {
+var networkInterfaces = iface.Interfaces
+
+func isLocalNetwork(addr netip.Addr) bool {
+	interfaces, err := networkInterfaces()
+	if err != nil {
+		return false
+	}
+	// A more specific tunnel prefix must not hide an overlapping attached LAN.
+	for _, attached := range interfaces {
+		if attached.Flags&net.FlagUp == 0 || attached.Flags&(net.FlagLoopback|net.FlagPointToPoint) != 0 {
+			continue
+		}
+		for _, prefix := range attached.Addresses {
+			if prefix.Contains(addr) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func NewRoutes(suffixes []string, names []string, addrs []netip.Addr, subnets []netip.Prefix) *Routes {
 	routes := &Routes{
 		names: make(map[string]struct{}, len(names)),
 		addrs: make(map[netip.Addr]struct{}, len(addrs)),
@@ -34,6 +60,12 @@ func NewRoutes(suffixes []string, names []string, addrs []netip.Addr) *Routes {
 	for _, addr := range addrs {
 		if addr.IsValid() {
 			routes.addrs[addr.Unmap()] = struct{}{}
+		}
+	}
+	for _, subnet := range subnets {
+		// An exit default is not a subnet: exit traffic needs an explicit rule.
+		if subnet.IsValid() && subnet.Bits() > 0 {
+			routes.subnets = append(routes.subnets, subnet.Masked())
 		}
 	}
 	return routes
@@ -62,16 +94,27 @@ func (r *Routes) MatchHost(host string) bool {
 	return false
 }
 
+// MatchAddr reports a peer address, or an address inside an approved subnet
+// unless it is also inside a network this device is attached to: a LAN numbered
+// like a remote subnet stays local, and an explicit rule can still claim it.
 func (r *Routes) MatchAddr(addr netip.Addr) bool {
 	if r == nil || !addr.IsValid() {
 		return false
 	}
-	_, ok := r.addrs[addr.Unmap()]
-	return ok
+	addr = addr.Unmap()
+	if _, ok := r.addrs[addr]; ok {
+		return true
+	}
+	for _, subnet := range r.subnets {
+		if subnet.Contains(addr) {
+			return !isLocalNetwork(addr)
+		}
+	}
+	return false
 }
 
 func (r *Routes) Empty() bool {
-	return r == nil || (len(r.suffixes) == 0 && len(r.names) == 0 && len(r.addrs) == 0)
+	return r == nil || (len(r.suffixes) == 0 && len(r.names) == 0 && len(r.addrs) == 0 && len(r.subnets) == 0)
 }
 
 // Source supplies the latest routes of a running outbound.

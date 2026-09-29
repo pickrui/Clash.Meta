@@ -5,8 +5,10 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 )
 
-// Tailnet matches the peers and MagicDNS names a Tailscale outbound currently
-// knows, following its network map as devices join and leave.
+// Tailnet matches the peers, MagicDNS names and approved subnets a Tailscale
+// outbound currently knows, following its network map as devices join and
+// leave. It classifies the address a connection already has and never resolves
+// a hostname itself, so it cannot move DNS ahead of the profile's rules.
 type Tailnet struct {
 	Base
 	network string

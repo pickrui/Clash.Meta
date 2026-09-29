@@ -522,7 +522,7 @@ func (s *tailscaleSession) updateRoutes() {
 	if err != nil {
 		return
 	}
-	s.routes.Store(buildTailnetRoutes(status))
+	s.routes.Store(buildTailnetRoutes(status, s.option.AcceptRoutes != nil && *s.option.AcceptRoutes))
 }
 
 func tailscaleMagicDNSSuffix(status *ipnstate.Status) string {
@@ -535,16 +535,22 @@ func tailscaleMagicDNSSuffix(status *ipnstate.Status) string {
 // buildTailnetRoutes lists peer addresses, their MagicDNS names and the short
 // names no two peers share. The whole suffix is claimed only for a Tailscale
 // assigned tailnet domain: a custom Headscale base domain may also serve
-// public sites. Subnet routes and exit traffic are left to explicit rules.
-func buildTailnetRoutes(status *ipnstate.Status) *tailnet.Routes {
+// public sites. With accepted routes, the subnets control made each peer the
+// primary router for are claimed too, as the official client routes them.
+// Exit traffic is left to explicit rules.
+func buildTailnetRoutes(status *ipnstate.Status, acceptRoutes bool) *tailnet.Routes {
 	if status.BackendState != ipn.Running.String() {
 		return nil
 	}
 	var names []string
 	var addrs []netip.Addr
+	var subnets []netip.Prefix
 	shortNames := map[string]int{}
 	for _, peer := range status.Peer {
 		addrs = append(addrs, peer.TailscaleIPs...)
+		if acceptRoutes && peer.PrimaryRoutes != nil {
+			subnets = append(subnets, peer.PrimaryRoutes.AsSlice()...)
+		}
 		name := tailnet.NormalizeName(peer.DNSName)
 		if name == "" {
 			continue
@@ -563,7 +569,7 @@ func buildTailnetRoutes(status *ipnstate.Status) *tailnet.Routes {
 	if suffix := tailscaleMagicDNSSuffix(status); strings.HasSuffix(suffix, ".ts.net") {
 		suffixes = append(suffixes, suffix)
 	}
-	return tailnet.NewRoutes(suffixes, names, addrs)
+	return tailnet.NewRoutes(suffixes, names, addrs, subnets)
 }
 
 func tailscaleStatusFrom(status *ipnstate.Status) *TailscaleStatus {

@@ -14,6 +14,7 @@ import (
 	"github.com/metacubex/tailscale/ipn"
 	"github.com/metacubex/tailscale/ipn/ipnstate"
 	"github.com/metacubex/tailscale/types/key"
+	"github.com/metacubex/tailscale/types/views"
 	"github.com/stretchr/testify/require"
 )
 
@@ -180,7 +181,7 @@ func TestBuildTailnetRoutes(t *testing.T) {
 			key.NewNode().Public(): testPeer("office.shared.ts.net.", true, "100.64.0.4"),
 		},
 	}
-	routes := buildTailnetRoutes(status)
+	routes := buildTailnetRoutes(status, true)
 	for _, host := range []string{"nas", "nas.tail1234.ts.net", "printer.tail1234.ts.net", "tail1234.ts.net", "office.shared.ts.net"} {
 		require.True(t, routes.MatchHost(host), host)
 	}
@@ -195,14 +196,39 @@ func TestBuildTailnetRoutes(t *testing.T) {
 	// are claimed, not the whole domain.
 	status.CurrentTailnet.MagicDNSSuffix = "example.com"
 	status.Peer[key.NewNode().Public()] = testPeer("vault.example.com.", true, "100.64.0.5")
-	routes = buildTailnetRoutes(status)
+	routes = buildTailnetRoutes(status, true)
 	require.True(t, routes.MatchHost("vault.example.com"))
 	require.True(t, routes.MatchHost("vault"))
 	require.False(t, routes.MatchHost("www.example.com"))
 	require.False(t, routes.MatchHost("example.com"))
 
 	status.BackendState = ipn.NeedsLogin.String()
-	require.Nil(t, buildTailnetRoutes(status))
+	require.Nil(t, buildTailnetRoutes(status, true))
+}
+
+func TestBuildTailnetRoutesClaimsApprovedSubnets(t *testing.T) {
+	router := testPeer("router.tail1234.ts.net.", true, "100.64.0.6")
+	primary := views.SliceOf([]netip.Prefix{
+		netip.MustParsePrefix("198.51.100.0/24"),
+		netip.MustParsePrefix("2001:db8:42::/64"),
+		netip.MustParsePrefix("0.0.0.0/0"),
+	})
+	router.PrimaryRoutes = &primary
+	status := &ipnstate.Status{
+		BackendState: ipn.Running.String(),
+		Peer:         map[key.NodePublic]*ipnstate.PeerStatus{key.NewNode().Public(): router},
+	}
+	routes := buildTailnetRoutes(status, true)
+	for _, addr := range []string{"100.64.0.6", "198.51.100.7", "2001:db8:42::7", "::ffff:198.51.100.7"} {
+		require.True(t, routes.MatchAddr(netip.MustParseAddr(addr)), addr)
+	}
+	// An exit default is not a subnet.
+	require.False(t, routes.MatchAddr(netip.MustParseAddr("203.0.113.7")))
+
+	// Without accepted routes tsnet cannot reach the subnet, so it stays unclaimed.
+	routes = buildTailnetRoutes(status, false)
+	require.True(t, routes.MatchAddr(netip.MustParseAddr("100.64.0.6")))
+	require.False(t, routes.MatchAddr(netip.MustParseAddr("198.51.100.7")))
 }
 
 func TestTailscaleStatusOmitsCredentials(t *testing.T) {

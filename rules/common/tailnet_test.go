@@ -26,6 +26,7 @@ func TestTailnetRuleFollowsRegisteredRoutes(t *testing.T) {
 		[]string{"tail1234.ts.net"},
 		[]string{"nas"},
 		[]netip.Addr{peer},
+		[]netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")},
 	)})
 	defer unregister()
 
@@ -33,6 +34,7 @@ func TestTailnetRuleFollowsRegisteredRoutes(t *testing.T) {
 		{DstIP: peer},
 		{Host: "nas"},
 		{Host: "printer.tail1234.ts.net", DstIP: netip.MustParseAddr("198.18.0.9")},
+		{DstIP: netip.MustParseAddr("198.51.100.7")},
 	} {
 		matched, adapter := rule.Match(metadata, C.RuleMatchHelper{})
 		require.True(t, matched, "%+v", metadata)
@@ -41,6 +43,8 @@ func TestTailnetRuleFollowsRegisteredRoutes(t *testing.T) {
 	for _, metadata := range []*C.Metadata{
 		{DstIP: netip.MustParseAddr("100.64.0.8")},
 		{Host: "example.com", DstIP: netip.MustParseAddr("93.184.216.34")},
+		// A hostname without an address is never resolved to test the subnet.
+		{Host: "nas.example"},
 	} {
 		matched, _ := rule.Match(metadata, C.RuleMatchHelper{})
 		require.False(t, matched, "%+v", metadata)

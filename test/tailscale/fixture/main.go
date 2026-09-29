@@ -48,6 +48,7 @@ type description struct {
 func main() {
 	requireAuth := flag.Bool("require-auth", false, "require interactive login")
 	authKey := flag.String("auth-key", "", "require this auth key")
+	subnet := flag.String("subnet", "", "approve this subnet route on the peer and echo TCP on its first host")
 	flag.Parse()
 	netns.SetEnabled(false)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -81,6 +82,30 @@ func main() {
 	peer4, peer6 := status.TailscaleIPs[0], status.TailscaleIPs[len(status.TailscaleIPs)-1]
 	serveTCPEcho(must(peer.Listen("tcp", ":"+strconv.Itoa(echoPort))))
 	serveUDPEcho(must(peer.ListenPacket("udp", netip.AddrPortFrom(peer4, echoPort).String())))
+	if *subnet != "" {
+		// The peer advertises the route, as `tailscale set --advertise-routes`
+		// does, and control approves it for every node's network map.
+		route := netip.MustParsePrefix(*subnet)
+		lc := must(peer.LocalClient())
+		must(lc.EditPrefs(ctx, &ipn.MaskedPrefs{
+			Prefs:              ipn.Prefs{AdvertiseRoutes: []netip.Prefix{route}},
+			AdvertiseRoutesSet: true,
+		}))
+		control.SetSubnetRoutes(status.Self.PublicKey, []netip.Prefix{route})
+		// A host behind the router. tsnet answers flows to routed addresses
+		// through a fallback handler; a listener on such an address accepts
+		// but never delivers its replies.
+		host := netip.AddrPortFrom(route.Masked().Addr().Next(), echoPort)
+		peer.RegisterFallbackTCPHandler(func(_, dst netip.AddrPort) (func(net.Conn), bool) {
+			if dst != host {
+				return nil, false
+			}
+			return func(conn net.Conn) {
+				defer conn.Close()
+				_, _ = io.Copy(conn, conn)
+			}, true
+		})
+	}
 
 	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
