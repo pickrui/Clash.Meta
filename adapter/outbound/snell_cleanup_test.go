@@ -8,6 +8,7 @@ package outbound
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
@@ -45,6 +46,46 @@ func TestSnellUDPHandshakeFailureClosesRawConnection(t *testing.T) {
 	}
 	_ = peer.SetWriteDeadline(time.Now().Add(time.Second))
 	if _, err := peer.Write([]byte{1}); err != net.ErrClosed && err != io.ErrClosedPipe {
+		t.Fatalf("raw connection remains open: %v", err)
+	}
+}
+
+func TestSnellPoolWarmupCancellationClosesRawConnection(t *testing.T) {
+	raw, peer := net.Pipe()
+	t.Cleanup(func() { _ = raw.Close(); _ = peer.Close() })
+	adapter, err := NewSnell(SnellOption{
+		BasicOption: BasicOption{DialerForAPI: cleanupTestDialer{conn: raw}},
+		Name:        "snell", Server: "127.0.0.1", Port: 443, Psk: "password",
+		Version: snell.Version4, Identity: true, IdentityConfigured: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = adapter.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		conn, err := adapter.pool.Dial(ctx)
+		if conn != nil {
+			_ = conn.Close()
+		}
+		done <- err
+	}()
+	_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := peer.Read(make([]byte, 4096)); err != nil {
+		t.Fatalf("warmup did not start: %v", err)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("warmup ignored cancellation")
+	}
+	if _, err := peer.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 		t.Fatalf("raw connection remains open: %v", err)
 	}
 }

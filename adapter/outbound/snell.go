@@ -379,6 +379,11 @@ func (s *Snell) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn
 			}
 			if poolConn, ok := c.(*snell.PoolConn); ok {
 				poolConn.MarkReusable()
+				if poolConn.Reused() {
+					c = snell.NewRetryConn(c, func(ctx context.Context) (net.Conn, error) {
+						return s.redialPooled(ctx, metadata)
+					})
+				}
 			}
 			return NewConn(c, s), nil
 		}
@@ -395,6 +400,24 @@ func (s *Snell) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn
 
 	c, err = s.StreamConnContext(ctx, c, metadata)
 	return NewConn(c, s), err
+}
+
+// redialPooled starts metadata's request on a connection dialed for it, after
+// the reused one failed before anything but the request had been sent.
+func (s *Snell) redialPooled(ctx context.Context, metadata *C.Metadata) (net.Conn, error) {
+	log.Debugln("[Snell] %s pooled connection failed before sending business data, dialing a new one", s.addr)
+	ctx, cancel := context.WithTimeout(ctx, C.DefaultTCPTimeout)
+	defer cancel()
+	c, err := s.pool.Dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err = s.writeHeaderContext(ctx, c, metadata); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+	c.MarkReusable()
+	return c, nil
 }
 
 // ListenPacketContext implements C.ProxyAdapter
@@ -694,7 +717,10 @@ func NewSnell(option SnellOption) (*Snell, error) {
 			// The oix identity transport keeps a ping connection reusable. A plain
 			// upstream Snell server closes it after pong, so only prewarm identity sessions.
 			if s.version == snell.Version4 && s.identity {
-				if err = stream.Warmup(); err != nil {
+				done := N.SetupContextForConn(ctx, stream)
+				err = stream.Warmup()
+				done(&err)
+				if err != nil {
 					_ = stream.Close()
 					return nil, err
 				}

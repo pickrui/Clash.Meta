@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 
 	"github.com/metacubex/blake3"
 	"github.com/metacubex/mihomo/common/pool"
@@ -56,6 +57,14 @@ type Snell struct {
 	net.Conn
 	buffer [1]byte
 	reply  bool
+	// answered mirrors reply for the writing goroutine: set once the server
+	// answers the current request, an error reply included.
+	answered atomic.Bool
+}
+
+// Answered reports whether the server has answered the current request.
+func (s *Snell) Answered() bool {
+	return s.answered.Load()
 }
 
 func (s *Snell) Read(b []byte) (int, error) {
@@ -74,6 +83,7 @@ func (s *Snell) ReadReply() error {
 		return err
 	}
 	s.reply = true
+	s.answered.Store(true)
 
 	if s.buffer[0] == CommandTunnel {
 		return nil
@@ -169,6 +179,7 @@ func HalfClose(conn net.Conn) error {
 	}
 	if s, ok := conn.(*Snell); ok {
 		s.reply = false
+		s.answered.Store(false)
 	}
 	return nil
 }
