@@ -30,42 +30,42 @@ var (
 	geoSiteEnable atomic.Bool
 	asnEnable     atomic.Bool
 
-	geoIpUrl   string
-	mmdbUrl    string
-	geoSiteUrl string
-	asnUrl     string
+	geoIpUrl   atomic.TypedValue[string]
+	mmdbUrl    atomic.TypedValue[string]
+	geoSiteUrl atomic.TypedValue[string]
+	asnUrl     atomic.TypedValue[string]
 )
 
 func GeoIpUrl() string {
-	return geoIpUrl
+	return geoIpUrl.Load()
 }
 
 func SetGeoIpUrl(url string) {
-	geoIpUrl = url
+	geoIpUrl.Store(url)
 }
 
 func MmdbUrl() string {
-	return mmdbUrl
+	return mmdbUrl.Load()
 }
 
 func SetMmdbUrl(url string) {
-	mmdbUrl = url
+	mmdbUrl.Store(url)
 }
 
 func GeoSiteUrl() string {
-	return geoSiteUrl
+	return geoSiteUrl.Load()
 }
 
 func SetGeoSiteUrl(url string) {
-	geoSiteUrl = url
+	geoSiteUrl.Store(url)
 }
 
 func ASNUrl() string {
-	return asnUrl
+	return asnUrl.Load()
 }
 
 func SetASNUrl(url string) {
-	asnUrl = url
+	asnUrl.Store(url)
 }
 
 func downloadToPath(url string, path string) (err error) {
