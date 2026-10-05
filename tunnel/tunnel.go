@@ -341,7 +341,7 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 	helper := C.RuleMatchHelper{
 		ResolveIP: func() {
 			if !resolved && metadata.Host != "" && !metadata.Resolved() {
-				ctx, cancel := context.WithTimeout(context.Background(), resolver.DefaultDNSTimeout)
+				ctx, cancel := context.WithTimeout(resolver.WithInitiator(context.Background(), resolver.InitiatorRule), resolver.DefaultDNSTimeout)
 				defer cancel()
 				ip, err := resolver.ResolveIP(ctx, metadata.Host)
 				if err != nil {
@@ -664,7 +664,7 @@ type resolvedClaim struct {
 
 // directLookup resolves as DIRECT's own dial would, so the dial reuses it.
 var directLookup = func(ctx context.Context, host string) (netip.Addr, error) {
-	return resolver.ResolveIPWithResolver(ctx, host, resolver.DirectHostResolver)
+	return resolver.ResolveIPWithResolver(resolver.WithInitiator(ctx, resolver.InitiatorDirect), host, resolver.DirectHostResolver)
 }
 
 func dialsDirect(proxy C.Proxy, metadata *C.Metadata) bool {
