@@ -22,11 +22,11 @@ require (
 	github.com/metacubex/chacha v0.1.5
 	github.com/metacubex/chi v0.1.1
 	github.com/metacubex/connect-ip-go v0.0.0-20260727083417-67ccdb0cf771
-	github.com/metacubex/cpu v0.1.1
+	github.com/metacubex/cpu v0.1.2
 	github.com/metacubex/edwards25519 v1.2.0
 	github.com/metacubex/fswatch v0.1.1
 	github.com/metacubex/gopacket v1.1.20-0.20230608035415-7e2f98a3e759
-	github.com/metacubex/http v0.1.7
+	github.com/metacubex/http v0.1.8
 	github.com/metacubex/jls-quic-go v0.0.0-20260727080412-732f2fc9a34d
 	github.com/metacubex/jls-tls v0.0.0-20260723084315-67adc0e2f796
 	github.com/metacubex/kcp-go v0.0.0-20260105040817-550693377604
@@ -51,7 +51,7 @@ require (
 	github.com/metacubex/tailscale v0.0.0-20260821153257-ff0ecd818181
 	github.com/metacubex/tfo-go v0.0.0-20260623020846-376a77860b8c
 	github.com/metacubex/tls v0.1.8
-	github.com/metacubex/utls v1.8.7
+	github.com/metacubex/utls v1.8.8
 	github.com/metacubex/wireguard-go v0.0.0-20250820062549-a6cecdd7f57f
 	github.com/metacubex/zerotier-go v0.0.0-20260813124750-13fa6f45da5f
 	github.com/mroth/weightedrand/v2 v2.1.0
