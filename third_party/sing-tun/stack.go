@@ -34,6 +34,7 @@ type StackOptions struct {
 	ForwarderBindInterface bool
 	IncludeAllNetworks     bool
 	InterfaceFinder        control.InterfaceFinder
+	TCPCongestionControl   string
 	EnforceBindInterface   bool
 }
 

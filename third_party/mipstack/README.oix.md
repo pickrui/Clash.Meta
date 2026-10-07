@@ -1,10 +1,10 @@
 # Local mipstack low-memory policy
 
-Source: github.com/metacubex/mipstack v0.0.0-20260919101445-802d64336f8c, copied from the Go module cache with its MPL-2.0 license, sources and tests retained. Both the mihomo module and FlClash core replace this dependency with this directory.
+Source: github.com/metacubex/mipstack v0.0.0-20260930071539-961d4b1c1983, copied from the Go module cache with its MPL-2.0 license, sources and tests retained. Both the mihomo module and FlClash core replace this dependency with this directory.
 
 Backport: https://github.com/MetaCubeX/mipstack/pull/3 at commit `456a89053ab2a5b08cc9e90be294871f2505027a`. The source baseline is newer than the PR; the benchmark helper preserves its newer MTU argument. Production changes otherwise match the upstream storage policy.
 
-Backport the effective send MSS fix from mipstack v0.0.0-20260924131027-976adac53932 (mihomo commit 41b8a059). The peer's SYN MSS is clamped to the fixed-header path MSS before the negotiated timestamp option is charged, so timestamped segments no longer exceed a smaller peer MSS by 12 bytes. The tcp.go and tcp_test.go hunks match that version; keep this fix when updating the source.
+The new source baseline includes the effective send MSS fix from mipstack v0.0.0-20260924131027-976adac53932 (mihomo commit 41b8a059). The peer's SYN MSS is clamped to the fixed-header path MSS before the negotiated timestamp option is charged, so timestamped segments no longer exceed a smaller peer MSS by 12 bytes. The tcp.go and tcp_test.go hunks match that version; keep this fix when updating the source.
 
 `with_mips_low_memory` is an additional selector for the same policy as upstream `with_low_memory`. FlClash uses the dedicated tag so other mihomo stacks and shared buffer pools keep their existing behavior. Builds without either tag retain the original policy. Socket window defaults remain unchanged here; sing-tun supplies the smaller TUN profile explicitly.
 
@@ -21,3 +21,5 @@ go test -tags with_mips_low_memory -run '^$' -bench BenchmarkTCPMemoryProfileStr
 ```
 
 The deterministic profile counts retained backing, not Android RSS. Upstream's iPad measurements in LOW_MEMORY.md describe its own workload. The separate upstream gVisor interoperability race suite had unresolved timeouts; the application TUN tests here are a different suite.
+
+Updated to 961d4b1c1983 for packet batch input, RX checksum offload, ICMPv6 and TCP correctness fixes. The storage policy remains a local patch; the benchmark helper also keeps the newer IPv6/offload parameters.

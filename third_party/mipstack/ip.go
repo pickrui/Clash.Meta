@@ -133,20 +133,20 @@ type IPConnInfo struct {
 	// receive queue.
 	ReceiveQueueBytes int
 	// ReceiveQueueCapacity is the configured accounting-byte limit of the
-	// combined payload and error queues, not an exact heap-allocation limit.
+	// combined payload and extended-error queues, not an exact heap limit.
 	ReceiveQueueCapacity int
-	// ReceiveErrors reports whether asynchronous network errors are reserved
-	// for ReadError instead of being returned by ordinary reads and whether
-	// immediate failure to admit unicast or external-link non-unicast output is
-	// reported as ENOBUFS.
+	// ReceiveErrors reports whether asynchronous network errors are retained
+	// for ReadError. Otherwise, unconnected sockets do not report those errors;
+	// connected sockets report hard errors on reads or header-included writes.
+	// It also reports whether immediate failure to admit unicast or external-link
+	// non-unicast output is reported as ENOBUFS.
 	ReceiveErrors bool
-	// ErrorQueueEntries is the number of asynchronous network errors awaiting
-	// ReadError or, when ReceiveErrors is false, an ordinary read.
+	// ErrorQueueEntries is the number of extended errors awaiting ReadError.
 	ErrorQueueEntries int
 	// ErrorQueueBytes is the accounted metadata and quoted packet data retained
 	// by the asynchronous error queue.
 	ErrorQueueBytes int
-	// ErrorsDropped counts asynchronous network errors discarded because the
+	// ErrorsDropped counts extended-error entries discarded because the
 	// configured receive-buffer budget was exhausted.
 	ErrorsDropped uint64
 	// PacketsSent counts successful IP socket write results. It includes writes
@@ -730,13 +730,13 @@ func (c *IPConn) enqueuePacket(packet ipPacket, options ipPacketOptions) {
 	c.mu.Unlock()
 }
 
-// notifyReceiveLocked keeps one edge notification armed while queued data
-// remains and removes a stale token when the queue becomes empty.
+// notifyReceiveLocked keeps one edge notification armed while data or an
+// ordinary socket error remains and removes a stale token otherwise.
 func (c *IPConn) notifyReceiveLocked() {
 	if c.receiveNotify == nil {
 		return
 	}
-	if c.receive.len() != 0 || !c.receiveErrors && c.errorState.len() != 0 {
+	if c.receive.len() != 0 || c.errorState != nil && c.errorState.pending != nil {
 		select {
 		case c.receiveNotify <- struct{}{}:
 		default:
@@ -760,7 +760,7 @@ func (c *IPConn) receiveNotificationLocked() <-chan struct{} {
 
 // ReadFrom implements net.PacketConn.
 func (c *IPConn) ReadFrom(buffer []byte) (int, net.Addr, error) {
-	n, datagram, _, err := c.readDatagram(buffer)
+	n, datagram, _, err := c.readDatagram(buffer, nil)
 	address := ipNetAddr(datagram.source)
 	if err != nil {
 		return n, address, c.operationError("read", err)
@@ -770,7 +770,54 @@ func (c *IPConn) ReadFrom(buffer []byte) (int, net.Addr, error) {
 
 // ReadFromIP acts like ReadFrom but returns an IPAddr.
 func (c *IPConn) ReadFromIP(buffer []byte) (int, *net.IPAddr, error) {
-	n, datagram, _, err := c.readDatagram(buffer)
+	n, datagram, _, err := c.readDatagram(buffer, nil)
+	address := ipNetAddr(datagram.source)
+	if err != nil {
+		return n, address, c.operationError("read", err)
+	}
+	return n, address, nil
+}
+
+// ReadFromWithBuffer reads the next protocol payload like ReadFrom, obtaining
+// the destination buffer lazily from getBuffer and returning its source
+// address.
+//
+// If a datagram is available, getBuffer is called once after it is dequeued.
+// It is not called when the operation returns before a datagram is available
+// because of an error or deadline. The callback receives the exposed datagram
+// length as an advisory size hint: this is the protocol payload length, or the
+// complete reassembled IP packet length when IPHeaderIncludedOnRead is enabled.
+// It runs without c's connection state lock and must return promptly; it must
+// not call a read method on c. The caller owns the returned slice, and c does
+// not retain it. A nil callback returns EINVAL. A short returned slice
+// truncates and consumes the datagram, matching ReadFrom.
+//
+// This is an experimental API and is not covered by the package's stability
+// guarantees.
+func (c *IPConn) ReadFromWithBuffer(getBuffer func(sizeHint int) []byte) (int, net.Addr, error) {
+	if getBuffer == nil {
+		return 0, nil, c.operationError("read", syscall.EINVAL)
+	}
+	n, datagram, _, err := c.readDatagram(nil, getBuffer)
+	address := ipNetAddr(datagram.source)
+	if err != nil {
+		return n, address, c.operationError("read", err)
+	}
+	return n, address, nil
+}
+
+// ReadFromIPWithBuffer is the *net.IPAddr form of ReadFromWithBuffer.
+//
+// It has the same callback, buffer ownership, truncation, and nil-callback
+// semantics as ReadFromWithBuffer.
+//
+// This is an experimental API and is not covered by the package's stability
+// guarantees.
+func (c *IPConn) ReadFromIPWithBuffer(getBuffer func(sizeHint int) []byte) (int, *net.IPAddr, error) {
+	if getBuffer == nil {
+		return 0, nil, c.operationError("read", syscall.EINVAL)
+	}
+	n, datagram, _, err := c.readDatagram(nil, getBuffer)
 	address := ipNetAddr(datagram.source)
 	if err != nil {
 		return n, address, c.operationError("read", err)
@@ -785,7 +832,7 @@ func (c *IPConn) ReadFromIP(buffer []byte) (int, *net.IPAddr, error) {
 func (c *IPConn) ReadMsgIP(buffer, oob []byte) (n, oobn, flags int, address *net.IPAddr, err error) {
 	var datagram ipDatagram
 	var truncated bool
-	n, datagram, truncated, err = c.readDatagram(buffer)
+	n, datagram, truncated, err = c.readDatagram(buffer, nil)
 	address = ipNetAddr(datagram.source)
 	if truncated {
 		flags |= MessageFlagTruncated
@@ -794,7 +841,11 @@ func (c *IPConn) ReadMsgIP(buffer, oob []byte) (n, oobn, flags int, address *net
 		err = c.operationError("read", err)
 		return
 	}
-	control, controlErr := controlMessageForRead(datagram.target, datagram.options)
+	var specDst netip.Addr
+	if datagram.target.Is4() {
+		specDst = c.stack.network.Load().inboundIPv4PacketInfoSource(datagram.source, datagram.target)
+	}
+	control, controlErr := controlMessageForRead(specDst, datagram.target, datagram.options)
 	if controlErr != nil {
 		err = c.operationError("read", controlErr)
 		return
@@ -818,9 +869,10 @@ func (c *IPConn) ReadBatch(messages []SocketMessage, flags int) (int, error) {
 	if flags&MessageFlagErrorQueue != 0 {
 		return c.readErrorBatch(messages, flags)
 	}
+	var network *networkState
 	for index := range messages {
 		wait := index == 0 && flags&MessageFlagDontWait == 0
-		err := c.readBatchMessage(&messages[index], flags, wait, index == 0)
+		err := c.readBatchMessage(&messages[index], flags, wait, index == 0, &network)
 		if err != nil {
 			// recvmmsg reports a completed prefix without the error that stopped
 			// the next message. A retry starting at index exposes that error.
@@ -835,8 +887,9 @@ func (c *IPConn) ReadBatch(messages []SocketMessage, flags int) (int, error) {
 
 // readBatchMessage receives one scatter/gather message without waiting when
 // wait is false. consumeErrors is false after a successful prefix so an
-// asynchronous error remains available to the next socket operation.
-func (c *IPConn) readBatchMessage(message *SocketMessage, flags int, wait, consumeErrors bool) error {
+// asynchronous error remains available to the next socket operation. network
+// caches one immutable configuration snapshot for IPv4 packet-info fields.
+func (c *IPConn) readBatchMessage(message *SocketMessage, flags int, wait, consumeErrors bool, network **networkState) error {
 	if _, err := messageBufferLength(message.Buffers); err != nil {
 		return c.operationError("read", err)
 	}
@@ -844,7 +897,14 @@ func (c *IPConn) readBatchMessage(message *SocketMessage, flags int, wait, consu
 	if err != nil {
 		return c.operationError("read", err)
 	}
-	control, err := controlMessageForRead(datagram.target, datagram.options)
+	var specDst netip.Addr
+	if datagram.target.Is4() {
+		if *network == nil {
+			*network = c.stack.network.Load()
+		}
+		specDst = (*network).inboundIPv4PacketInfoSource(datagram.source, datagram.target)
+	}
+	control, err := controlMessageForRead(specDst, datagram.target, datagram.options)
 	if err != nil {
 		return c.operationError("read", err)
 	}
@@ -862,7 +922,33 @@ func (c *IPConn) readBatchMessage(message *SocketMessage, flags int, wait, consu
 
 // Read receives from a connected remote endpoint.
 func (c *IPConn) Read(buffer []byte) (int, error) {
-	n, _, _, err := c.readDatagram(buffer)
+	n, _, _, err := c.readDatagram(buffer, nil)
+	if err != nil {
+		return n, c.operationError("read", err)
+	}
+	return n, nil
+}
+
+// ReadWithBuffer reads the next protocol payload from a connected remote
+// endpoint like Read, obtaining the destination buffer lazily from getBuffer.
+//
+// If a datagram is available, getBuffer is called once after it is dequeued.
+// It is not called when the operation returns before a datagram is available
+// because of an error or deadline. The callback receives the exposed datagram
+// length as an advisory size hint: this is the protocol payload length, or the
+// complete reassembled IP packet length when IPHeaderIncludedOnRead is enabled.
+// It runs without c's connection state lock and must return promptly; it must
+// not call a read method on c. The caller owns the returned slice, and c does
+// not retain it. A nil callback returns EINVAL. A short returned slice
+// truncates and consumes the datagram, matching Read.
+//
+// This is an experimental API and is not covered by the package's stability
+// guarantees.
+func (c *IPConn) ReadWithBuffer(getBuffer func(sizeHint int) []byte) (int, error) {
+	if getBuffer == nil {
+		return 0, c.operationError("read", syscall.EINVAL)
+	}
+	n, _, _, err := c.readDatagram(nil, getBuffer)
 	if err != nil {
 		return n, c.operationError("read", err)
 	}
@@ -870,7 +956,8 @@ func (c *IPConn) Read(buffer []byte) (int, error) {
 }
 
 // readDatagram returns one payload without adding the public operation wrapper.
-func (c *IPConn) readDatagram(buffer []byte) (n int, datagram ipDatagram, truncated bool, err error) {
+// A non-nil getBuffer obtains the destination after a datagram is dequeued.
+func (c *IPConn) readDatagram(buffer []byte, getBuffer func(sizeHint int) []byte) (n int, datagram ipDatagram, truncated bool, err error) {
 	for {
 		c.mu.Lock()
 		select {
@@ -886,12 +973,20 @@ func (c *IPConn) readDatagram(buffer []byte) (n int, datagram ipDatagram, trunca
 			return 0, ipDatagram{}, false, os.ErrDeadlineExceeded
 		default:
 		}
+		if pending := c.errorState.takePending(); pending != nil {
+			c.notifyReceiveLocked()
+			c.mu.Unlock()
+			return 0, ipDatagram{}, false, pending
+		}
 		queued, ok := c.receive.pop()
 		if ok {
 			datagram = queued
 			c.queuedBytes -= ipDatagramMetadataSize + len(datagram.payload)
 			c.notifyReceiveLocked()
 			c.mu.Unlock()
+			if getBuffer != nil {
+				buffer = getBuffer(len(datagram.payload))
+			}
 			n = copy(buffer, datagram.payload)
 			if cap(datagram.payload) != 0 && cap(datagram.payload) <= datagramReusablePayloadLimit {
 				c.mu.Lock()
@@ -905,14 +1000,6 @@ func (c *IPConn) readDatagram(buffer []byte) (n int, datagram ipDatagram, trunca
 				c.mu.Unlock()
 			}
 			return n, datagram, n < len(datagram.payload), nil
-		}
-		if !c.receiveErrors {
-			queuedError, queued := c.errorState.pop()
-			if queued {
-				c.notifyReceiveLocked()
-				c.mu.Unlock()
-				return 0, ipDatagram{}, false, queuedError.err
-			}
 		}
 		notified := c.receiveNotificationLocked()
 		if timeout == nil {
@@ -948,6 +1035,15 @@ func (c *IPConn) readDatagramBuffers(buffers [][]byte, wait, consumeErrors, peek
 			return 0, ipDatagram{}, false, os.ErrDeadlineExceeded
 		default:
 		}
+		if consumeErrors {
+			if pending := c.errorState.takePending(); pending != nil {
+				// Linux MSG_PEEK preserves data, but a pending socket error
+				// returned by the ordinary receive path is consumed.
+				c.notifyReceiveLocked()
+				c.mu.Unlock()
+				return 0, ipDatagram{}, false, pending
+			}
+		}
 		var queued ipDatagram
 		var ok bool
 		if peek {
@@ -979,17 +1075,6 @@ func (c *IPConn) readDatagramBuffers(buffers [][]byte, wait, consumeErrors, peek
 				c.mu.Unlock()
 			}
 			return n, datagram, truncated, nil
-		}
-		if !c.receiveErrors && consumeErrors {
-			var queued queuedSocketError
-			queued, ok = c.errorState.pop()
-			if ok {
-				// Linux MSG_PEEK preserves queued payloads but consumes a pending
-				// socket error returned by the ordinary receive path.
-				c.notifyReceiveLocked()
-				c.mu.Unlock()
-				return 0, ipDatagram{}, false, queued.err
-			}
 		}
 		if !wait {
 			c.mu.Unlock()
@@ -1045,7 +1130,8 @@ func (c *IPConn) readErrorBatch(messages []SocketMessage, flags int) (int, error
 	return len(messages), nil
 }
 
-// WriteTo sends one payload to an unconnected destination.
+// WriteTo sends one protocol payload or header-included packet to an
+// unconnected destination.
 func (c *IPConn) WriteTo(payload []byte, address net.Addr) (int, error) {
 	ipAddress, ok := address.(*net.IPAddr)
 	if !ok {
@@ -1076,7 +1162,8 @@ func (c *IPConn) WriteToIP(payload []byte, address *net.IPAddr) (int, error) {
 	return n, nil
 }
 
-// Write sends one payload to the connected endpoint.
+// Write sends one protocol payload or header-included packet to the connected
+// endpoint.
 func (c *IPConn) Write(payload []byte) (int, error) {
 	if !c.remote.IsValid() {
 		return 0, c.operationError("write", errors.New("mipstack: IP socket is not connected"))
@@ -1149,9 +1236,9 @@ func (c *IPConn) ConfirmPathMTUFor(target netip.Addr, mtu int) error {
 	return nil
 }
 
-// WriteMsgIP writes one payload with Linux-compatible source, hop-limit, and
-// traffic-class ancillary data. Like net.IPConn, it requires an unconnected
-// socket and a non-nil destination.
+// WriteMsgIP writes one protocol payload or header-included packet with
+// Linux-compatible source, hop-limit, and traffic-class ancillary data. Like
+// net.IPConn, it requires an unconnected socket and a non-nil destination.
 func (c *IPConn) WriteMsgIP(payload, oob []byte, address *net.IPAddr) (n, oobn int, err error) {
 	netAddress := ipAddrNet(address)
 	if c.remote.IsValid() {
@@ -1185,10 +1272,10 @@ func (c *IPConn) WriteMsgIP(payload, oob []byte, address *net.IPAddr) (n, oobn i
 	return n, len(oob), nil
 }
 
-// WriteBatch writes a prefix of IP protocol messages using scatter/gather
-// payloads. MessageFlagDontWait is accepted for Linux compatibility; device
-// admission is already nonblocking for every datagram write. Other flags are
-// unsupported.
+// WriteBatch writes a prefix of IP payloads or header-included packets using
+// scatter/gather buffers. MessageFlagDontWait is accepted for Linux
+// compatibility; device admission is already nonblocking for every datagram
+// write. Other flags are unsupported.
 func (c *IPConn) WriteBatch(messages []SocketMessage, flags int) (int, error) {
 	if flags&^MessageFlagDontWait != 0 {
 		return 0, c.operationError("write", syscall.EOPNOTSUPP)
@@ -1201,7 +1288,7 @@ func (c *IPConn) WriteBatch(messages []SocketMessage, flags int) (int, error) {
 		n, oobn, err := c.writeBatchMessage(message)
 		if err != nil {
 			// sendmmsg reports a completed prefix without the error that stopped
-			// the next message. A retry starting at index exposes that error.
+			// the next message. Validation errors recur on a retry.
 			if index != 0 {
 				return index, nil
 			}
@@ -1368,7 +1455,7 @@ func (c *IPConn) writeTo(payload []byte, target netip.Addr, packetInfoSource net
 // packet. target selects the route while the supplied IP header remains the
 // packet delivered on the wire, matching Linux header-included raw sockets.
 func (c *IPConn) writeHeaderIncluded(input []byte, target, packetInfoSource netip.Addr, options ipPacketOptions) (int, error) {
-	parameters, err := c.prepareWrite(target, packetInfoSource, options)
+	parameters, err := c.prepareWrite(target, packetInfoSource, options, true)
 	if err != nil {
 		return 0, err
 	}
@@ -1389,7 +1476,7 @@ func (c *IPConn) writeHeaderIncluded(input []byte, target, packetInfoSource neti
 		err = c.stack.tryWriteNonUnicastPacket(len(input), external, loopback, func(destination []byte) bool {
 			c.marshalHeaderIncludedPacket(destination, input, layout)
 			return true
-		})
+		}, false)
 	} else {
 		queue, loopback := c.stack.outputQueueFor(parameters.target)
 		var slot uint16
@@ -1406,7 +1493,7 @@ func (c *IPConn) writeHeaderIncluded(input []byte, target, packetInfoSource neti
 				packet, reusable = c.stack.acquireLargeOutputBuffer(len(input))
 			}
 			c.marshalHeaderIncludedPacket(packet, input, layout)
-			if !queue.enqueueReservedPacket(slot, packet, reusable) {
+			if !queue.enqueueReservedPacket(slot, packet, reusable, false) {
 				err = ErrClosed
 			} else {
 				c.stack.recordOutput(loopback)
@@ -1497,14 +1584,17 @@ func (c *IPConn) marshalHeaderIncludedPacket(destination, input []byte, layout h
 
 // prepareWrite snapshots socket policy and selects the source for one output
 // operation without retaining any caller payload.
-func (c *IPConn) prepareWrite(target, packetInfoSource netip.Addr, options ipPacketOptions) (ipWriteParameters, error) {
+func (c *IPConn) prepareWrite(target, packetInfoSource netip.Addr, options ipPacketOptions, headerIncluded bool) (ipWriteParameters, error) {
 	target, err := c.validateWriteTarget(target)
 	if err != nil {
 		return ipWriteParameters{}, err
 	}
-	options, pathMTUDiscovery, checksumOffset, receiveErrors := c.writeOptions(options)
 	if err = c.writeError(); err != nil {
 		return ipWriteParameters{}, err
+	}
+	options, pathMTUDiscovery, checksumOffset, receiveErrors, pendingErr := c.writeOptions(options, headerIncluded)
+	if pendingErr != nil {
+		return ipWriteParameters{}, pendingErr
 	}
 	requestedSource := c.local
 	packetInfoSource = packetInfoSource.Unmap()
@@ -1551,7 +1641,7 @@ func setIPv6PayloadChecksum(payload []byte, source, target netip.Addr, protocol 
 // writeToWith keeps routing, checksums, deadlines, accounting, and ICMP
 // correlation shared between ordinary writes and PLPMTUD probes.
 func (c *IPConn) writeToWith(payload []byte, target netip.Addr, packetInfoSource netip.Addr, options ipPacketOptions, write ipPayloadWriter) (int, error) {
-	parameters, err := c.prepareWrite(target, packetInfoSource, options)
+	parameters, err := c.prepareWrite(target, packetInfoSource, options, false)
 	if err != nil {
 		return 0, err
 	}
@@ -1581,7 +1671,7 @@ func (c *IPConn) writeToWith(payload []byte, target netip.Addr, packetInfoSource
 // fitting unicast packet is assembled directly in queue-owned storage;
 // fragmentation and non-unicast output retain the established path.
 func (c *IPConn) writeBuffersTo(buffers [][]byte, payloadSize int, target, packetInfoSource netip.Addr, options ipPacketOptions) (int, error) {
-	parameters, err := c.prepareWrite(target, packetInfoSource, options)
+	parameters, err := c.prepareWrite(target, packetInfoSource, options, false)
 	if err != nil {
 		return 0, err
 	}
@@ -1693,7 +1783,7 @@ func (c *IPConn) writePayloadBuffersForMTU(source, target netip.Addr, buffers []
 		queue.releaseReserved(slot)
 		return err
 	}
-	if !queue.enqueueReservedPacket(slot, packet, reusable) {
+	if !queue.enqueueReservedPacket(slot, packet, reusable, false) {
 		return ErrClosed
 	}
 	c.stack.recordOutput(loopback)
@@ -2019,13 +2109,19 @@ func (c *IPConn) SetReadBuffer(bytes int) error {
 	return nil
 }
 
-// SetReceiveErrors controls whether asynchronous network errors are reserved
+// SetReceiveErrors controls whether asynchronous network errors are retained
 // for ReadError. It also makes a write fail with ENOBUFS when immediate
 // admission of unicast output or the external-link copy of multicast or
 // broadcast output fails. It does not report packets displaced after admission.
-// Receive-side non-unicast loopback copies remain best effort. When disabled,
-// the default, ordinary reads return queued errors after any already queued
-// payloads and an immediate output admission failure is silent.
+// Receive-side non-unicast loopback copies remain best effort. By default,
+// unconnected sockets do not report asynchronous ICMP errors, although
+// correlated PMTU updates still apply. Connected sockets report hard errors
+// on ordinary reads before queued payloads and on header-included writes;
+// protocol-payload writes leave pending errors for reads. When enabled,
+// eligible soft errors follow the same ordinary-operation policy and reach
+// ReadError.
+// Disabling the option clears the extended queue but preserves a pending
+// ordinary error. When disabled, immediate output admission failures are silent.
 func (c *IPConn) SetReceiveErrors(enabled bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -2033,16 +2129,20 @@ func (c *IPConn) SetReceiveErrors(enabled bool) error {
 	case <-c.closed:
 		return c.setOperationError(net.ErrClosed)
 	default:
+		if c.receiveErrors && !enabled {
+			c.errorState.purgeQueue()
+		}
 		c.receiveErrors = enabled
 		c.notifyReceiveLocked()
 		return nil
 	}
 }
 
-// ReceiveErrors reports whether asynchronous errors are reserved for
-// ReadError instead of being returned by ordinary reads and whether immediate
-// failure to admit unicast or external-link non-unicast output is reported as
-// ENOBUFS.
+// ReceiveErrors reports whether asynchronous errors are retained for
+// ReadError. When disabled, unconnected sockets do not report those errors;
+// connected sockets report hard errors on reads or header-included writes.
+// It also reports whether immediate failure to admit unicast or external-link
+// non-unicast output is reported as ENOBUFS.
 func (c *IPConn) ReceiveErrors() (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -2056,8 +2156,8 @@ func (c *IPConn) ReceiveErrors() (bool, error) {
 
 // ReadError returns the oldest queued asynchronous network error without
 // blocking. An empty queue reports EAGAIN, like a Linux MSG_ERRQUEUE read on a
-// nonblocking descriptor. SetReceiveErrors(true) prevents ordinary reads from
-// racing this method for queued errors.
+// nonblocking descriptor. Ordinary operations may consume the pending socket
+// error without removing this entry from the extended error queue.
 func (c *IPConn) ReadError() (*net.OpError, error) {
 	c.mu.Lock()
 	select {
@@ -2222,10 +2322,7 @@ func (c *IPConn) acceptsPathMTU() bool {
 }
 
 // deliverError queues one correlated asynchronous network error.
-func (c *IPConn) deliverError(target netip.Addr, err error) {
-	operationError := &net.OpError{
-		Op: "read", Net: c.net, Source: c.LocalAddr(), Addr: ipNetAddr(target), Err: err,
-	}
+func (c *IPConn) deliverError(target netip.Addr, networkError ICMPError) {
 	c.mu.Lock()
 	select {
 	case <-c.closed:
@@ -2233,42 +2330,65 @@ func (c *IPConn) deliverError(target netip.Addr, err error) {
 		return
 	default:
 	}
+	// Linux raw_err/rawv6_err keep a single ordinary pending error while
+	// IP_RECVERR/IPV6_RECVERR additionally retain the extended error queue.
+	// Correlated PMTU updates are independent of this reporting decision.
+	pending, queued := linuxDatagramICMPReport(networkError, c.remote.IsValid(), c.receiveErrors, true, c.pathMTUDiscovery)
+	if !pending {
+		c.mu.Unlock()
+		return
+	}
+	operationError := &net.OpError{
+		Op: "read", Net: c.net, Source: c.LocalAddr(), Addr: ipNetAddr(target), Err: networkError,
+	}
 	if c.errorState == nil {
 		c.errorState = &datagramSocketErrorState{}
 	}
 	errorState := c.errorState
 	errorState.lastError = operationError
-	size := socketErrorSize(err)
-	if size > c.receiveCapacity || c.queuedBytes+errorState.queuedBytes > c.receiveCapacity-size {
-		errorState.icmpErrors++
-		errorState.dropped++
+	errorState.pending = operationError
+	errorState.icmpErrors++
+	if !queued {
+		c.notifyReceiveLocked()
 		c.mu.Unlock()
 		return
 	}
-	var payload []byte
-	var networkError ICMPError
-	if errors.As(err, &networkError) {
-		payload = networkError.QuotedPayload
-		if c.ipHeaderIncludedOnWrite.Load() && len(networkError.QuotedPacket) != 0 {
-			payload = networkError.QuotedPacket
-		}
+	size := socketErrorSize(networkError)
+	if size > c.receiveCapacity || c.queuedBytes+errorState.queuedBytes > c.receiveCapacity-size {
+		errorState.dropped++
+		c.notifyReceiveLocked()
+		c.mu.Unlock()
+		return
+	}
+	payload := networkError.QuotedPayload
+	if c.ipHeaderIncludedOnWrite.Load() && len(networkError.QuotedPacket) != 0 {
+		payload = networkError.QuotedPacket
 	}
 	errorState.push(queuedSocketError{err: operationError, payload: payload, size: size})
-	errorState.icmpErrors++
 	c.notifyReceiveLocked()
 	c.mu.Unlock()
 }
 
-// writeOptions snapshots the output defaults, PMTU policy, raw IPv6 checksum
-// offset, and local-error reporting mode for one nonblocking admission attempt.
-func (c *IPConn) writeOptions(options ipPacketOptions) (ipPacketOptions, PathMTUDiscovery, int, bool) {
+// writeOptions snapshots output policy under one lock. Linux header-included
+// raw sends consume sk_err during send-buffer allocation; payload sends do not.
+func (c *IPConn) writeOptions(options ipPacketOptions, headerIncluded bool) (ipPacketOptions, PathMTUDiscovery, int, bool, error) {
 	c.mu.Lock()
 	options = options.withDefaults(c.defaultOptions)
 	pathMTUDiscovery := c.pathMTUDiscovery
 	checksumOffset := c.ipv6ChecksumOffset
 	receiveErrors := c.receiveErrors
+	var pending *net.OpError
+	if headerIncluded {
+		pending = c.errorState.takePending()
+	}
+	if pending != nil {
+		c.notifyReceiveLocked()
+	}
 	c.mu.Unlock()
-	return options, pathMTUDiscovery, checksumOffset, receiveErrors
+	if pending != nil {
+		return options, pathMTUDiscovery, checksumOffset, receiveErrors, pending.Err
+	}
+	return options, pathMTUDiscovery, checksumOffset, receiveErrors, nil
 }
 
 // operationError wraps an error for the bound or connected socket.

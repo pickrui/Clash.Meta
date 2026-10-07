@@ -147,10 +147,31 @@ func (state *tcpPassiveState) validateSYNCookie(key tcpKey, ack tcpSegment, now 
 	serverSequence := ack.acknowledgement - 1
 	clientSequence := ack.sequence - 1
 	data := serverSequence & synCookieDataMask
-	timestampValue, timestampEcho, timestamp := parseTCPTimestamp(ack.optionBytes())
-	ecn := timestamp && timestampEcho&1 != 0
-	authenticatedData := synCookieAuthenticatedData(data, timestamp, ecn)
+	timestampValue, timestampEcho, timestampPresent := parseTCPTimestamp(ack.optionBytes())
+	// Linux accepts a final ACK whose negotiated Timestamp option was removed
+	// in flight. Such an ACK cannot reveal whether the SYN-cookie was created
+	// with timestamps or ECN, so authenticate the three possible states (TS with
+	// ECN, TS without ECN, and no TS). A present zero TSecr is a separate Linux
+	// compatibility case: it proves that Timestamp was present but carries no
+	// recoverable ECN bit, so authenticate both ECN states and restore the
+	// connection with the conservative option values below.
+	var candidates [3]struct{ timestamp, ecn bool }
+	candidateCount := 1
+	if timestampPresent {
+		candidates[0] = struct{ timestamp, ecn bool }{timestamp: true, ecn: timestampEcho&1 != 0}
+		if timestampEcho == 0 {
+			candidates[0] = struct{ timestamp, ecn bool }{timestamp: true, ecn: true}
+			candidates[1] = struct{ timestamp, ecn bool }{timestamp: true}
+			candidateCount = 2
+		}
+	} else {
+		candidates[0] = struct{ timestamp, ecn bool }{timestamp: true, ecn: true}
+		candidates[1] = struct{ timestamp, ecn bool }{timestamp: true}
+		candidates[2] = struct{ timestamp, ecn bool }{}
+		candidateCount = len(candidates)
+	}
 	valid := false
+	matchedTimestamp, matchedECN := false, false
 	localWindowScale := uint8(0)
 	for attempt := uint64(0); attempt < 2; attempt++ {
 		if attempt > period {
@@ -167,10 +188,16 @@ func (state *tcpPassiveState) validateSYNCookie(key tcpKey, ack tcpSegment, now 
 		if !scaleFound {
 			continue
 		}
-		expected := synCookieSequence(secret, key, clientSequence, candidatePeriod, data, authenticatedData)
-		if subtle.ConstantTimeEq(int32(expected), int32(serverSequence)) == 1 {
-			valid = true
-			localWindowScale = candidateScale
+		for candidateIndex := 0; candidateIndex < candidateCount; candidateIndex++ {
+			candidate := candidates[candidateIndex]
+			authenticatedData := synCookieAuthenticatedData(data, candidate.timestamp, candidate.ecn)
+			expected := synCookieSequence(secret, key, clientSequence, candidatePeriod, data, authenticatedData)
+			if subtle.ConstantTimeEq(int32(expected), int32(serverSequence)) == 1 {
+				valid = true
+				matchedTimestamp = candidate.timestamp
+				matchedECN = candidate.ecn
+				localWindowScale = candidateScale
+			}
 		}
 	}
 	if !valid {
@@ -180,10 +207,31 @@ func (state *tcpPassiveState) validateSYNCookie(key tcpKey, ack tcpSegment, now 
 	if !ok {
 		return 0, synCookieOptions{}, false, true
 	}
-	options.timestamp = timestamp
-	options.timestampNow = timestampValue
-	options.ecn = ecn
+	options.timestamp = timestampPresent && matchedTimestamp
+	if options.timestamp {
+		options.timestampNow = timestampValue
+	}
+	options.ecn = timestampPresent && timestampEcho != 0 && matchedECN
 	options.localWindowScale = localWindowScale
+	if !timestampPresent {
+		// Linux does not restore SACK or window scaling when
+		// cookie_timestamp_decode sees no Timestamp in the final ACK. MSS remains
+		// reconstructible from the authenticated cookie; Timestamp and ECN remain
+		// disabled because the ACK did not prove that either option was negotiated.
+		options.sack = false
+		options.windowScaling = false
+		options.windowScale = 0
+		options.localWindowScale = 0
+	} else if timestampEcho == 0 {
+		// RFC 7323 requires an ACK to echo a recently received TSval once
+		// timestamps are negotiated. Linux accepts a zero TSecr as a
+		// compatibility case: Timestamp remains enabled, while SACK and ECN
+		// are disabled and the peer window scale becomes zero. The local
+		// receive scale is independent of this echoed cookie field.
+		options.sack = false
+		options.windowScaling = true
+		options.windowScale = 0
+	}
 	return serverSequence, options, true, true
 }
 

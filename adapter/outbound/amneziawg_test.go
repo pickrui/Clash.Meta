@@ -4,19 +4,15 @@ package outbound
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
-	"net/netip"
 	"testing"
 
 	amnezia "github.com/metacubex/amneziawg-go/device_v1"
-	M "github.com/metacubex/sing/common/metadata"
 )
 
-// Configure the production userspace adapter without starting its TUN or bind.
-// No operating-system interface, endpoint connection or handshake is created.
+// The test bind rejects network dials; the stack stays entirely in userspace.
 func newAmneziaPacketDevice(t *testing.T) *amnezia.Device {
 	t.Helper()
 	w, err := NewWireGuard(WireGuardOption{
@@ -29,14 +25,7 @@ func newAmneziaPacketDevice(t *testing.T) *amnezia.Device {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = w.Close() })
-	w.serverAddrMap = make(map[M.Socksaddr]netip.AddrPort)
-	config, err := w.genIpcConf(context.Background(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := w.device.IpcSet(config); err != nil {
-		t.Fatal(err)
-	}
+	initTestWireGuard(t, w)
 	device, ok := w.device.(*amnezia.Device)
 	if !ok {
 		t.Fatalf("adapter created %T, want AmneziaWG", w.device)

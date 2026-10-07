@@ -902,7 +902,7 @@ func TestTCPReadBufferAdoptsOwnedPayload(t *testing.T) {
 		t.Fatal("empty receive buffer did not adopt actor-owned payload")
 	}
 	buffer := make([]byte, len(payload))
-	if n, err := connection.read(buffer); err != nil || n != len(payload) || string(buffer) != "data" {
+	if n, err := connection.Read(buffer); err != nil || n != len(payload) || string(buffer) != "data" {
 		t.Fatalf("Read = %d, %q, %v; want 4, data, nil", n, buffer, err)
 	}
 }
@@ -920,6 +920,339 @@ func TestTCPReadCrossesReceiveChunks(t *testing.T) {
 	}
 	if connection.readBuffer.size != 0 || connection.readBuffer.head != 0 || len(connection.readBuffer.chunks) != 0 {
 		t.Fatalf("drained receive deque = size %d head %d chunks %d", connection.readBuffer.size, connection.readBuffer.head, len(connection.readBuffer.chunks))
+	}
+}
+
+func TestTCPReadWithBufferAllocatesOnlyForAvailableData(t *testing.T) {
+	connection := newTCPConn(nil, "tcp4", tcpKey{}, 1500, tcpSocketOptionSet{})
+	started := make(chan struct{})
+	result := make(chan struct {
+		n   int
+		err error
+	}, 1)
+	var provided []byte
+	var sizeHint int
+	callbackCalls := 0
+	callbackCalled := make(chan struct{}, 1)
+	go func() {
+		close(started)
+		n, err := connection.ReadWithBuffer(func(hint int) []byte {
+			callbackCalls++
+			sizeHint = hint
+			callbackCalled <- struct{}{}
+			provided = make([]byte, 5)
+			return provided
+		})
+		result <- struct {
+			n   int
+			err error
+		}{n: n, err: err}
+	}()
+	<-started
+	select {
+	case <-result:
+		t.Fatal("ReadWithBuffer returned before data was available")
+	case <-callbackCalled:
+		t.Fatal("buffer callback ran before data was available")
+	case <-time.After(20 * time.Millisecond):
+	}
+	if accepted := connection.appendReadBuffer([]byte("hello world"), []byte("hello world"), 0); accepted != len("hello world") {
+		t.Fatalf("accepted = %d, want %d", accepted, len("hello world"))
+	}
+	var readResult struct {
+		n   int
+		err error
+	}
+	select {
+	case readResult = <-result:
+	case <-time.After(time.Second):
+		t.Fatal("ReadWithBuffer did not return after data arrived")
+	}
+	if readResult.n != 5 || readResult.err != nil || callbackCalls != 1 || sizeHint != len("hello world") || string(provided) != "hello" {
+		t.Fatalf("ReadWithBuffer = %d, %v, buffer %q, callback calls %d, size hint %d; want 5, nil, hello, 1, %d", readResult.n, readResult.err, provided, callbackCalls, sizeHint, len("hello world"))
+	}
+	var remaining []byte
+	remainingHint := 0
+	n, err := connection.ReadWithBuffer(func(hint int) []byte {
+		remainingHint = hint
+		remaining = make([]byte, 6)
+		return remaining
+	})
+	if n != len(remaining) || err != nil || remainingHint != len(remaining) || string(remaining) != " world" {
+		t.Fatalf("remaining ReadWithBuffer = %d, %v, %q, size hint %d; want 6, nil, ' world', 6", n, err, remaining, remainingHint)
+	}
+}
+
+func TestTCPReadWithBufferEmptyBufferDoesNotConsume(t *testing.T) {
+	connection := newTCPConn(nil, "tcp4", tcpKey{}, 1500, tcpSocketOptionSet{})
+	payload := []byte("preserved")
+	if accepted := connection.appendReadBuffer(payload, payload, 0); accepted != len(payload) {
+		t.Fatalf("accepted = %d, want %d", accepted, len(payload))
+	}
+	callbackCalls := 0
+	sizeHint := 0
+	n, err := connection.ReadWithBuffer(func(hint int) []byte {
+		callbackCalls++
+		sizeHint = hint
+		return nil
+	})
+	if n != 0 || !errors.Is(err, io.ErrShortBuffer) || callbackCalls != 1 || sizeHint != len(payload) {
+		t.Fatalf("empty-buffer ReadWithBuffer = %d, %v, callback calls %d, size hint %d; want 0, ErrShortBuffer, 1, %d", n, err, callbackCalls, sizeHint, len(payload))
+	}
+	buffer := make([]byte, len(payload))
+	if n, err = connection.Read(buffer); n != len(buffer) || err != nil || string(buffer) != string(payload) {
+		t.Fatalf("data after empty-buffer ReadWithBuffer = %d, %v, %q; want %d, nil, %q", n, err, buffer, len(payload), payload)
+	}
+}
+
+func TestTCPReadWithBufferReportsFullQueuedSize(t *testing.T) {
+	connection := newTCPConn(nil, "tcp4", tcpKey{}, 1500, tcpSocketOptionSet{})
+	payload := bytes.Repeat([]byte{'x'}, 64*1024+1)
+	if accepted := connection.appendReadBuffer(payload, payload, 0); accepted != len(payload) {
+		t.Fatalf("accepted = %d, want %d", accepted, len(payload))
+	}
+	var sizeHint int
+	n, err := connection.ReadWithBuffer(func(hint int) []byte {
+		sizeHint = hint
+		return make([]byte, 1)
+	})
+	if n != 1 || err != nil || sizeHint != len(payload) {
+		t.Fatalf("ReadWithBuffer = %d, %v, size hint %d; want 1, nil, %d", n, err, sizeHint, len(payload))
+	}
+}
+
+func TestTCPReadWithBufferCrossesReceiveChunks(t *testing.T) {
+	connection := newTCPConn(nil, "tcp4", tcpKey{}, 1500, tcpSocketOptionSet{})
+	for _, payload := range [][]byte{[]byte("one"), []byte("two"), []byte("three")} {
+		if accepted := connection.appendReadBuffer(payload, payload, 0); accepted != len(payload) {
+			t.Fatalf("accepted %d of %d bytes", accepted, len(payload))
+		}
+	}
+	var buffer []byte
+	sizeHint := 0
+	n, err := connection.ReadWithBuffer(func(hint int) []byte {
+		sizeHint = hint
+		buffer = make([]byte, len("onetwothree"))
+		return buffer
+	})
+	if n != len(buffer) || err != nil || sizeHint != len(buffer) || string(buffer) != "onetwothree" {
+		t.Fatalf("cross-chunk ReadWithBuffer = %d, %v, %q, size hint %d; want 11, nil, onetwothree, %d", n, err, buffer, sizeHint, len(buffer))
+	}
+}
+
+func TestTCPReadWithBufferTerminalStatesDoNotCallCallback(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*TCPConn)
+		want  error
+	}{
+		{name: "EOF", setup: func(c *TCPConn) { c.readErr = io.EOF }, want: io.EOF},
+		{name: "reset", setup: func(c *TCPConn) { c.readErr = syscall.ECONNRESET }, want: syscall.ECONNRESET},
+		{name: "read closed", setup: func(c *TCPConn) { c.readClosed = true; c.readErr = net.ErrClosed }, want: net.ErrClosed},
+		{name: "user closed", setup: func(c *TCPConn) { c.userClosed = true }, want: net.ErrClosed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			connection := newTCPConn(nil, "tcp4", tcpKey{}, 1500, tcpSocketOptionSet{})
+			connection.mu.Lock()
+			test.setup(connection)
+			connection.mu.Unlock()
+			callbackCalls := 0
+			n, err := connection.ReadWithBuffer(func(_ int) []byte {
+				callbackCalls++
+				return make([]byte, 1)
+			})
+			if n != 0 || !errors.Is(err, test.want) || callbackCalls != 0 {
+				t.Fatalf("ReadWithBuffer = %d, %v, callback calls %d; want 0, %v, 0", n, err, callbackCalls, test.want)
+			}
+		})
+	}
+}
+
+func TestTCPReadWithBufferExpiredDeadlineDoesNotCallCallback(t *testing.T) {
+	connection := newTCPConn(nil, "tcp4", tcpKey{}, 1500, tcpSocketOptionSet{})
+	payload := []byte("deadline data")
+	if accepted := connection.appendReadBuffer(payload, payload, 0); accepted != len(payload) {
+		t.Fatalf("accepted = %d, want %d", accepted, len(payload))
+	}
+	if err := connection.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	callbackCalls := 0
+	n, err := connection.ReadWithBuffer(func(_ int) []byte {
+		callbackCalls++
+		return make([]byte, 1)
+	})
+	if n != 0 || !errors.Is(err, os.ErrDeadlineExceeded) || callbackCalls != 0 {
+		t.Fatalf("expired-deadline ReadWithBuffer = %d, %v, callback calls %d; want 0, deadline, 0", n, err, callbackCalls)
+	}
+	if err := connection.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, len(payload))
+	if n, err := connection.Read(buffer); n != len(payload) || err != nil || string(buffer) != string(payload) {
+		t.Fatalf("data after expired-deadline ReadWithBuffer = %d, %v, %q; want %d, nil, %q", n, err, buffer, len(payload), payload)
+	}
+}
+
+func TestTCPReadWithBufferDataPrecedesEOF(t *testing.T) {
+	connection := newTCPConn(nil, "tcp4", tcpKey{}, 1500, tcpSocketOptionSet{})
+	payload := []byte("data")
+	if accepted := connection.appendReadBuffer(payload, payload, 0); accepted != len(payload) {
+		t.Fatalf("accepted = %d, want %d", accepted, len(payload))
+	}
+	connection.mu.Lock()
+	connection.readErr = io.EOF
+	connection.mu.Unlock()
+	callbackCalls := 0
+	buffer := []byte(nil)
+	sizeHint := 0
+	n, err := connection.ReadWithBuffer(func(hint int) []byte {
+		callbackCalls++
+		sizeHint = hint
+		buffer = make([]byte, len(payload))
+		return buffer
+	})
+	if n != len(payload) || err != nil || callbackCalls != 1 || sizeHint != len(payload) || string(buffer) != string(payload) {
+		t.Fatalf("data ReadWithBuffer = %d, %v, %q, callback calls %d, size hint %d; want %d, nil, %q, 1, %d", n, err, buffer, callbackCalls, sizeHint, len(payload), payload, len(payload))
+	}
+	if n, err = connection.ReadWithBuffer(func(_ int) []byte {
+		callbackCalls++
+		return make([]byte, 1)
+	}); n != 0 || err != io.EOF || callbackCalls != 1 {
+		t.Fatalf("EOF ReadWithBuffer = %d, %v, callback calls %d; want 0, EOF, 1", n, err, callbackCalls)
+	}
+}
+
+func TestTCPReadWithBufferCallbackRunsOutsideConnectionLock(t *testing.T) {
+	connection := newTCPConn(nil, "tcp4", tcpKey{}, 1500, tcpSocketOptionSet{})
+	payload := []byte("callback")
+	if accepted := connection.appendReadBuffer(payload, payload, 0); accepted != len(payload) {
+		t.Fatalf("accepted = %d, want %d", accepted, len(payload))
+	}
+	buffer := []byte(nil)
+	n, err := connection.ReadWithBuffer(func(hint int) []byte {
+		if hint != len(payload) {
+			t.Fatalf("ReadWithBuffer size hint = %d; want %d", hint, len(payload))
+		}
+		if deadlineErr := connection.SetReadDeadline(time.Time{}); deadlineErr != nil {
+			t.Fatalf("SetReadDeadline in buffer callback = %v", deadlineErr)
+		}
+		buffer = make([]byte, len(payload))
+		return buffer
+	})
+	if n != len(payload) || err != nil || string(buffer) != string(payload) {
+		t.Fatalf("ReadWithBuffer = %d, %v, %q; want %d, nil, %q", n, err, buffer, len(payload), payload)
+	}
+}
+
+func TestTCPReadWithBufferCallbackCanRaceCloseRead(t *testing.T) {
+	connection := newTCPConn(nil, "tcp4", tcpKey{}, 1500, tcpSocketOptionSet{})
+	payload := []byte("callback close")
+	if accepted := connection.appendReadBuffer(payload, payload, 0); accepted != len(payload) {
+		t.Fatalf("accepted = %d, want %d", accepted, len(payload))
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	result := make(chan struct {
+		n        int
+		err      error
+		provided []byte
+		sizeHint int
+	}, 1)
+	go func() {
+		var provided []byte
+		sizeHint := 0
+		n, err := connection.ReadWithBuffer(func(hint int) []byte {
+			sizeHint = hint
+			close(entered)
+			<-release
+			provided = make([]byte, len(payload))
+			return provided
+		})
+		result <- struct {
+			n        int
+			err      error
+			provided []byte
+			sizeHint int
+		}{n: n, err: err, provided: provided, sizeHint: sizeHint}
+	}()
+	<-entered
+	closed := make(chan error, 1)
+	go func() { closed <- connection.CloseRead() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("CloseRead during buffer callback = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("CloseRead blocked during buffer callback")
+	}
+	close(release)
+	select {
+	case readResult := <-result:
+		if readResult.n != 0 || !errors.Is(readResult.err, net.ErrClosed) || readResult.provided == nil || readResult.sizeHint != len(payload) {
+			t.Fatalf("ReadWithBuffer after CloseRead = %d, %v, buffer nil=%v, size hint %d; want 0, closed, non-nil buffer, %d", readResult.n, readResult.err, readResult.provided == nil, readResult.sizeHint, len(payload))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReadWithBuffer did not return after CloseRead")
+	}
+}
+
+func TestTCPReadWithBufferUsesEstablishedReceivePath(t *testing.T) {
+	clientAddress := netip.MustParseAddr("192.0.2.221")
+	serverAddress := netip.MustParseAddr("192.0.2.222")
+	client, server := newStackPair(t, clientAddress, serverAddress, 1400)
+	newStackBridge(t, client, server)
+	listener, err := server.ListenTCP(context.Background(), "tcp4", netip.AddrPortFrom(serverAddress, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			accepted <- nil
+			return
+		}
+		accepted <- connection
+	}()
+	clientConnection, err := client.DialTCP(context.Background(), "tcp4", netip.AddrPort{}, listener.Addr().(*net.TCPAddr).AddrPort())
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverConnection := <-accepted
+	if serverConnection == nil {
+		t.Fatal("server did not accept connection")
+	}
+	defer clientConnection.Close()
+	defer serverConnection.Close()
+	defer listener.Close()
+	payload := []byte("established receive path")
+	if _, err = clientConnection.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	var buffer []byte
+	sizeHint := 0
+	n, err := serverConnection.(*TCPConn).ReadWithBuffer(func(hint int) []byte {
+		sizeHint = hint
+		buffer = make([]byte, len(payload))
+		return buffer
+	})
+	if n != len(payload) || err != nil || sizeHint != len(payload) || string(buffer) != string(payload) {
+		t.Fatalf("ReadWithBuffer = %d, %v, %q, size hint %d; want %d, nil, %q, %d", n, err, buffer, sizeHint, len(payload), payload, len(payload))
+	}
+}
+
+func TestTCPReadWithBufferRejectsNilCallback(t *testing.T) {
+	connection := newTCPConn(nil, "tcp4", tcpKey{}, 1500, tcpSocketOptionSet{})
+	n, err := connection.ReadWithBuffer(nil)
+	if n != 0 || !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("nil callback ReadWithBuffer = %d, %v; want 0, EINVAL", n, err)
+	}
+	var operationError *net.OpError
+	if !errors.As(err, &operationError) || operationError.Op != "read" || operationError.Net != "tcp4" {
+		t.Fatalf("nil callback error = %T %v; want read tcp4 OpError", err, err)
 	}
 }
 
@@ -1374,7 +1707,8 @@ func TestTCPTimeWaitSYNAdmission(t *testing.T) {
 			state := &tcpEstablishedState{connection: connection, receiveNext: 500, lastTimestampUpdate: test.lastTimestampUpdate}
 			segment := tcpSegment{sequence: test.sequence, flags: TCPFlagSYN, optionLength: uint8(len(test.options))}
 			copy(segment.options[:], test.options)
-			got := state.handleTimeWaitSegment(segment, time.Now())
+			now := time.Now()
+			got := state.handleTimeWaitSegment(segment, now, now)
 			if got != test.replace {
 				t.Fatalf("TIME-WAIT SYN replacement = %v, want %v", got, test.replace)
 			}
@@ -1401,15 +1735,191 @@ func TestTCPTimeWaitDoesNotLearnTimestampFromOutOfWindow(t *testing.T) {
 	}
 	outOfWindow := tcpSegment{sequence: 100, flags: TCPFlagACK, optionLength: 12}
 	copy(outOfWindow.options[:], tcpTimestampOptions(200, 0))
-	state.handleTimeWaitSegment(outOfWindow, now)
+	state.handleTimeWaitSegment(outOfWindow, now, now)
 	if connection.recentTimestamp != 100 {
 		t.Fatalf("out-of-window TS.Recent = %d, want 100", connection.recentTimestamp)
 	}
 	inWindow := tcpSegment{sequence: 500, flags: TCPFlagACK, optionLength: 12}
 	copy(inWindow.options[:], tcpTimestampOptions(200, 0))
-	state.handleTimeWaitSegment(inWindow, now)
+	state.handleTimeWaitSegment(inWindow, now, now)
 	if connection.recentTimestamp != 200 {
 		t.Fatalf("in-window TS.Recent = %d, want 200", connection.recentTimestamp)
+	}
+}
+
+func TestTCPTimeWaitLearnsTimestampOnlyFromPureACK(t *testing.T) {
+	now := time.Now()
+	connection := &TCPConn{stack: &Stack{}, peerTimestamp: true, recentTimestamp: 100}
+	state := &tcpEstablishedState{
+		connection:          connection,
+		receiveNext:         500,
+		lastACKSent:         500,
+		lastTimestampUpdate: now,
+		receiveWindowState:  newTCPReceiveWindow(500, 4096, false, false, 0),
+	}
+	for _, segment := range []tcpSegment{
+		{sequence: 500, flags: TCPFlagACK, payload: []byte("data")},
+		{sequence: 500, flags: TCPFlagACK | TCPFlagFIN},
+	} {
+		segment.setOptions(tcpTimestampOptions(200, 0))
+		if state.handleTimeWaitSegment(segment, now, now) {
+			t.Fatal("TIME-WAIT payload/control unexpectedly replaced the tuple")
+		}
+		if connection.recentTimestamp != 100 {
+			t.Fatalf("non-pure ACK TS.Recent = %d, want 100", connection.recentTimestamp)
+		}
+	}
+	pureACK := tcpSegment{sequence: 500, flags: TCPFlagACK}
+	pureACK.setOptions(tcpTimestampOptions(200, 0))
+	if state.handleTimeWaitSegment(pureACK, now, now) {
+		t.Fatal("TIME-WAIT pure ACK unexpectedly replaced the tuple")
+	}
+	if connection.recentTimestamp != 200 {
+		t.Fatalf("pure ACK TS.Recent = %d, want 200", connection.recentTimestamp)
+	}
+}
+
+// TestTCPTimeWaitAcceptsMissingTimestampFIN verifies that TIME-WAIT handles a
+// retransmitted FIN even when a negotiated Timestamp option was stripped.
+// RFC 7323 section 5.3 applies the PAWS rejection rule only when a Timestamp
+// option is present; Linux therefore continues with ordinary FIN processing,
+// while dropping the FIN would defer close until the peer's retransmission RTO.
+func TestTCPTimeWaitAcceptsMissingTimestampFIN(t *testing.T) {
+	now := time.Now()
+	connection := &TCPConn{stack: &Stack{}, peerTimestamp: true, recentTimestamp: 100}
+	state := &tcpEstablishedState{
+		connection:          connection,
+		receiveNext:         501,
+		lastACKSent:         501,
+		lastTimestampUpdate: now,
+	}
+	segment := tcpSegment{sequence: 500, flags: TCPFlagACK | TCPFlagFIN}
+	if state.handleTimeWaitSegment(segment, now, now) {
+		t.Fatal("missing-timestamp FIN unexpectedly replaced TIME-WAIT")
+	}
+	if !state.retransmit || state.retransmissionKind != tcpRetransmissionClose {
+		t.Fatalf("missing-timestamp FIN close timer = retransmit:%v kind:%v", state.retransmit, state.retransmissionKind)
+	}
+}
+
+// TestTCPTimeWaitTimerRefreshPolicy verifies the RFC/Linux split for the
+// retained tuple's expiry timer. RFC 9293 requires a retransmitted FIN to
+// restart 2MSL; Linux additionally refreshes ACK-bearing and PAWS-rejected
+// traffic, while RST, an old ACK-less SYN, and a successful replacement leave
+// the previous TIME-WAIT owner untouched.
+func TestTCPTimeWaitTimerRefreshPolicy(t *testing.T) {
+	now := time.Now()
+	for _, test := range []struct {
+		name                string
+		segment             tcpSegment
+		receivedAt          time.Time
+		peerTimestamp       bool
+		recentTimestamp     uint32
+		lastTimestampUpdate time.Time
+		receiveNext         uint32
+		replace             bool
+		wantReplacement     bool
+		wantRefresh         bool
+	}{
+		{
+			name:        "in-window ACK",
+			segment:     tcpSegment{sequence: 100, flags: TCPFlagACK},
+			receivedAt:  now.Add(-2 * tcpTimeWaitDuration),
+			receiveNext: 100,
+			wantRefresh: true,
+		},
+		{
+			name:        "out-of-window ACK",
+			segment:     tcpSegment{sequence: 99, flags: TCPFlagACK},
+			receiveNext: 100,
+			wantRefresh: true,
+		},
+		{
+			name:                "PAWS-rejected segment",
+			segment:             tcpSegment{sequence: 100, optionLength: 12},
+			peerTimestamp:       true,
+			recentTimestamp:     100,
+			lastTimestampUpdate: now,
+			receiveNext:         100,
+			wantRefresh:         true,
+		},
+		{
+			name:        "old ACK-less SYN",
+			segment:     tcpSegment{sequence: 99, flags: TCPFlagSYN},
+			receiveNext: 100,
+		},
+		{
+			name:        "invalid SYN-ACK",
+			segment:     tcpSegment{sequence: 99, flags: TCPFlagSYN | TCPFlagACK},
+			receiveNext: 100,
+			wantRefresh: true,
+		},
+		{
+			name:        "RST",
+			segment:     tcpSegment{sequence: 100, flags: TCPFlagRST},
+			receiveNext: 100,
+		},
+		{
+			name:        "retransmitted FIN",
+			segment:     tcpSegment{sequence: 99, flags: TCPFlagACK | TCPFlagFIN},
+			receiveNext: 100,
+			wantRefresh: true,
+		},
+		{
+			name:            "successful SYN replacement",
+			segment:         tcpSegment{sequence: 101, flags: TCPFlagSYN},
+			receiveNext:     100,
+			replace:         true,
+			wantReplacement: true,
+		},
+		{
+			name:                "PAWS-rejected SYN",
+			segment:             tcpSegment{sequence: 99, flags: TCPFlagSYN, optionLength: 12},
+			peerTimestamp:       true,
+			recentTimestamp:     100,
+			lastTimestampUpdate: now,
+			receiveNext:         100,
+			wantRefresh:         true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stack := &Stack{}
+			if test.replace {
+				stack.tcpTimeWaitReplacer = func(*Stack, *TCPConn, tcpSegment) bool { return true }
+			}
+			connection := &TCPConn{
+				stack:           stack,
+				peerTimestamp:   test.peerTimestamp,
+				recentTimestamp: test.recentTimestamp,
+			}
+			state := &tcpEstablishedState{
+				connection:          connection,
+				receiveNext:         test.receiveNext,
+				receiveWindowState:  newTCPReceiveWindow(test.receiveNext, 65535, false, false, 0),
+				lastTimestampUpdate: test.lastTimestampUpdate,
+			}
+			if test.peerTimestamp && test.segment.optionLength != 0 {
+				copy(test.segment.options[:], tcpTimestampOptions(99, 0))
+			}
+			deadline := time.Now().Add(-time.Second)
+			state.retransmit = true
+			state.retransmissionKind = tcpRetransmissionClose
+			state.retransmissionDeadline = deadline
+			receivedAt := test.receivedAt
+			if receivedAt.IsZero() {
+				receivedAt = now
+			}
+			if replaced := state.handleTimeWaitSegment(test.segment, receivedAt, now); replaced != test.wantReplacement {
+				t.Fatalf("TIME-WAIT replacement = %v, want %v", replaced, test.wantReplacement)
+			}
+			if test.wantRefresh {
+				if !state.retransmissionDeadline.After(time.Now()) {
+					t.Fatalf("TIME-WAIT deadline = %v, want a fresh 2MSL deadline", state.retransmissionDeadline)
+				}
+			} else if !state.retransmissionDeadline.Equal(deadline) {
+				t.Fatalf("TIME-WAIT deadline = %v, want unchanged %v", state.retransmissionDeadline, deadline)
+			}
+		})
 	}
 }
 
@@ -1490,7 +2000,7 @@ func testTCPHandshake(connection *TCPConn, initialSequence uint32) error {
 func testTCPPassiveHandshake(connection *TCPConn, syn tcpSegment, initialSequence uint32) error {
 	timer := newOwnedTimer()
 	defer timer.close()
-	return connection.passiveHandshake(syn, initialSequence, timer)
+	return connection.passiveHandshake(syn, initialSequence, timer, tcpHandshakeTimestampRange{})
 }
 
 func TestTCPActiveHandshakeProcessesSYNACKText(t *testing.T) {
@@ -1512,7 +2022,7 @@ func TestTCPActiveHandshakeProcessesSYNACKText(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for active SYN")
 	}
-	parsed, ok := parseIPPacket(synPacket)
+	parsed, ok := parseIPPacket(synPacket, false)
 	if !ok || parsed.protocol != ProtocolTCP || len(parsed.payload) < tcpHeaderSize {
 		t.Fatalf("active SYN = %x", synPacket)
 	}
@@ -1548,6 +2058,90 @@ func TestTCPActiveHandshakeProcessesSYNACKText(t *testing.T) {
 	}
 }
 
+func TestTCPActiveHandshakeRejectsInvalidTimestampEcho(t *testing.T) {
+	local := netip.MustParseAddr("192.0.2.75")
+	remote := netip.MustParseAddr("198.51.100.75")
+	link, stack := newTestStack(t, local, remote)
+	connection := newTCPConn(stack, "tcp4", tcpKey{
+		local: netip.AddrPortFrom(local, 45000), remote: netip.AddrPortFrom(remote, 8080),
+	}, 1400, tcpSocketOptionSet{})
+	result := make(chan error, 1)
+	go func() { result <- testTCPHandshake(connection, 1000) }()
+	select {
+	case synPacket := <-link.outbound:
+		parsed, ok := parseIPPacket(synPacket, false)
+		if !ok || parsed.protocol != ProtocolTCP || len(parsed.payload) < tcpHeaderSize {
+			t.Fatalf("active SYN = %x", synPacket)
+		}
+		headerSize := int(parsed.payload[12]>>4) * 4
+		clientSequence := binary.BigEndian.Uint32(parsed.payload[4:8])
+		clientTimestamp, _, timestampPresent := parseTCPTimestamp(parsed.payload[tcpHeaderSize:headerSize])
+		if !timestampPresent || clientTimestamp == 0 {
+			t.Fatal("active SYN did not carry a Timestamp")
+		}
+		invalid := tcpSegment{sequence: 2000, acknowledgement: clientSequence + 1, flags: TCPFlagSYN | TCPFlagACK, window: 65535}
+		invalid.setOptions(tcpTimestampOptions(300, clientTimestamp+1))
+		enqueueTCPTestSegment(t, connection, invalid)
+		select {
+		case err := <-result:
+			t.Fatalf("invalid TSecr completed active handshake with %v", err)
+		case <-time.After(50 * time.Millisecond):
+		}
+		valid := tcpSegment{sequence: 2000, acknowledgement: clientSequence + 1, flags: TCPFlagSYN | TCPFlagACK, window: 65535}
+		valid.setOptions(tcpTimestampOptions(300, clientTimestamp))
+		enqueueTCPTestSegment(t, connection, valid)
+		select {
+		case err := <-result:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("valid TSecr did not complete active handshake")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for active SYN")
+	}
+	connection.abortWithoutReset(net.ErrClosed)
+}
+
+func TestTCPActiveHandshakeAcceptsZeroTimestampEcho(t *testing.T) {
+	local := netip.MustParseAddr("192.0.2.76")
+	remote := netip.MustParseAddr("198.51.100.76")
+	link, stack := newTestStack(t, local, remote)
+	connection := newTCPConn(stack, "tcp4", tcpKey{
+		local: netip.AddrPortFrom(local, 45001), remote: netip.AddrPortFrom(remote, 8080),
+	}, 1400, tcpSocketOptionSet{})
+	result := make(chan error, 1)
+	go func() { result <- testTCPHandshake(connection, 1000) }()
+	select {
+	case synPacket := <-link.outbound:
+		parsed, ok := parseIPPacket(synPacket, false)
+		if !ok || parsed.protocol != ProtocolTCP || len(parsed.payload) < tcpHeaderSize {
+			t.Fatalf("active SYN = %x", synPacket)
+		}
+		headerSize := int(parsed.payload[12]>>4) * 4
+		clientSequence := binary.BigEndian.Uint32(parsed.payload[4:8])
+		clientTimestamp, _, timestampPresent := parseTCPTimestamp(parsed.payload[tcpHeaderSize:headerSize])
+		if !timestampPresent || clientTimestamp == 0 {
+			t.Fatal("active SYN did not carry a Timestamp")
+		}
+		zeroEcho := tcpSegment{sequence: 2001, acknowledgement: clientSequence + 1, flags: TCPFlagSYN | TCPFlagACK, window: 65535}
+		zeroEcho.setOptions(tcpTimestampOptions(301, 0))
+		enqueueTCPTestSegment(t, connection, zeroEcho)
+		select {
+		case err := <-result:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("zero TSecr did not complete active handshake")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for active SYN")
+	}
+	connection.abortWithoutReset(net.ErrClosed)
+}
+
 func TestTCPPassiveHandshakeProcessesSYNText(t *testing.T) {
 	local := netip.MustParseAddr("192.0.2.70")
 	remote := netip.MustParseAddr("198.51.100.70")
@@ -1573,7 +2167,7 @@ func TestTCPPassiveHandshakeProcessesSYNText(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for passive SYN-ACK")
 	}
-	parsed, ok := parseIPPacket(synACKPacket)
+	parsed, ok := parseIPPacket(synACKPacket, false)
 	if !ok || parsed.protocol != ProtocolTCP || len(parsed.payload) < tcpHeaderSize {
 		t.Fatalf("passive SYN-ACK = %x", synACKPacket)
 	}
@@ -1603,6 +2197,97 @@ func TestTCPPassiveHandshakeProcessesSYNText(t *testing.T) {
 	if n, readErr := connection.Read(make([]byte, 1)); n != 0 || readErr != io.EOF {
 		t.Fatalf("SYN FIN read = %d, %v", n, readErr)
 	}
+}
+
+// TestTCPPassiveHandshakeAcceptsMissingTimestamp verifies Linux-compatible
+// completion when a middlebox removes Timestamp from the final ACK after it
+// was negotiated in the SYN.
+func TestTCPPassiveHandshakeAcceptsMissingTimestamp(t *testing.T) {
+	local := netip.MustParseAddr("192.0.2.72")
+	remote := netip.MustParseAddr("198.51.100.72")
+	link, stack := newTestStack(t, local, remote)
+	listener, err := stack.ListenTCP(context.Background(), "tcp4", netip.AddrPortFrom(local, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	localPort := listener.Addr().(*net.TCPAddr).AddrPort().Port()
+	const (
+		remotePort      = 45002
+		remoteSequence  = 100
+		remoteTimestamp = 700
+	)
+	syn := buildTestTCP(remote, local, remotePort, localPort, remoteSequence, 0, TCPFlagSYN, 65535, tcpTimestampOptions(remoteTimestamp, 0), nil)
+	if err = writeTestPacket(stack, syn); err != nil {
+		t.Fatal(err)
+	}
+	var synACK []byte
+	select {
+	case synACK = <-link.outbound:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for passive timestamp SYN-ACK")
+	}
+	parsed, ok := parseIPPacket(synACK, false)
+	if !ok || len(parsed.payload) < tcpHeaderSize {
+		t.Fatalf("passive timestamp SYN-ACK = %x", synACK)
+	}
+	serverSequence := binary.BigEndian.Uint32(parsed.payload[4:8])
+	finalACK := buildTestTCP(remote, local, remotePort, localPort, remoteSequence+1, serverSequence+1, TCPFlagACK, 65535, nil, nil)
+	if err = writeTestPacket(stack, finalACK); err != nil {
+		t.Fatal(err)
+	}
+	if err = listener.(*TCPListener).SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("Accept without final-ACK timestamp: %v", err)
+	}
+	defer connection.Close()
+	if info := connection.(*TCPConn).Info(); info.State != TCPStateEstablished {
+		t.Fatalf("accepted connection state = %v, want established", info.State)
+	}
+}
+
+func TestTCPPassiveHandshakeAcceptsZeroTimestampEcho(t *testing.T) {
+	local := netip.MustParseAddr("192.0.2.79")
+	remote := netip.MustParseAddr("198.51.100.79")
+	link, stack := newTestStack(t, local, remote)
+	connection := newTCPConn(stack, "tcp4", tcpKey{
+		local: netip.AddrPortFrom(local, 8081), remote: netip.AddrPortFrom(remote, 45001),
+	}, 1400, tcpSocketOptionSet{})
+	connection.passive = true
+	initialSYN := tcpSegment{sequence: 100, flags: TCPFlagSYN, window: 65535}
+	initialSYN.setOptions(tcpTimestampOptions(101, 0))
+	result := make(chan error, 1)
+	go func() { result <- testTCPPassiveHandshake(connection, initialSYN, 1001) }()
+	var serverTimestamp uint32
+	select {
+	case packet := <-link.outbound:
+		parsed, ok := parseIPPacket(packet, false)
+		if !ok || parsed.protocol != ProtocolTCP || len(parsed.payload) < tcpHeaderSize {
+			t.Fatalf("passive SYN-ACK = %x", packet)
+		}
+		headerSize := int(parsed.payload[12]>>4) * 4
+		serverTimestamp, _, ok = parseTCPTimestamp(parsed.payload[tcpHeaderSize:headerSize])
+		if !ok || serverTimestamp == 0 {
+			t.Fatal("passive SYN-ACK did not carry a Timestamp")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for passive SYN-ACK")
+	}
+	finalACK := tcpSegment{sequence: 101, acknowledgement: 1002, flags: TCPFlagACK, window: 65535}
+	finalACK.setOptions(tcpTimestampOptions(202, 0))
+	enqueueTCPTestSegment(t, connection, finalACK)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("zero TSecr did not complete passive handshake")
+	}
+	connection.abortWithoutReset(net.ErrClosed)
 }
 
 func TestTCPPassiveHandshakeChallengeAndResetResponses(t *testing.T) {
@@ -1655,7 +2340,7 @@ func TestTCPPassiveHandshakeChallengeAndResetResponses(t *testing.T) {
 			_ = readPacket() // initial SYN-ACK
 			enqueueTCPTestSegment(t, connection, test.segment)
 			response := readPacket()
-			parsed, ok := parseIPPacket(response)
+			parsed, ok := parseIPPacket(response, false)
 			if !ok || parsed.protocol != ProtocolTCP || len(parsed.payload) < tcpHeaderSize {
 				t.Fatalf("passive-handshake response = %x", response)
 			}
@@ -1737,7 +2422,7 @@ func TestTCPPassiveHandshakeECNFallback(t *testing.T) {
 	readFlags := func() byte {
 		select {
 		case packet := <-link.outbound:
-			parsed, ok := parseIPPacket(packet)
+			parsed, ok := parseIPPacket(packet, false)
 			if !ok || len(parsed.payload) < tcpHeaderSize {
 				t.Fatalf("passive-handshake response = %x", packet)
 			}
@@ -1783,35 +2468,36 @@ func TestTCPPassiveRetransmittedSYNUpdatesTimestampEcho(t *testing.T) {
 	go func() {
 		result <- testTCPPassiveHandshake(connection, initialSYN, 1000)
 	}()
-	readTimestampEcho := func() uint32 {
+	readTimestamp := func() (uint32, uint32) {
 		select {
 		case packet := <-link.outbound:
-			parsed, ok := parseIPPacket(packet)
+			parsed, ok := parseIPPacket(packet, false)
 			if !ok || len(parsed.payload) < tcpHeaderSize {
 				t.Fatalf("passive SYN-ACK = %x", packet)
 			}
 			headerSize := int(parsed.payload[12]>>4) * 4
-			_, echo, present := parseTCPTimestamp(parsed.payload[tcpHeaderSize:headerSize])
+			value, echo, present := parseTCPTimestamp(parsed.payload[tcpHeaderSize:headerSize])
 			if !present {
 				t.Fatal("passive SYN-ACK omitted negotiated timestamp")
 			}
-			return echo
+			return value, echo
 		case <-time.After(time.Second):
 			t.Fatal("timed out waiting for timestamp SYN-ACK")
-			return 0
+			return 0, 0
 		}
 	}
-	if echo := readTimestampEcho(); echo != 100 {
+	if _, echo := readTimestamp(); echo != 100 {
 		t.Fatalf("initial SYN-ACK TSecr = %d, want 100", echo)
 	}
 	retransmittedSYN := tcpSegment{sequence: 100, flags: TCPFlagSYN, window: 65535}
 	retransmittedSYN.setOptions(tcpTimestampOptions(200, 0))
 	enqueueTCPTestSegment(t, connection, retransmittedSYN)
-	if echo := readTimestampEcho(); echo != 200 {
+	serverTimestamp, echo := readTimestamp()
+	if echo != 200 {
 		t.Fatalf("retransmitted SYN-ACK TSecr = %d, want 200", echo)
 	}
 	finalACK := tcpSegment{sequence: 101, acknowledgement: 1001, flags: TCPFlagACK, window: 65535}
-	finalACK.setOptions(tcpTimestampOptions(300, 1))
+	finalACK.setOptions(tcpTimestampOptions(300, serverTimestamp))
 	enqueueTCPTestSegment(t, connection, finalACK)
 	select {
 	case err := <-result:
@@ -1821,6 +2507,55 @@ func TestTCPPassiveRetransmittedSYNUpdatesTimestampEcho(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timestamp handshake did not complete")
 	}
+}
+
+func TestTCPPassiveHandshakeRejectsInvalidTimestampEcho(t *testing.T) {
+	local := netip.MustParseAddr("192.0.2.78")
+	remote := netip.MustParseAddr("198.51.100.78")
+	link, stack := newTestStack(t, local, remote)
+	connection := newTCPConn(stack, "tcp4", tcpKey{
+		local: netip.AddrPortFrom(local, 8080), remote: netip.AddrPortFrom(remote, 45000),
+	}, 1400, tcpSocketOptionSet{})
+	connection.passive = true
+	initialSYN := tcpSegment{sequence: 100, flags: TCPFlagSYN, window: 65535}
+	initialSYN.setOptions(tcpTimestampOptions(100, 0))
+	result := make(chan error, 1)
+	go func() { result <- testTCPPassiveHandshake(connection, initialSYN, 1000) }()
+	var serverTimestamp uint32
+	select {
+	case packet := <-link.outbound:
+		parsed, ok := parseIPPacket(packet, false)
+		if !ok || parsed.protocol != ProtocolTCP || len(parsed.payload) < tcpHeaderSize {
+			t.Fatalf("passive SYN-ACK = %x", packet)
+		}
+		headerSize := int(parsed.payload[12]>>4) * 4
+		serverTimestamp, _, ok = parseTCPTimestamp(parsed.payload[tcpHeaderSize:headerSize])
+		if !ok || serverTimestamp == 0 {
+			t.Fatal("passive SYN-ACK did not carry a Timestamp")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for passive SYN-ACK")
+	}
+	invalid := tcpSegment{sequence: 101, acknowledgement: 1001, flags: TCPFlagACK, window: 65535}
+	invalid.setOptions(tcpTimestampOptions(300, serverTimestamp+1))
+	enqueueTCPTestSegment(t, connection, invalid)
+	select {
+	case err := <-result:
+		t.Fatalf("invalid final-ACK TSecr completed passive handshake with %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	valid := tcpSegment{sequence: 101, acknowledgement: 1001, flags: TCPFlagACK, window: 65535}
+	valid.setOptions(tcpTimestampOptions(300, serverTimestamp))
+	enqueueTCPTestSegment(t, connection, valid)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("valid final-ACK TSecr did not complete passive handshake")
+	}
+	connection.abortWithoutReset(net.ErrClosed)
 }
 
 func TestTCPHandshakeMaintenanceDoesNotConsumeRTOBudget(t *testing.T) {
@@ -1837,7 +2572,7 @@ func TestTCPHandshakeMaintenanceDoesNotConsumeRTOBudget(t *testing.T) {
 		read := func() byte {
 			select {
 			case packet := <-link.outbound:
-				parsed, ok := parseIPPacket(packet)
+				parsed, ok := parseIPPacket(packet, false)
 				if !ok || len(parsed.payload) < tcpHeaderSize {
 					t.Fatalf("active-handshake packet = %x", packet)
 				}
@@ -1981,19 +2716,32 @@ func TestTCPCloseReadKeepsReceiveWindow(t *testing.T) {
 	}
 }
 
-// TestTCPWindowUpdateOrdering verifies stale and wrapped ACK ordering.
+// TestTCPWindowUpdateOrdering verifies Linux's ACK, sequence, and advertised
+// window ordering for established send-window updates.
 func TestTCPWindowUpdateOrdering(t *testing.T) {
-	if tcpWindowUpdateAllowed(99, 200, 100, 100) {
-		t.Fatal("older segment sequence updated the send window")
+	const scale = uint8(2)
+	tests := []struct {
+		name                                        string
+		ackAdvanced                                 bool
+		sequence, lastSequence                      uint32
+		advertisedWindow, currentWindow, wantWindow uint32
+		want                                        bool
+	}{
+		{name: "advanced ACK beats old sequence", ackAdvanced: true, sequence: 99, lastSequence: 100, advertisedWindow: 1, currentWindow: 4096, wantWindow: 4, want: true},
+		{name: "old sequence", sequence: 99, lastSequence: 100, advertisedWindow: 65535, currentWindow: 4096, want: false},
+		{name: "same sequence shrinks nonzero window", sequence: 100, lastSequence: 100, advertisedWindow: 512, currentWindow: 4096, wantWindow: 2048},
+		{name: "same sequence grows window", sequence: 100, lastSequence: 100, advertisedWindow: 2048, currentWindow: 4096, wantWindow: 8192, want: true},
+		{name: "same sequence closes window", sequence: 100, lastSequence: 100, advertisedWindow: 0, currentWindow: 4096, want: true},
+		{name: "new sequence", sequence: 101, lastSequence: 100, advertisedWindow: 1, currentWindow: 4096, wantWindow: 4, want: true},
+		{name: "sequence wrap", sequence: 1, lastSequence: ^uint32(0), advertisedWindow: 1, currentWindow: 4096, wantWindow: 4, want: true},
 	}
-	if tcpWindowUpdateAllowed(100, 99, 100, 100) {
-		t.Fatal("older acknowledgement updated the send window")
-	}
-	if !tcpWindowUpdateAllowed(101, 1, 100, 100) || !tcpWindowUpdateAllowed(100, 100, 100, 100) {
-		t.Fatal("fresh send-window update was rejected")
-	}
-	if !tcpWindowUpdateAllowed(1, 1, 0xffffffff, 0xffffffff) {
-		t.Fatal("wrapped send-window update was rejected")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			window, got := tcpWindowUpdate(test.ackAdvanced, test.sequence, test.lastSequence, uint16(test.advertisedWindow), scale, test.currentWindow)
+			if got != test.want || got && window != test.wantWindow {
+				t.Fatalf("tcpWindowUpdate = (%d, %v), want (%d, %v)", window, got, test.wantWindow, test.want)
+			}
+		})
 	}
 }
 
@@ -3363,7 +4111,7 @@ func TestTCPEstablishedActorSurvivesStoppedDeviceRead(t *testing.T) {
 			break
 		}
 		wire := consumeTestPacket(&stack.outbound, entry)
-		packet, valid := parseIPPacket(wire)
+		packet, valid := parseIPPacket(wire, false)
 		if valid && packet.protocol == ProtocolTCP {
 			if err := link.handleOutboundPacket(wire); err != nil {
 				t.Fatal(err)
@@ -3394,7 +4142,7 @@ func TestTCPEstablishedActorSurvivesStoppedDeviceRead(t *testing.T) {
 			break
 		}
 		wire := consumeTestPacket(&stack.outbound, entry)
-		packet, valid := parseIPPacket(wire)
+		packet, valid := parseIPPacket(wire, false)
 		if valid && packet.protocol == ProtocolTCP {
 			if err := link.handleOutboundPacket(wire); err != nil {
 				t.Fatal(err)
@@ -3418,7 +4166,7 @@ func TestTCPEstablishedActorSurvivesStoppedDeviceRead(t *testing.T) {
 			break
 		}
 		wire := consumeTestPacket(&stack.outbound, entry)
-		packet, valid := parseIPPacket(wire)
+		packet, valid := parseIPPacket(wire, false)
 		if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
 			t.Fatalf("post-capacity packet is not TCP: %x", wire)
 		}
@@ -3485,7 +4233,7 @@ func TestTCPEstablishedActorsShareReturnedOutputCapacity(t *testing.T) {
 		if !available {
 			break
 		}
-		packet, valid := parseIPPacket(consumeTestPacket(&stack.outbound, entry))
+		packet, valid := parseIPPacket(consumeTestPacket(&stack.outbound, entry), false)
 		if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
 			t.Fatal("returned capacity published a non-TCP packet")
 		}
@@ -3591,7 +4339,7 @@ func TestTCPPersistProbeSurvivesStoppedDeviceRead(t *testing.T) {
 				t.Fatal("persist-blocked output did not resume when device capacity returned")
 			}
 			wire := consumeTestPacket(&stack.outbound, entry)
-			packet, valid := parseIPPacket(wire)
+			packet, valid := parseIPPacket(wire, false)
 			if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
 				t.Fatalf("persist capacity-wakeup packet is not TCP: %x", wire)
 			}
@@ -3717,7 +4465,7 @@ func TestTCPKeepAliveProbeSurvivesStoppedDeviceRead(t *testing.T) {
 				t.Fatal("keepalive-blocked output did not resume when device capacity returned")
 			}
 			wire := consumeTestPacket(&stack.outbound, entry)
-			packet, valid := parseIPPacket(wire)
+			packet, valid := parseIPPacket(wire, false)
 			if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
 				t.Fatalf("keepalive capacity-wakeup packet is not TCP: %x", wire)
 			}
@@ -3820,7 +4568,7 @@ func TestTCPLivenessTimeoutSurvivesStoppedDeviceRead(t *testing.T) {
 			t.Fatal("initial keepalive probe was not published")
 		}
 		wire := consumeTestPacket(&stack.outbound, entry)
-		packet, valid := parseIPPacket(wire)
+		packet, valid := parseIPPacket(wire, false)
 		if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize || int(packet.payload[12]>>4)*4 != len(packet.payload) {
 			t.Fatalf("initial keepalive output is not a payload-free TCP segment: %x", wire)
 		}
@@ -3877,7 +4625,7 @@ func TestTCPSACKRecoverySurvivesStoppedDeviceRead(t *testing.T) {
 			t.Fatalf("queued TCP bytes = %d, want %d", queuedBytes, len(payload))
 		}
 		wire := consumeTestPacket(&stack.outbound, entry)
-		packet, valid := parseIPPacket(wire)
+		packet, valid := parseIPPacket(wire, false)
 		if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
 			t.Fatalf("initial output is not TCP: %x", wire)
 		}
@@ -3960,7 +4708,7 @@ func TestTCPSACKRecoverySurvivesStoppedDeviceRead(t *testing.T) {
 		t.Fatal("SACK recovery did not resume when device capacity returned")
 	}
 	retransmissionWire := consumeTestPacket(&stack.outbound, entry)
-	retransmission, valid := parseIPPacket(retransmissionWire)
+	retransmission, valid := parseIPPacket(retransmissionWire, false)
 	if !valid || retransmission.protocol != ProtocolTCP || len(retransmission.payload) < tcpHeaderSize {
 		t.Fatalf("recovery output is not TCP: %x", retransmissionWire)
 	}
@@ -4049,7 +4797,7 @@ func TestTCPTailLossProbeSurvivesStoppedDeviceRead(t *testing.T) {
 			t.Fatalf("queued TCP bytes = %d, want %d", queuedBytes, len(payload))
 		}
 		wire := consumeTestPacket(&stack.outbound, entry)
-		packet, valid := parseIPPacket(wire)
+		packet, valid := parseIPPacket(wire, false)
 		if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
 			t.Fatalf("initial output is not TCP: %x", wire)
 		}
@@ -4125,7 +4873,7 @@ func TestTCPTailLossProbeSurvivesStoppedDeviceRead(t *testing.T) {
 		t.Fatal("tail-loss probe did not resume when device capacity returned")
 	}
 	probeWire := consumeTestPacket(&stack.outbound, entry)
-	probe, valid := parseIPPacket(probeWire)
+	probe, valid := parseIPPacket(probeWire, false)
 	if !valid || probe.protocol != ProtocolTCP || len(probe.payload) < tcpHeaderSize {
 		t.Fatalf("tail-loss probe is not TCP: %x", probeWire)
 	}
@@ -4158,7 +4906,7 @@ func TestTCPTailLossProbeNewDataSurvivesStoppedDeviceRead(t *testing.T) {
 			t.Fatalf("initial TCP flight = %d bytes, want congestion window %d", queuedBytes, before.CongestionWindow)
 		}
 		wire := consumeTestPacket(&stack.outbound, entry)
-		packet, valid := parseIPPacket(wire)
+		packet, valid := parseIPPacket(wire, false)
 		if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
 			t.Fatalf("initial output is not TCP: %x", wire)
 		}
@@ -4222,7 +4970,7 @@ func TestTCPTailLossProbeNewDataSurvivesStoppedDeviceRead(t *testing.T) {
 		t.Fatal("new-data tail-loss probe did not resume when device capacity returned")
 	}
 	probeWire := consumeTestPacket(&stack.outbound, entry)
-	probe, valid := parseIPPacket(probeWire)
+	probe, valid := parseIPPacket(probeWire, false)
 	if !valid || probe.protocol != ProtocolTCP || len(probe.payload) < tcpHeaderSize {
 		t.Fatalf("new-data tail-loss probe is not TCP: %x", probeWire)
 	}
@@ -4273,7 +5021,7 @@ func TestTCPRTORecoverySurvivesStoppedDeviceRead(t *testing.T) {
 			t.Fatalf("queued TCP bytes = %d, want %d", queuedBytes, len(payload))
 		}
 		wire := consumeTestPacket(&stack.outbound, entry)
-		packet, valid := parseIPPacket(wire)
+		packet, valid := parseIPPacket(wire, false)
 		if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
 			t.Fatalf("initial output is not TCP: %x", wire)
 		}
@@ -4299,7 +5047,7 @@ func TestTCPRTORecoverySurvivesStoppedDeviceRead(t *testing.T) {
 		t.Fatal("tail-loss probe was not published before the RTO")
 	}
 	probeWire := consumeTestPacket(&stack.outbound, probeEntry)
-	probe, valid := parseIPPacket(probeWire)
+	probe, valid := parseIPPacket(probeWire, false)
 	if !valid || probe.protocol != ProtocolTCP || len(probe.payload) < tcpHeaderSize || binary.BigEndian.Uint32(probe.payload[4:8]) != segments[len(segments)-1].sequence {
 		t.Fatalf("pre-RTO output is not the final-range tail-loss probe: %x", probeWire)
 	}
@@ -4353,7 +5101,7 @@ func TestTCPRTORecoverySurvivesStoppedDeviceRead(t *testing.T) {
 		t.Fatal("RTO retransmission did not resume when device capacity returned")
 	}
 	rtoWire := consumeTestPacket(&stack.outbound, rtoEntry)
-	rtoPacket, valid := parseIPPacket(rtoWire)
+	rtoPacket, valid := parseIPPacket(rtoWire, false)
 	if !valid || rtoPacket.protocol != ProtocolTCP || len(rtoPacket.payload) < tcpHeaderSize {
 		t.Fatalf("RTO recovery output is not TCP: %x", rtoWire)
 	}
@@ -4399,7 +5147,7 @@ func TestTCPRTOPendingOutputCanceledByLateACK(t *testing.T) {
 			t.Fatalf("queued TCP bytes = %d, want %d", queuedBytes, len(payload))
 		}
 		wire := consumeTestPacket(&stack.outbound, entry)
-		packet, valid := parseIPPacket(wire)
+		packet, valid := parseIPPacket(wire, false)
 		if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
 			t.Fatalf("initial output is not TCP: %x", wire)
 		}
@@ -4496,7 +5244,7 @@ func TestTCPRTOPendingOutputCanceledAfterCongestionControlChange(t *testing.T) {
 			t.Fatalf("queued TCP bytes = %d, want %d", queuedBytes, len(payload))
 		}
 		wire := consumeTestPacket(&stack.outbound, entry)
-		packet, valid := parseIPPacket(wire)
+		packet, valid := parseIPPacket(wire, false)
 		if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
 			t.Fatalf("initial output is not TCP: %x", wire)
 		}
@@ -4605,7 +5353,7 @@ func TestTCPRTOPendingPathMTURetransmissionStartsFRTO(t *testing.T) {
 			t.Fatalf("queued TCP bytes = %d, want %d", queuedBytes, len(payload))
 		}
 		wire := consumeTestPacket(&stack.outbound, entry)
-		packet, valid := parseIPPacket(wire)
+		packet, valid := parseIPPacket(wire, false)
 		if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
 			t.Fatalf("initial output is not TCP: %x", wire)
 		}
@@ -4669,7 +5417,7 @@ func TestTCPRTOPendingPathMTURetransmissionStartsFRTO(t *testing.T) {
 		t.Fatal("path-MTU replacement did not resume when device capacity returned")
 	}
 	replacementWire := consumeTestPacket(&stack.outbound, replacementEntry)
-	replacement, valid := parseIPPacket(replacementWire)
+	replacement, valid := parseIPPacket(replacementWire, false)
 	if !valid || replacement.protocol != ProtocolTCP || len(replacement.payload) < tcpHeaderSize {
 		t.Fatalf("path-MTU replacement is not TCP: %x", replacementWire)
 	}
@@ -4703,7 +5451,7 @@ func TestTCPRTOPendingPathMTURetransmissionStartsFRTO(t *testing.T) {
 		t.Fatal("path-MTU F-RTO fallback was not published")
 	}
 	fallbackWire := consumeTestPacket(&stack.outbound, fallbackEntry)
-	fallback, valid := parseIPPacket(fallbackWire)
+	fallback, valid := parseIPPacket(fallbackWire, false)
 	if !valid || fallback.protocol != ProtocolTCP || len(fallback.payload) < tcpHeaderSize {
 		t.Fatalf("path-MTU F-RTO fallback is not TCP: %x", fallbackWire)
 	}
@@ -4758,7 +5506,7 @@ func testTCPFRTOFallbackSurvivesStoppedDeviceRead(t *testing.T, closeWrite, supe
 			t.Fatalf("queued TCP bytes = %d, want %d; FIN queued = %t, want %t", queuedBytes, len(payload), finQueued, closeWrite)
 		}
 		wire := consumeTestPacket(&stack.outbound, entry)
-		packet, valid := parseIPPacket(wire)
+		packet, valid := parseIPPacket(wire, false)
 		if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
 			t.Fatalf("initial output is not TCP: %x", wire)
 		}
@@ -4794,7 +5542,7 @@ func testTCPFRTOFallbackSurvivesStoppedDeviceRead(t *testing.T, closeWrite, supe
 		t.Fatal("initial RTO retransmission was not published")
 	}
 	rtoWire := consumeTestPacket(&stack.outbound, rtoEntry)
-	rtoPacket, valid := parseIPPacket(rtoWire)
+	rtoPacket, valid := parseIPPacket(rtoWire, false)
 	if !valid || rtoPacket.protocol != ProtocolTCP || len(rtoPacket.payload) < tcpHeaderSize || binary.BigEndian.Uint32(rtoPacket.payload[4:8]) != segments[0].sequence {
 		t.Fatalf("initial RTO output does not retransmit the first range: %x", rtoWire)
 	}
@@ -4868,7 +5616,7 @@ func testTCPFRTOFallbackSurvivesStoppedDeviceRead(t *testing.T, closeWrite, supe
 		t.Fatal("F-RTO output did not resume when device capacity returned")
 	}
 	fallbackWire := consumeTestPacket(&stack.outbound, fallbackEntry)
-	fallback, valid := parseIPPacket(fallbackWire)
+	fallback, valid := parseIPPacket(fallbackWire, false)
 	if !valid || fallback.protocol != ProtocolTCP || len(fallback.payload) < tcpHeaderSize {
 		t.Fatalf("F-RTO fallback output is not TCP: %x", fallbackWire)
 	}
@@ -4946,7 +5694,7 @@ func TestTCPLostRetransmissionSurvivesStoppedDeviceRead(t *testing.T) {
 			t.Fatalf("queued TCP bytes = %d, want %d", queuedBytes, len(payload))
 		}
 		wire := consumeTestPacket(&stack.outbound, entry)
-		packet, valid := parseIPPacket(wire)
+		packet, valid := parseIPPacket(wire, false)
 		if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
 			t.Fatalf("initial output is not TCP: %x", wire)
 		}
@@ -5032,7 +5780,7 @@ func TestTCPLostRetransmissionSurvivesStoppedDeviceRead(t *testing.T) {
 			t.Fatalf("retransmission %#x was not published", wantSequence)
 		}
 		wire := consumeTestPacket(&stack.outbound, entry)
-		packet, valid := parseIPPacket(wire)
+		packet, valid := parseIPPacket(wire, false)
 		if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
 			t.Fatalf("recovery output is not TCP: %x", wire)
 		}
@@ -5110,7 +5858,7 @@ func TestTCPPathMTURetransmissionSurvivesStoppedDeviceRead(t *testing.T) {
 		t.Fatal("initial TCP data was not published")
 	}
 	originalWire := consumeTestPacket(&stack.outbound, entry)
-	original, valid := parseIPPacket(originalWire)
+	original, valid := parseIPPacket(originalWire, false)
 	if !valid || original.protocol != ProtocolTCP || len(original.payload) < tcpHeaderSize {
 		t.Fatalf("initial output is not TCP: %x", originalWire)
 	}
@@ -5165,7 +5913,7 @@ func TestTCPPathMTURetransmissionSurvivesStoppedDeviceRead(t *testing.T) {
 		t.Fatalf("path-MTU retransmission did not resume within %v of returned capacity", wait)
 	}
 	retransmissionWire := consumeTestPacket(&stack.outbound, entry)
-	retransmission, valid := parseIPPacket(retransmissionWire)
+	retransmission, valid := parseIPPacket(retransmissionWire, false)
 	if !valid || retransmission.protocol != ProtocolTCP || len(retransmission.payload) < tcpHeaderSize {
 		t.Fatalf("path-MTU recovery output is not TCP: %x", retransmissionWire)
 	}
@@ -5313,7 +6061,7 @@ func TestTCPImmediateACKReplacesDelayedACKWhileDeviceReadStopped(t *testing.T) {
 	// A controlled future arrival keeps the original delayed-ACK deadline far
 	// beyond the assertion window. This avoids using a sub-25 ms wall-clock
 	// threshold to distinguish immediate capacity wakeup from timer expiry.
-	if err := stack.handleInboundPacket(packet, time.Now().Add(10*time.Second), false); err != nil {
+	if err := stack.handleInboundPacket(packet, time.Now().Add(10*time.Second), false, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := connection.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
@@ -5340,7 +6088,7 @@ func TestTCPImmediateACKReplacesDelayedACKWhileDeviceReadStopped(t *testing.T) {
 		t.Fatal("immediate ACK remained gated by the replaced delayed-ACK deadline")
 	}
 	wire := consumeTestPacket(&stack.outbound, entry)
-	parsed, valid := parseIPPacket(wire)
+	parsed, valid := parseIPPacket(wire, false)
 	if !valid || parsed.protocol != ProtocolTCP || len(parsed.payload) < tcpHeaderSize {
 		t.Fatalf("capacity wakeup packet is not TCP: %x", wire)
 	}
@@ -5394,7 +6142,7 @@ func TestTCPEstablishedControlResponseDoesNotWaitForDeviceQueue(t *testing.T) {
 			break
 		}
 		packet := consumeTestPacket(&stack.outbound, entry)
-		parsed, valid := parseIPPacket(packet)
+		parsed, valid := parseIPPacket(packet, false)
 		if valid && parsed.protocol == ProtocolTCP && len(parsed.payload) >= tcpHeaderSize &&
 			binary.BigEndian.Uint16(parsed.payload[0:2]) == clientPort &&
 			binary.BigEndian.Uint16(parsed.payload[2:4]) == 8080 &&
@@ -6597,7 +7345,7 @@ func TestTCPConnectionMemoryLayout(t *testing.T) {
 		got  uintptr
 		want uintptr
 	}{
-		{"TCPConn", unsafe.Sizeof(TCPConn{}), 696},
+		{"TCPConn", unsafe.Sizeof(TCPConn{}), 688},
 		{"socketDeadline", unsafe.Sizeof(socketDeadline{}), 16},
 		{"tcpEstablishedState", unsafe.Sizeof(tcpEstablishedState{}), 1520},
 		{"tcpRACKSample", unsafe.Sizeof(tcpRACKSample{}), 48},
@@ -7018,12 +7766,12 @@ func TestTCPDispatchPreservesPacketArrivalTime(t *testing.T) {
 	key := tcpKey{local: netip.AddrPortFrom(local, 8080), remote: netip.AddrPortFrom(remote, 50000)}
 	connection := newTCPConn(stack, "tcp4", key, 1500, tcpSocketOptionSet{})
 	stack.tcp[key] = connection
-	packet, ok := parseIPPacket(buildTestTCP(remote, local, key.remote.Port(), key.local.Port(), 1, 1, TCPFlagACK, 65535, nil, nil))
+	packet, ok := parseIPPacket(buildTestTCP(remote, local, key.remote.Port(), key.local.Port(), 1, 1, TCPFlagACK, 65535, nil, nil), false)
 	if !ok {
 		t.Fatal("test TCP packet did not parse")
 	}
 	receivedAt := stack.timestampEpoch.Add(250 * time.Millisecond)
-	if err = stack.handleTCP(packet, receivedAt, true); err != nil {
+	if err = stack.handleTCP(packet, receivedAt, true, false); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -7922,7 +8670,7 @@ func BenchmarkTCPHandlePureACK(b *testing.B) {
 	stack.mu.Lock()
 	stack.tcp[key] = connection
 	stack.mu.Unlock()
-	packet, ok := parseIPPacket(buildTestTCP(remote, local, key.remote.Port(), key.local.Port(), 100, 200, TCPFlagACK, 65535, tcpTimestampOptions(123, 456), nil))
+	packet, ok := parseIPPacket(buildTestTCP(remote, local, key.remote.Port(), key.local.Port(), 100, 200, TCPFlagACK, 65535, tcpTimestampOptions(123, 456), nil), false)
 	if !ok {
 		b.Fatal("failed to parse benchmark packet")
 	}
@@ -7930,12 +8678,48 @@ func BenchmarkTCPHandlePureACK(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for index := 0; index < b.N; index++ {
-		if err := stack.handleTCP(packet, receivedAt, true); err != nil {
+		if err := stack.handleTCP(packet, receivedAt, true, false); err != nil {
 			b.Fatal(err)
 		}
 		if _, ok = connection.inbound.dequeue(); !ok {
 			b.Fatal("TCP segment was not queued")
 		}
+	}
+}
+
+// BenchmarkTCPTimeWaitACKAdmission measures the production TIME-WAIT
+// admission path with and without a negotiated Timestamp option. The segment
+// is an in-window pure ACK, so no output packet or queue allocation obscures
+// the PAWS comparison itself.
+func BenchmarkTCPTimeWaitACKAdmission(b *testing.B) {
+	now := time.Now()
+	for _, timestamped := range []bool{false, true} {
+		name := "without-timestamp"
+		if timestamped {
+			name = "with-timestamp"
+		}
+		b.Run(name, func(b *testing.B) {
+			stack := &Stack{}
+			connection := &TCPConn{stack: stack, peerTimestamp: true, recentTimestamp: 123}
+			state := &tcpEstablishedState{
+				connection:          connection,
+				receiveNext:         100,
+				lastACKSent:         100,
+				lastTimestampUpdate: now,
+				receiveWindowState:  newTCPReceiveWindow(100, 65535, false, false, 0),
+			}
+			segment := tcpSegment{sequence: 100, flags: TCPFlagACK}
+			if timestamped {
+				segment.setOptions(tcpTimestampOptions(123, 456))
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for index := 0; index < b.N; index++ {
+				if state.handleTimeWaitSegment(segment, now, now) {
+					b.Fatal("TIME-WAIT ACK unexpectedly replaced the connection")
+				}
+			}
+		})
 	}
 }
 
@@ -8000,7 +8784,7 @@ func TestTCPPublishReservationLifecycle(t *testing.T) {
 	if !available {
 		t.Fatal("published TCP packet is not queued")
 	}
-	packet, valid := parseIPPacket(entry.packet)
+	packet, valid := parseIPPacket(entry.packet, false)
 	if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize || !bytes.Equal(packet.payload[tcpHeaderSize:], payloadBytes) {
 		t.Fatalf("published TCP packet = %x", entry.packet)
 	}
@@ -8121,7 +8905,7 @@ func TestTCPSegmentTimestampOptionsUseFixedWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	timestamp := published.timestamp
-	packet, ok := parseIPPacket(readOutboundPacket(t, stack))
+	packet, ok := parseIPPacket(readOutboundPacket(t, stack), false)
 	if !ok || len(packet.payload) < tcpHeaderSize {
 		t.Fatal("timestamped TCP segment could not be parsed")
 	}
@@ -8141,7 +8925,7 @@ func TestTCPSegmentTimestampOptionsUseFixedWorkspace(t *testing.T) {
 	if err = connection.trySendSegmentWithOptions(101, 201, TCPFlagACK, 32768, extra); err != nil {
 		t.Fatal(err)
 	}
-	packet, ok = parseIPPacket(readOutboundPacket(t, stack))
+	packet, ok = parseIPPacket(readOutboundPacket(t, stack), false)
 	if !ok || len(packet.payload) < tcpHeaderSize {
 		t.Fatal("best-effort timestamped TCP segment could not be parsed")
 	}
@@ -8812,7 +9596,7 @@ func TestTCPZeroWindowProbePreservesSequenceSpace(t *testing.T) {
 	}
 	select {
 	case packet := <-link.outbound:
-		parsed, ok := parseIPPacket(packet)
+		parsed, ok := parseIPPacket(packet, false)
 		if !ok || parsed.protocol != ProtocolTCP {
 			t.Fatalf("invalid persist packet: %x", packet)
 		}
@@ -8832,7 +9616,7 @@ func TestTCPZeroWindowProbePreservesSequenceSpace(t *testing.T) {
 	}
 	select {
 	case packet := <-link.outbound:
-		parsed, ok := parseIPPacket(packet)
+		parsed, ok := parseIPPacket(packet, false)
 		if !ok || parsed.protocol != ProtocolTCP {
 			t.Fatalf("invalid post-persist packet: %x", packet)
 		}
@@ -8884,7 +9668,7 @@ drained:
 	for !initialData {
 		select {
 		case packet := <-link.outbound:
-			parsed, ok := parseIPPacket(packet)
+			parsed, ok := parseIPPacket(packet, false)
 			if !ok || parsed.protocol != ProtocolTCP || len(parsed.payload) < tcpHeaderSize {
 				continue
 			}
@@ -8947,7 +9731,7 @@ func TestTCPZeroWindowConsumesInOrderFIN(t *testing.T) {
 		for {
 			select {
 			case packet := <-link.outbound:
-				parsed, ok := parseIPPacket(packet)
+				parsed, ok := parseIPPacket(packet, false)
 				if !ok || parsed.protocol != ProtocolTCP || len(parsed.payload) < tcpHeaderSize {
 					continue
 				}
@@ -9101,6 +9885,273 @@ func TestTCPPureACKAdvancesPAWS(t *testing.T) {
 	_ = connection.SetReadDeadline(time.Now().Add(time.Second))
 	if _, err = io.ReadFull(connection, payload); err != nil || string(payload) != "data" {
 		t.Fatalf("fresh data after newer pure ACK = %q, %v", payload, err)
+	}
+}
+
+// TestTCPMissingTimestampRemainsCompatible verifies that a middlebox removing
+// a negotiated Timestamp option does not strand an established stream. RFC
+// 7323 section 5.3 only applies PAWS rejection to a present Timestamp option;
+// Linux consequently continues ordinary sequence processing for this segment.
+func TestTCPMissingTimestampRemainsCompatible(t *testing.T) {
+	link, stack := newTestStack(t, netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2"))
+	defer stack.Close()
+	link.echoTCP = true
+	link.timestampTCP = true
+	connection, err := stack.DialTCP(context.Background(), "tcp", netip.AddrPort{}, netip.AddrPortFrom(link.remote, 9109))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	tcpConnection := connection.(*TCPConn)
+	link.mu.Lock()
+	peer := link.tcp[tcpConnection.key.local.Port()]
+	sequence, acknowledgement := peer.serverNext, peer.clientNext
+	serverPort := tcpConnection.key.remote.Port()
+	clientPort := tcpConnection.key.local.Port()
+	link.mu.Unlock()
+	link.mu.Lock()
+	link.echoTCP = false
+	link.mu.Unlock()
+	if _, err = connection.Write([]byte("seed")); err != nil {
+		t.Fatal(err)
+	}
+	var seedPacket []byte
+	select {
+	case seedPacket = <-link.outbound:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for seed TCP packet")
+	}
+	seedParsed, ok := parseIPPacket(seedPacket, false)
+	if !ok || len(seedParsed.payload) < tcpHeaderSize {
+		t.Fatalf("seed TCP packet = %x", seedPacket)
+	}
+	seedHeaderSize := int(seedParsed.payload[12]>>4) * 4
+	_, baseTimestamp, timestampPresent := parseTCPTimestamp(seedParsed.payload[tcpHeaderSize:seedHeaderSize])
+	if !timestampPresent || baseTimestamp == 0 {
+		t.Fatal("timestamp negotiation did not establish a TCP timestamp echo")
+	}
+	missingTimestamp := buildTestTCP(link.remote, link.local, serverPort, clientPort, sequence, acknowledgement, TCPFlagACK|TCPFlagPSH, 65535, nil, []byte("without-ts"))
+	if err = writeTestPacket(stack, missingTimestamp); err != nil {
+		t.Fatal(err)
+	}
+	_ = connection.SetReadDeadline(time.Now().Add(time.Second))
+	received := make([]byte, len("without-ts"))
+	if _, err = io.ReadFull(connection, received); err != nil || string(received) != "without-ts" {
+		t.Fatalf("missing-timestamp payload = %q, %v", received, err)
+	}
+	var ackPacket []byte
+	select {
+	case ackPacket = <-link.outbound:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for missing-timestamp ACK")
+	}
+	ackParsed, ok := parseIPPacket(ackPacket, false)
+	if !ok || len(ackParsed.payload) < tcpHeaderSize {
+		t.Fatalf("missing-timestamp ACK = %x", ackPacket)
+	}
+	ackHeaderSize := int(ackParsed.payload[12]>>4) * 4
+	_, acknowledgementEcho, timestampPresent := parseTCPTimestamp(ackParsed.payload[tcpHeaderSize:ackHeaderSize])
+	if !timestampPresent || acknowledgementEcho != baseTimestamp {
+		t.Fatalf("missing-timestamp ACK TSecr = %d, want unchanged %d", acknowledgementEcho, baseTimestamp)
+	}
+	missingFIN := buildTestTCP(link.remote, link.local, serverPort, clientPort, sequence+uint32(len(received)), acknowledgement, TCPFlagACK|TCPFlagFIN, 65535, nil, nil)
+	if err = writeTestPacket(stack, missingFIN); err != nil {
+		t.Fatal(err)
+	}
+	if n, readErr := connection.Read(make([]byte, 1)); n != 0 || readErr != io.EOF {
+		t.Fatalf("missing-timestamp FIN read = %d, %v", n, readErr)
+	}
+}
+
+// TestTCPPAWSPrecedesWindowAdmission verifies that a stale Timestamp is
+// rejected before the RFC 9293 receive-window test. The resulting challenge
+// ACK uses the ordinary current send sequence instead of the peer-probe
+// sequence selected for an otherwise unacceptable segment.
+func TestTCPPAWSPrecedesWindowAdmission(t *testing.T) {
+	link, stack := newTestStack(t, netip.MustParseAddr("192.0.2.3"), netip.MustParseAddr("192.0.2.4"))
+	defer stack.Close()
+	link.echoTCP = true
+	link.timestampTCP = true
+	connection, err := stack.DialTCP(context.Background(), "tcp", netip.AddrPort{}, netip.AddrPortFrom(link.remote, 9110))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	tcpConnection := connection.(*TCPConn)
+	link.mu.Lock()
+	link.echoTCP = false
+	peer := link.tcp[tcpConnection.key.local.Port()]
+	serverNext := peer.serverNext
+	serverPort := tcpConnection.key.remote.Port()
+	clientPort := tcpConnection.key.local.Port()
+	link.mu.Unlock()
+	const pending = "pending"
+	if _, err = connection.Write([]byte(pending)); err != nil {
+		t.Fatal(err)
+	}
+	var dataPacket []byte
+	select {
+	case dataPacket = <-link.outbound:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for pending TCP packet")
+	}
+	dataParsed, ok := parseIPPacket(dataPacket, false)
+	if !ok || dataParsed.protocol != ProtocolTCP || len(dataParsed.payload) < tcpHeaderSize {
+		t.Fatalf("pending TCP packet = %x", dataPacket)
+	}
+	dataSequence := binary.BigEndian.Uint32(dataParsed.payload[4:8])
+	// Info is actor-serialized and confirms that sendNext includes the queued
+	// payload before the deliberately out-of-window segment is injected.
+	_ = tcpConnection.Info()
+	// The sequence is deliberately beyond RCV.NXT and the ACK/window pair is
+	// chosen so the old window-first path would select dataSequence+1.
+	stale := buildTestTCP(link.remote, link.local, serverPort, clientPort, serverNext+tcpReceiveCapacity+1,
+		dataSequence+1, TCPFlagACK, 0, tcpTimestampOptions(1, 0), nil)
+	if err = writeTestPacket(stack, stale); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	var parsed ipPacket
+	for {
+		select {
+		case challenge := <-link.outbound:
+			candidate, candidateOK := parseIPPacket(challenge, false)
+			if !candidateOK || candidate.protocol != ProtocolTCP || len(candidate.payload) < tcpHeaderSize {
+				continue
+			}
+			headerSize := int(candidate.payload[12]>>4) * 4
+			if headerSize < tcpHeaderSize || headerSize > len(candidate.payload) || len(candidate.payload) != headerSize {
+				continue
+			}
+			parsed = candidate
+		case <-deadline.C:
+			t.Fatal("timed out waiting for PAWS challenge")
+		}
+		if parsed.payload != nil {
+			break
+		}
+	}
+	if got := binary.BigEndian.Uint32(parsed.payload[4:8]); got != dataSequence+uint32(len(pending)) {
+		t.Fatalf("PAWS challenge sequence = %d, want current send next %d", got, dataSequence+uint32(len(pending)))
+	}
+}
+
+// TestTCPRecentTimestampWaitsForValidACK verifies RFC 7323's ordering rule:
+// invalid ACK, RST, and SYN segments cannot advance TS.Recent before the
+// Established ACK checks complete, while a valid ACK can advance it.
+func TestTCPRecentTimestampWaitsForValidACK(t *testing.T) {
+	link, stack := newTestStack(t, netip.MustParseAddr("192.0.2.5"), netip.MustParseAddr("192.0.2.6"))
+	defer stack.Close()
+	link.echoTCP = true
+	link.timestampTCP = true
+	connection, err := stack.DialTCP(context.Background(), "tcp4", netip.AddrPort{}, netip.AddrPortFrom(link.remote, 9111))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	writeAndReadTCPEcho(t, connection, []byte("seed"))
+	tcpConnection := connection.(*TCPConn)
+	link.mu.Lock()
+	link.echoTCP = false
+	peer := link.tcp[tcpConnection.key.local.Port()]
+	sequence, acknowledgement, timestamp := peer.serverNext, peer.clientNext, peer.timestamp
+	serverPort, clientPort := tcpConnection.key.remote.Port(), tcpConnection.key.local.Port()
+	link.mu.Unlock()
+	if timestamp == 0 || tcpConnection.recentTimestamp != timestamp {
+		t.Fatalf("initial TS.Recent = %d, peer timestamp = %d", tcpConnection.recentTimestamp, timestamp)
+	}
+	for _, test := range []struct {
+		name  string
+		flags byte
+		ack   uint32
+		seq   uint32
+	}{
+		{name: "invalid ACK", flags: TCPFlagACK, ack: acknowledgement + 1, seq: sequence},
+		{name: "older cumulative ACK", flags: TCPFlagACK, ack: acknowledgement - 1, seq: sequence},
+		{name: "RST", flags: TCPFlagRST | TCPFlagACK, ack: acknowledgement, seq: sequence + 1},
+		{name: "SYN", flags: TCPFlagSYN | TCPFlagACK, ack: acknowledgement, seq: sequence},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			packet := buildTestTCP(link.remote, link.local, serverPort, clientPort, test.seq, test.ack, test.flags, 65535, tcpTimestampOptions(timestamp+1000, 0), nil)
+			if err := writeTestPacket(stack, packet); err != nil {
+				t.Fatal(err)
+			}
+			_ = tcpConnection.Info()
+			_ = tcpConnection.Info()
+			if got := tcpConnection.recentTimestamp; got != timestamp {
+				t.Fatalf("TS.Recent after %s = %d, want %d", test.name, got, timestamp)
+			}
+		})
+	}
+	replayed := buildTestTCP(link.remote, link.local, serverPort, clientPort, sequence, acknowledgement, TCPFlagACK, 65535, tcpTimestampOptions(timestamp-1, 0), nil)
+	if err := writeTestPacket(stack, replayed); err != nil {
+		t.Fatal(err)
+	}
+	_ = tcpConnection.Info()
+	_ = tcpConnection.Info()
+	if got := tcpConnection.recentTimestamp; got != timestamp {
+		t.Fatalf("TS.Recent after tolerated one-tick replay = %d, want %d", got, timestamp)
+	}
+	validTimestamp := timestamp + 100
+	valid := buildTestTCP(link.remote, link.local, serverPort, clientPort, sequence, acknowledgement, TCPFlagACK, 65535, tcpTimestampOptions(validTimestamp, 0), nil)
+	if err := writeTestPacket(stack, valid); err != nil {
+		t.Fatal(err)
+	}
+	_ = tcpConnection.Info()
+	_ = tcpConnection.Info()
+	if got := tcpConnection.recentTimestamp; got != validTimestamp {
+		t.Fatalf("TS.Recent after valid ACK = %d, want %d", got, validTimestamp)
+	}
+}
+
+func TestTCPPAWSLinuxRules(t *testing.T) {
+	now := time.Now()
+	for _, test := range []struct {
+		name          string
+		tsval, recent uint32
+		age           time.Duration
+		window        uint32
+		reject        bool
+	}{
+		{name: "equal", tsval: 100, recent: 100, window: 0},
+		{name: "one tick replay", tsval: 99, recent: 100, window: 1},
+		{name: "older than replay", tsval: 98, recent: 100, window: 1, reject: true},
+		{name: "zero recent", tsval: 1, recent: 0, window: 0},
+		{name: "fresh lifetime boundary", tsval: 1, recent: 100, age: tcpPAWSMaxAge - time.Nanosecond, reject: true},
+		{name: "exact lifetime boundary", tsval: 1, recent: 100, age: tcpPAWSMaxAge},
+		{name: "expired recent", tsval: 1, recent: 100, age: tcpPAWSMaxAge + time.Second},
+		{name: "serial wrap", tsval: 1, recent: ^uint32(0), window: 0},
+		{name: "serial wrap older", tsval: ^uint32(0), recent: 1, window: 0, reject: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := tcpPAWSReject(test.tsval, test.recent, now.Add(-test.age), now, test.window); got != test.reject {
+				t.Fatalf("PAWS reject = %v, want %v", got, test.reject)
+			}
+		})
+	}
+}
+
+func TestTCPPAWSDisorderedACK(t *testing.T) {
+	state := &tcpEstablishedState{
+		connection:         &TCPConn{recentTimestamp: 100},
+		receiveNext:        1000,
+		sendUnacknowledged: 2000,
+		peerWindow:         4096,
+		peerWindowSequence: 1000,
+		rtt:                rttEstimator{rto: 10 * time.Millisecond},
+	}
+	if drop, accept := tcpPAWSDisorderedACK(tcpSegment{sequence: 999, acknowledgement: 2000, flags: TCPFlagACK}, state, 90); !drop || accept {
+		t.Fatalf("old duplicate ACK decision = drop:%v accept:%v, want drop only", drop, accept)
+	}
+	if drop, accept := tcpPAWSDisorderedACK(tcpSegment{sequence: 1000, acknowledgement: 2000, window: 4096, flags: TCPFlagACK}, state, 90); drop || !accept {
+		t.Fatalf("replay-window duplicate ACK decision = drop:%v accept:%v, want accept only", drop, accept)
+	}
+	if drop, accept := tcpPAWSDisorderedACK(tcpSegment{sequence: 1000, acknowledgement: 2000, window: 0, flags: TCPFlagACK}, state, 90); drop || accept {
+		t.Fatalf("window-update ACK decision = drop:%v accept:%v, want ordinary PAWS reject", drop, accept)
+	}
+	if drop, accept := tcpPAWSDisorderedACK(tcpSegment{sequence: 1000, acknowledgement: 2000, window: 4096, flags: TCPFlagACK}, state, 80); drop || accept {
+		t.Fatalf("out-of-replay-window ACK decision = drop:%v accept:%v, want ordinary PAWS reject", drop, accept)
 	}
 }
 
@@ -9282,12 +10333,12 @@ func TestTCPDelayedECNSYNACKDoesNotUndoFallback(t *testing.T) {
 		}
 	}
 	first := readSYN()
-	parsed, ok := parseIPPacket(first)
+	parsed, ok := parseIPPacket(first, false)
 	if !ok || len(parsed.payload) < tcpHeaderSize || parsed.payload[13]&(TCPFlagECE|TCPFlagCWR) != TCPFlagECE|TCPFlagCWR {
 		t.Fatalf("initial setup SYN = %x", first)
 	}
 	second := readSYN()
-	parsed, ok = parseIPPacket(second)
+	parsed, ok = parseIPPacket(second, false)
 	if !ok || len(parsed.payload) < tcpHeaderSize || parsed.payload[13]&(TCPFlagECE|TCPFlagCWR) != 0 {
 		t.Fatalf("fallback SYN = %x", second)
 	}
@@ -9317,7 +10368,7 @@ func TestTCPRejectsUnboundPort(t *testing.T) {
 	}
 	select {
 	case response := <-link.outbound:
-		parsed, ok := parseIPPacket(response)
+		parsed, ok := parseIPPacket(response, false)
 		if !ok || len(parsed.payload) < tcpHeaderSize || parsed.payload[13] != TCPFlagRST|TCPFlagACK || binary.BigEndian.Uint32(parsed.payload[8:12]) != 101 {
 			t.Fatalf("invalid TCP reset: %x", response)
 		}
@@ -9350,7 +10401,7 @@ func TestTCPReservedHeaderBitsAreIgnored(t *testing.T) {
 	}
 	if entry, ok := waitTestPacketEntry(&stack.outbound, time.Second); ok {
 		response := consumeTestPacket(&stack.outbound, entry)
-		parsed, ok := parseIPPacket(response)
+		parsed, ok := parseIPPacket(response, false)
 		if !ok || len(parsed.payload) < tcpHeaderSize || parsed.payload[13] != TCPFlagRST|TCPFlagACK {
 			t.Fatalf("reserved TCP header response = %x", response)
 		}
@@ -10381,7 +11432,7 @@ trafficClassPackets:
 	for {
 		select {
 		case packet := <-link.outbound:
-			parsed, ok := parseIPPacket(packet)
+			parsed, ok := parseIPPacket(packet, false)
 			if !ok || parsed.protocol != ProtocolTCP || len(parsed.payload) < tcpHeaderSize {
 				continue
 			}
@@ -10527,7 +11578,7 @@ func TestTCPPassiveHandshakeRTOStartsAfterDeviceDeparture(t *testing.T) {
 	if depth := stack.outbound.len(); depth != 0 {
 		t.Fatalf("passive handshake retransmitted at device departure: depth %d", depth)
 	}
-	packet, valid := parseIPPacket(wire)
+	packet, valid := parseIPPacket(wire, false)
 	if !valid || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
 		t.Fatal("passive handshake output was not TCP")
 	}
@@ -10700,6 +11751,176 @@ func BenchmarkTCPStreamRoundTrip(b *testing.B) {
 		if _, err = io.ReadFull(connection, response); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// BenchmarkTCPApplicationRead compares Read with caller-owned lazy reads
+// after production receive chunks have entered a TCP connection queue.
+func BenchmarkTCPApplicationRead(b *testing.B) {
+	const receiveChunkSize = 1200
+	// Cover application-sized reads, a sub-MSS read, and multi-chunk
+	// bursts; the bounded 4 KiB case exercises caller-buffer reuse.
+	for _, payloadSize := range []int{64, 512, receiveChunkSize, 4 * 1024, 32 * 1024} {
+		payloadSize := payloadSize
+		b.Run(fmt.Sprintf("%dB", payloadSize), func(b *testing.B) {
+			bufferSizes := []struct {
+				name string
+				size int
+			}{{name: "exact", size: payloadSize}}
+			if payloadSize > 4*1024 {
+				bufferSizes = append(bufferSizes, struct {
+					name string
+					size int
+				}{name: "4K", size: 4 * 1024})
+			}
+			for _, bufferSize := range bufferSizes {
+				bufferSize := bufferSize
+				b.Run(bufferSize.name, func(b *testing.B) {
+					chunks := make([][]byte, 0, (payloadSize+receiveChunkSize-1)/receiveChunkSize)
+					for offset := 0; offset < payloadSize; {
+						length := payloadSize - offset
+						if length > receiveChunkSize {
+							length = receiveChunkSize
+						}
+						chunks = append(chunks, bytes.Repeat([]byte{0x5a}, length))
+						offset += length
+					}
+
+					for _, mode := range []string{"Read", "ReadWithBuffer"} {
+						mode := mode
+						b.Run(mode, func(b *testing.B) {
+							connection := newTCPConn(nil, "tcp4", tcpKey{}, 1500, tcpSocketOptionSet{})
+							buffer := make([]byte, bufferSize.size)
+							remaining := payloadSize
+							getBuffer := func(_ int) []byte {
+								length := len(buffer)
+								if remaining < length {
+									length = remaining
+								}
+								return buffer[:length]
+							}
+							b.SetBytes(int64(payloadSize))
+							b.ReportAllocs()
+							b.ResetTimer()
+							if mode == "Read" {
+								for iteration := 0; iteration < b.N; iteration++ {
+									for _, chunk := range chunks {
+										if accepted := connection.appendReadBuffer(chunk, chunk, 0); accepted != len(chunk) {
+											b.Fatalf("accepted %d of %d bytes", accepted, len(chunk))
+										}
+									}
+									remaining := payloadSize
+									for remaining > 0 {
+										length := len(buffer)
+										if remaining < length {
+											length = remaining
+										}
+										n, err := connection.Read(buffer[:length])
+										if err != nil || n <= 0 || n > length {
+											b.Fatalf("Read = %d, %v", n, err)
+										}
+										if buffer[0] != 0x5a {
+											b.Fatalf("Read returned unexpected payload byte %#x", buffer[0])
+										}
+										remaining -= n
+									}
+								}
+								return
+							}
+
+							for iteration := 0; iteration < b.N; iteration++ {
+								for _, chunk := range chunks {
+									if accepted := connection.appendReadBuffer(chunk, chunk, 0); accepted != len(chunk) {
+										b.Fatalf("accepted %d of %d bytes", accepted, len(chunk))
+									}
+								}
+								remaining = payloadSize
+								for remaining > 0 {
+									n, err := connection.ReadWithBuffer(getBuffer)
+									length := len(buffer)
+									if remaining < length {
+										length = remaining
+									}
+									if err != nil || n <= 0 || n > length {
+										b.Fatalf("ReadWithBuffer = %d, %v", n, err)
+									}
+									if buffer[0] != 0x5a {
+										b.Fatalf("ReadWithBuffer returned unexpected payload byte %#x", buffer[0])
+									}
+									remaining -= n
+								}
+							}
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkTCPStreamReadModes compares Read with caller-owned lazy reads
+// through the existing packet-level TCP echo path.
+func BenchmarkTCPStreamReadModes(b *testing.B) {
+	for _, mode := range []string{"Read", "ReadWithBuffer"} {
+		mode := mode
+		b.Run(mode, func(b *testing.B) {
+			link, stack := newTestStack(b, netip.MustParseAddr("192.0.2.241"), netip.MustParseAddr("198.51.100.241"))
+			link.mu.Lock()
+			link.echoTCP = true
+			link.mu.Unlock()
+			connection, err := stack.DialTCP(context.Background(), "tcp", netip.AddrPort{}, netip.AddrPortFrom(link.remote, 8443))
+			if err != nil {
+				b.Fatal(err)
+			}
+			tcpConnection := connection.(*TCPConn)
+			defer connection.Close()
+			if err = connection.SetDeadline(time.Now().Add(10 * time.Minute)); err != nil {
+				b.Fatal(err)
+			}
+			payload := bytes.Repeat([]byte{0x5a}, 32*1024)
+			response := make([]byte, len(payload))
+			offset := 0
+			getBuffer := func(_ int) []byte { return response[offset:] }
+			b.ReportAllocs()
+			b.SetBytes(int64(len(payload)))
+			b.ResetTimer()
+			if mode == "Read" {
+				for iteration := 0; iteration < b.N; iteration++ {
+					if n, writeErr := connection.Write(payload); writeErr != nil || n != len(payload) {
+						b.Fatalf("Write = %d, %v", n, writeErr)
+					}
+					offset = 0
+					for offset < len(response) {
+						n, readErr := tcpConnection.Read(response[offset:])
+						if readErr != nil || n <= 0 || n > len(response)-offset {
+							b.Fatalf("Read = %d, %v", n, readErr)
+						}
+						offset += n
+					}
+					if !bytes.Equal(response, payload) {
+						b.Fatal("TCP echo payload mismatch")
+					}
+				}
+				return
+			}
+
+			for iteration := 0; iteration < b.N; iteration++ {
+				if n, writeErr := connection.Write(payload); writeErr != nil || n != len(payload) {
+					b.Fatalf("Write = %d, %v", n, writeErr)
+				}
+				offset = 0
+				for offset < len(response) {
+					n, readErr := tcpConnection.ReadWithBuffer(getBuffer)
+					if readErr != nil || n <= 0 || n > len(response)-offset {
+						b.Fatalf("ReadWithBuffer = %d, %v", n, readErr)
+					}
+					offset += n
+				}
+				if !bytes.Equal(response, payload) {
+					b.Fatal("TCP echo payload mismatch")
+				}
+			}
+		})
 	}
 }
 

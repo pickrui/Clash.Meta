@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net/netip"
+	"runtime"
 	"syscall"
 )
 
@@ -936,7 +937,7 @@ func prepareICMPForwarderIPPacket(input []byte, destination netip.Addr) (icmpFor
 	default:
 		return icmpForwarderIPPacket{}, syscall.EINVAL
 	}
-	parsed, ok := parseIPPacket(packet)
+	parsed, ok := parseIPPacket(packet, false)
 	if !ok || parsed.parameterError || len(parsed.payload) < 8 || parsed.target != destination {
 		return icmpForwarderIPPacket{}, syscall.EINVAL
 	}
@@ -981,7 +982,7 @@ func (s *Stack) writeICMPForwarderIPPacket(request ipPacket, reply icmpForwarder
 	if len(packets) > 1 {
 		flow = s.outbound.ipFlowKey(reply.parsed.source, reply.parsed.target, reply.parsed.protocol, reply.parsed.flowLabel, reply.parsed.payload)
 	}
-	err = s.tryWritePackets(packets, flow)
+	err = s.tryWritePackets(packets, flow, true)
 	if err == ErrResourceLimit {
 		return nil
 	}
@@ -994,6 +995,79 @@ func (e ICMPError) Error() string {
 		return fmt.Sprintf("ICMP error from %s: type=%d code=%d mtu=%d", e.Reporter, e.Type, e.Code, e.MTU)
 	}
 	return fmt.Sprintf("ICMP error from %s: type=%d code=%d", e.Reporter, e.Type, e.Code)
+}
+
+// Unwrap returns the syscall error associated with a valid ICMP type and code.
+// It uses the nearest socket errno where the platform has no exact equivalent.
+// The Linux errno carried by MSG_ERRQUEUE is a separate, fixed wire format.
+func (e ICMPError) Unwrap() error {
+	e.Reporter = e.Reporter.Unmap()
+	protocol := byte(ProtocolICMPv6)
+	if e.Reporter.Is4() {
+		protocol = ProtocolICMPv4
+	} else if !e.Reporter.Is6() {
+		return nil
+	}
+	if !validICMPErrorCode(protocol, e.Type, e.Code) {
+		return nil
+	}
+	switch linuxICMPErrno(e) {
+	case 13:
+		return syscall.EACCES
+	case 64:
+		// ENONET is absent from syscall on other supported platforms.
+		switch runtime.GOOS {
+		case "windows":
+			// Windows syscall.ENONET is APPLICATION_ERROR+81, not a WSA error.
+			return syscall.Errno(1<<29 + 81)
+		case "linux", "android", "solaris", "illumos", "js":
+			return syscall.Errno(64)
+		default:
+			// ENETUNREACH preserves the network-reachability meaning where
+			// ENONET has no verified platform errno.
+			return syscall.ENETUNREACH
+		}
+	case 71:
+		return syscall.EPROTO
+	case 90:
+		return syscall.EMSGSIZE
+	case 92:
+		return syscall.ENOPROTOOPT
+	case 95:
+		return syscall.EOPNOTSUPP
+	case 101:
+		return syscall.ENETUNREACH
+	case 111:
+		return syscall.ECONNREFUSED
+	case 112:
+		// EHOSTDOWN is not available on every Go target, and its errno
+		// differs across the platforms where it is defined.
+		switch runtime.GOOS {
+		case "windows":
+			// syscall.EHOSTDOWN is APPLICATION_ERROR+33 on Windows.
+			return syscall.Errno(1<<29 + 33)
+		case "darwin", "ios", "dragonfly", "freebsd", "netbsd", "openbsd":
+			return syscall.Errno(64)
+		case "solaris", "illumos":
+			return syscall.Errno(147)
+		case "aix":
+			return syscall.Errno(80)
+		case "linux", "android", "js":
+			switch runtime.GOARCH {
+			case "mips", "mipsle", "mips64", "mips64le":
+				return syscall.Errno(147)
+			}
+			return syscall.Errno(112)
+		default:
+			// EHOSTUNREACH preserves the host-reachability meaning where
+			// EHOSTDOWN has no verified platform errno.
+			return syscall.EHOSTUNREACH
+		}
+	case 113:
+		return syscall.EHOSTUNREACH
+	default:
+		return nil
+	}
 }
 
 // makeICMPEchoReply copies one Echo Request into an Echo Reply with a cleared
@@ -1016,13 +1090,13 @@ func makeICMPEchoReply(protocol byte, request []byte) ([]byte, bool) {
 // handleICMP replies to owned-address echo requests, dispatches validated
 // asynchronous errors, and offers otherwise unhandled messages to the ICMP
 // forwarder.
-func (s *Stack) handleICMP(packet ipPacket, localDestination bool) error {
+func (s *Stack) handleICMP(packet ipPacket, localDestination, skipChecksum bool) error {
 	icmp := packet.payload
 	if len(icmp) < 8 {
 		return nil
 	}
 	if packet.protocol == ProtocolICMPv4 {
-		if checksum(icmp) != 0 {
+		if !skipChecksum && checksum(icmp) != 0 {
 			return nil
 		}
 		if localDestination {
@@ -1239,7 +1313,9 @@ func (s *Stack) sendFragmentReassemblyTimeout(entry *ipPacketReassemblyEntry) er
 	if !s.isLocal(state.target) {
 		return nil
 	}
-	fragment, ok := parseFragment(state.firstPacket)
+	// Reassembly retains an owned copy of a fragment accepted at ingress.
+	// Reuse its header validation, including a trusted link's guarantee.
+	fragment, ok := parseFragment(state.firstPacket, true)
 	if !ok || fragment.offset != 0 || packetInvokesICMPError(state.firstPacket) || !s.allowICMPErrorResponseTo(icmpErrorResponseFragmentTimeout, state.source) {
 		return nil
 	}

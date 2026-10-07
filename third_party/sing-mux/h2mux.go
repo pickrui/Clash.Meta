@@ -203,6 +203,7 @@ func (s *h2MuxClientSession) Open(tcpTimeout time.Duration) (net.Conn, error) {
 	request := &http.Request{
 		Method: http.MethodConnect,
 		Body:   pipeInReader,
+		Header: make(http.Header),
 		URL:    &url.URL{Scheme: "https", Host: "localhost"},
 	}
 	connCtx, cancel := context.WithCancel(context.Background())

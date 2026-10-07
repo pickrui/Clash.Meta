@@ -11,6 +11,7 @@ import (
 	M "github.com/metacubex/sing/common/metadata"
 	N "github.com/metacubex/sing/common/network"
 	"github.com/metacubex/sing/common/task"
+	"github.com/metacubex/yamux"
 )
 
 type ServiceHandler interface {
@@ -84,7 +85,11 @@ func (s *Service) NewConnection(ctx context.Context, conn net.Conn, metadata M.M
 }
 
 func (s *Service) newConnection(ctx context.Context, sessionConn net.Conn, stream net.Conn, metadata M.Metadata) error {
-	stream = &wrapStream{stream}
+	if yamuxStream, ok := stream.(*yamux.Stream); ok {
+		stream = &yamuxWrapStream{yamuxStream}
+	} else {
+		stream = &wrapStream{stream}
+	}
 	request, err := ReadStreamRequest(stream)
 	if err != nil {
 		return E.Cause(err, "read multiplex stream request")

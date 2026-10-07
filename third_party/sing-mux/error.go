@@ -27,6 +27,21 @@ func (w *wrapStream) Upstream() any {
 	return w.Conn
 }
 
+type wrapStreamCloseWrite struct {
+	*wrapStream
+}
+
+func newWrapStreamCloseWrite(conn net.Conn) *wrapStreamCloseWrite {
+	return &wrapStreamCloseWrite{wrapStream: &wrapStream{Conn: conn}}
+}
+
+func (w *wrapStreamCloseWrite) CloseWrite() error {
+	if c, ok := w.Conn.(interface{ CloseWrite() error }); ok {
+		return c.CloseWrite()
+	}
+	return nil
+}
+
 func wrapError(err error) error {
 	switch err {
 	case yamux.ErrStreamClosed:

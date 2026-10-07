@@ -13,6 +13,7 @@ import (
 	M "github.com/metacubex/sing/common/metadata"
 	N "github.com/metacubex/sing/common/network"
 	"github.com/metacubex/sing/common/x/list"
+	"github.com/metacubex/yamux"
 )
 
 type Client struct {
@@ -87,7 +88,15 @@ func (c *Client) DialContext(ctx context.Context, network string, destination M.
 		if err != nil {
 			return nil, err
 		}
-		return &clientConn{Conn: stream, destination: destination}, nil
+		conn := &clientConn{Conn: stream, destination: destination}
+		// h2mux and yamux support half-close; expose CloseWrite so callers
+		// send END_STREAM / FIN instead of falling back to a full close
+		// (which is RST_STREAM on h2mux and drops in-flight data). smux v1
+		// has no half-close, so its stream is deliberately left without one.
+		if c.protocol == ProtocolH2Mux || c.protocol == ProtocolYAMux {
+			return &clientConnWithCloseWrite{clientConn: conn}, nil
+		}
+		return conn, nil
 	case N.NetworkUDP:
 		stream, err := c.openStream(ctx)
 		if err != nil {
@@ -128,6 +137,12 @@ func (c *Client) openStream(ctx context.Context) (net.Conn, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if yamuxStream, ok := stream.(*yamux.Stream); ok {
+		return &yamuxWrapStream{yamuxStream}, nil
+	}
+	if c.protocol == ProtocolH2Mux {
+		return newWrapStreamCloseWrite(stream), nil
 	}
 	return &wrapStream{stream}, nil
 }

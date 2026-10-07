@@ -4,6 +4,8 @@ type RequestNotify func(c Tracker)
 
 var DefaultRequestNotify RequestNotify
 
+var IsDirect = func(name string) bool { return name == "DIRECT" }
+
 func (m *Manager) TotalTraffic(onlyProxy bool) (up, down int64) {
 	if onlyProxy {
 		return m.proxyUploadTotal.Load(), m.proxyDownloadTotal.Load()

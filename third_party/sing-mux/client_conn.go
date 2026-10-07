@@ -93,6 +93,14 @@ func (c *clientConn) Upstream() any {
 	return c.Conn
 }
 
+type clientConnWithCloseWrite struct {
+	*clientConn
+}
+
+func (c *clientConnWithCloseWrite) CloseWrite() error {
+	return N.CloseWrite(c.Conn)
+}
+
 var _ N.NetPacketConn = (*clientPacketConn)(nil)
 
 type clientPacketConn struct {

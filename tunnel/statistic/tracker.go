@@ -53,6 +53,7 @@ type tcpTracker struct {
 	manager *Manager
 
 	pushToManager bool `json:"-"`
+	direct        bool
 }
 
 func (tt *tcpTracker) ID() string {
@@ -67,7 +68,7 @@ func (tt *tcpTracker) Read(b []byte) (int, error) {
 	n, err := tt.Conn.Read(b)
 	download := int64(n)
 	if tt.pushToManager {
-		tt.manager.PushDownloaded(tt.Conn.Chains().Last(), download)
+		tt.manager.PushDownloaded(tt.direct, download)
 	}
 	tt.DownloadTotal.Add(download)
 	return n, err
@@ -77,7 +78,7 @@ func (tt *tcpTracker) ReadBuffer(buffer *buf.Buffer) (err error) {
 	err = tt.Conn.ReadBuffer(buffer)
 	download := int64(buffer.Len())
 	if tt.pushToManager {
-		tt.manager.PushDownloaded(tt.Chains().Last(), download)
+		tt.manager.PushDownloaded(tt.direct, download)
 	}
 	tt.DownloadTotal.Add(download)
 	return
@@ -86,7 +87,7 @@ func (tt *tcpTracker) ReadBuffer(buffer *buf.Buffer) (err error) {
 func (tt *tcpTracker) UnwrapReader() (io.Reader, []N.CountFunc) {
 	return tt.Conn, []N.CountFunc{func(download int64) {
 		if tt.pushToManager {
-			tt.manager.PushDownloaded(tt.Chains().Last(), download)
+			tt.manager.PushDownloaded(tt.direct, download)
 		}
 		tt.DownloadTotal.Add(download)
 	}}
@@ -96,7 +97,7 @@ func (tt *tcpTracker) Write(b []byte) (int, error) {
 	n, err := tt.Conn.Write(b)
 	upload := int64(n)
 	if tt.pushToManager {
-		tt.manager.PushUploaded(tt.Chains().Last(), upload)
+		tt.manager.PushUploaded(tt.direct, upload)
 	}
 	tt.UploadTotal.Add(upload)
 	return n, err
@@ -106,7 +107,7 @@ func (tt *tcpTracker) WriteBuffer(buffer *buf.Buffer) (err error) {
 	upload := int64(buffer.Len())
 	err = tt.Conn.WriteBuffer(buffer)
 	if tt.pushToManager {
-		tt.manager.PushUploaded(tt.Chains().Last(), upload)
+		tt.manager.PushUploaded(tt.direct, upload)
 	}
 	tt.UploadTotal.Add(upload)
 	return
@@ -115,7 +116,7 @@ func (tt *tcpTracker) WriteBuffer(buffer *buf.Buffer) (err error) {
 func (tt *tcpTracker) UnwrapWriter() (io.Writer, []N.CountFunc) {
 	return tt.Conn, []N.CountFunc{func(upload int64) {
 		if tt.pushToManager {
-			tt.manager.PushUploaded(tt.Chains().Last(), upload)
+			tt.manager.PushUploaded(tt.direct, upload)
 		}
 		tt.UploadTotal.Add(upload)
 	}}
@@ -147,14 +148,15 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 			DownloadTotal: atomic.NewInt64(downloadTotal),
 		},
 		pushToManager: pushToManager,
+		direct:        IsDirect(conn.Chains().Last()),
 	}
 
 	if pushToManager {
 		if uploadTotal > 0 {
-			manager.PushUploaded(tt.Chains().Last(), uploadTotal)
+			manager.PushUploaded(tt.direct, uploadTotal)
 		}
 		if downloadTotal > 0 {
-			manager.PushDownloaded(tt.Chains().Last(), downloadTotal)
+			manager.PushDownloaded(tt.direct, downloadTotal)
 		}
 	}
 
@@ -173,6 +175,7 @@ type udpTracker struct {
 	manager *Manager
 
 	pushToManager bool `json:"-"`
+	direct        bool
 }
 
 func (ut *udpTracker) ID() string {
@@ -187,7 +190,7 @@ func (ut *udpTracker) ReadFrom(b []byte) (int, net.Addr, error) {
 	n, addr, err := ut.PacketConn.ReadFrom(b)
 	download := int64(n)
 	if ut.pushToManager {
-		ut.manager.PushDownloaded(ut.Chains().Last(), download)
+		ut.manager.PushDownloaded(ut.direct, download)
 	}
 	ut.DownloadTotal.Add(download)
 	return n, addr, err
@@ -197,7 +200,7 @@ func (ut *udpTracker) WaitReadFrom() (data []byte, put func(), addr net.Addr, er
 	data, put, addr, err = ut.PacketConn.WaitReadFrom()
 	download := int64(len(data))
 	if ut.pushToManager {
-		ut.manager.PushDownloaded(ut.Chains().Last(), download)
+		ut.manager.PushDownloaded(ut.direct, download)
 	}
 	ut.DownloadTotal.Add(download)
 	return
@@ -207,7 +210,7 @@ func (ut *udpTracker) WriteTo(b []byte, addr net.Addr) (int, error) {
 	n, err := ut.PacketConn.WriteTo(b, addr)
 	upload := int64(n)
 	if ut.pushToManager {
-		ut.manager.PushUploaded(ut.Chains().Last(), upload)
+		ut.manager.PushUploaded(ut.direct, upload)
 	}
 	ut.UploadTotal.Add(upload)
 	return n, err
@@ -237,14 +240,15 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 			DownloadTotal: atomic.NewInt64(downloadTotal),
 		},
 		pushToManager: pushToManager,
+		direct:        IsDirect(conn.Chains().Last()),
 	}
 
 	if pushToManager {
 		if uploadTotal > 0 {
-			manager.PushUploaded(ut.Chains().Last(), uploadTotal)
+			manager.PushUploaded(ut.direct, uploadTotal)
 		}
 		if downloadTotal > 0 {
-			manager.PushDownloaded(ut.Chains().Last(), downloadTotal)
+			manager.PushDownloaded(ut.direct, downloadTotal)
 		}
 	}
 

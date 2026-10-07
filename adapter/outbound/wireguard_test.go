@@ -3,9 +3,11 @@ package outbound
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"net"
 	"net/netip"
+	"sync"
 	"testing"
 
 	wireguard "github.com/metacubex/sing-wireguard"
@@ -66,5 +68,74 @@ func TestWireGuardUsesPerPeerReservedBytes(t *testing.T) {
 		if !bytes.Equal(packet.payload[1:4], want) || packet.destination.String() != addr.String() {
 			t.Errorf("peer=%s got=%v, want=%v", addr, packet.payload[1:4], want)
 		}
+	}
+}
+
+func initTestWireGuard(t *testing.T, w *WireGuard) {
+	t.Helper()
+	w.bind = wireguard.NewClientBind(w.runCtx, wgSingErrorHandler{w.Name()}, wireguardTestDialer{}, true, netip.MustParseAddrPort("127.0.0.1:51820"), [3]byte{})
+	if err := w.init0(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newLazyWireGuard(t *testing.T) *WireGuard {
+	t.Helper()
+	w, err := NewWireGuard(WireGuardOption{
+		Name: "lazy-test", Ip: "10.0.0.1", Workers: 1, IPStack: IPStackOption{Mode: ipStackMips},
+		PrivateKey:          base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)),
+		WireGuardPeerOption: WireGuardPeerOption{Server: "127.0.0.1", Port: 51820, PublicKey: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32))},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+	if w.device != nil || w.tunDevice != nil {
+		t.Fatal("constructor allocated a device")
+	}
+	return w
+}
+
+func TestWireGuardLazyLifetime(t *testing.T) {
+	w := newLazyWireGuard(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := w.init0(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled init: %v", err)
+	}
+	if w.device != nil || w.tunDevice != nil {
+		t.Fatal("canceled init allocated a device")
+	}
+	initTestWireGuard(t, w)
+	first := w.device
+	if err := w.init0(context.Background()); err != nil || w.device != first {
+		t.Fatalf("repeated init replaced device: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.init0(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("init after close: %v", err)
+	}
+}
+
+func TestWireGuardCloseBeforeAndDuringInitialization(t *testing.T) {
+	w := newLazyWireGuard(t)
+	_ = w.Close()
+	if err := w.init0(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("closed init: %v", err)
+	}
+	if w.device != nil {
+		t.Fatal("closed adapter allocated device")
+	}
+	w = newLazyWireGuard(t)
+	w.bind = wireguard.NewClientBind(w.runCtx, wgSingErrorHandler{w.Name()}, wireguardTestDialer{}, true, netip.MustParseAddrPort("127.0.0.1:51820"), [3]byte{})
+	var group sync.WaitGroup
+	group.Add(2)
+	go func() { defer group.Done(); _ = w.init0(context.Background()) }()
+	go func() { defer group.Done(); _ = w.Close() }()
+	group.Wait()
+	if w.runCtx.Err() == nil {
+		t.Fatal("lifetime remained active")
 	}
 }

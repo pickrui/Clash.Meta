@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"github.com/metacubex/mihomo/tunnel/statistic"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -107,5 +108,24 @@ func TestProxiesSnapshotDuringConfigReplacement(t *testing.T) {
 	readers.Wait()
 	if before["node"] != first {
 		t.Fatal("config replacement mutated a published snapshot")
+	}
+}
+
+type trafficTypeProxy struct {
+	C.Proxy
+	kind C.AdapterType
+}
+
+func (p *trafficTypeProxy) Type() C.AdapterType { return p.kind }
+
+func TestDirectClassificationUsesType(t *testing.T) {
+	oldProxies, oldProviders := ProxiesSnapshot(), ProvidersSnapshot()
+	defer UpdateProxies(oldProxies, oldProviders)
+	UpdateProxies(map[string]C.Proxy{
+		"custom-direct": &trafficTypeProxy{kind: C.Direct},
+		"DIRECT":        &trafficTypeProxy{kind: C.Socks5},
+	}, nil)
+	if !statistic.IsDirect("custom-direct") || statistic.IsDirect("DIRECT") || statistic.IsDirect("missing") {
+		t.Fatal("classification followed names instead of outbound types")
 	}
 }

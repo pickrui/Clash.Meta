@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/metacubex/mipstack"
 	"github.com/metacubex/sing/common/buf"
 	"github.com/metacubex/sing/common/logger"
 	M "github.com/metacubex/sing/common/metadata"
@@ -21,6 +22,88 @@ import (
 type linuxTun struct {
 	*memoryTun
 	headroom int
+}
+
+// Check the borrowed receive buffer while Write is still using it.
+type borrowedLoopbackTun struct {
+	*windowsTun
+	input   []byte
+	entered chan bool
+	resume  chan struct{}
+}
+
+func (d *borrowedLoopbackTun) Write(packet []byte) (int, error) {
+	d.entered <- &packet[0] == &d.input[0]
+	<-d.resume
+	return d.memoryTun.Write(packet)
+}
+
+func TestMipsLoopbackBorrowedBufferLifetime(t *testing.T) {
+	for _, ipv6 := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ipv4", true: "ipv6"}[ipv6], func(t *testing.T) {
+			source, target := netip.MustParseAddr("198.18.0.2"), netip.MustParseAddr("198.18.0.9")
+			if ipv6 {
+				source, target = netip.MustParseAddr("fd00::2"), netip.MustParseAddr("fd00::9")
+			}
+			packet := tcpPacket(source, target, 100, 0, 2, []byte("borrowed payload"))
+			parsed, err := mipstack.ParseIPPacket(packet)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed.Source, parsed.Destination = target, source
+			expected, err := parsed.MarshalRawBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			padding := []byte{0xaa, 0xbb, 0xcc}
+			packet = append(packet, padding...)
+			expected = append(expected, padding...)
+			d := &borrowedLoopbackTun{
+				windowsTun: &windowsTun{newMemoryTun(), make(chan struct{}, 1)},
+				input:      packet, entered: make(chan bool, 1), resume: make(chan struct{}),
+			}
+			s := &Mipstack{tun: d, logger: logger.NOP(), inet4LoopbackAddress: []netip.Addr{target}, inet6LoopbackAddress: []netip.Addr{target}}
+			done := make(chan struct{})
+			go func() { s.wintunLoop(d); close(done) }()
+			t.Cleanup(func() {
+				_ = d.Close()
+				select {
+				case <-d.resume:
+				default:
+					close(d.resume)
+				}
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Error("receive loop did not exit")
+				}
+			})
+			d.in <- packet
+			select {
+			case same := <-d.entered:
+				if !same {
+					t.Fatal("reflection allocated a separate packet")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("reflection did not reach Write")
+			}
+			select {
+			case <-d.released:
+				t.Fatal("receive buffer released before Write completed")
+			default:
+			}
+			close(d.resume)
+			select {
+			case <-d.released:
+			case <-time.After(time.Second):
+				t.Fatal("receive buffer was not released after Write")
+			}
+			// Release poisons the receive buffer; the completed write must survive.
+			if !bytes.Equal(readPacket(t, d.memoryTun), expected) {
+				t.Fatal("reflection corrupted the packet or its padding")
+			}
+		})
+	}
 }
 
 func (d *linuxTun) FrontHeadroom() int      { return d.headroom }
@@ -78,6 +161,8 @@ func (d *windowsTun) ReadPacket() ([]byte, func(), error) {
 }
 
 type darwinTun struct{ *memoryTun }
+
+func (d *darwinTun) BatchSize() int { return 4 }
 
 func (d *darwinTun) Read(p []byte) (int, error) {
 	n, err := d.memoryTun.Read(p[4:])
@@ -254,7 +339,12 @@ func TestMipsIOErrorRecovery(t *testing.T) {
 func TestMipsDeviceCloseExitsReadLoop(t *testing.T) {
 	d := newMemoryTun()
 	_ = d.Close()
-	s := &Mipstack{tun: d, logger: logger.NOP()}
+	stack, err := mipstack.New(mipstack.Config{LocalAddresses: []netip.Prefix{netip.MustParsePrefix("192.0.2.1/32")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stack.Close() })
+	s := &Mipstack{tun: d, stack: stack, logger: logger.NOP()}
 	done := make(chan struct{})
 	go func() { s.readLoop(); close(done) }()
 	select {
@@ -283,7 +373,12 @@ func TestMipsWindowsReadFailureExitsReadLoop(t *testing.T) {
 		readFailure: errors.New("send ring corrupt"),
 	}
 	t.Cleanup(func() { _ = d.Close() })
-	s := &Mipstack{tun: d, logger: logger.NOP()}
+	stack, err := mipstack.New(mipstack.Config{LocalAddresses: []netip.Prefix{netip.MustParsePrefix("192.0.2.1/32")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stack.Close() })
+	s := &Mipstack{tun: d, stack: stack, logger: logger.NOP()}
 	done := make(chan struct{})
 	go func() { s.readLoop(); close(done) }()
 	select {
@@ -334,10 +429,9 @@ func TestMipsConcurrentOutputAndReflection(t *testing.T) {
 	first, second := []byte("stack output"), []byte("reflected packet")
 	results := make(chan error, 2)
 	go func() {
-		var scratch [][]byte
-		results <- s.writePacketsWithBuffers([][]byte{first}, &scratch)
+		results <- s.writePackets([][]byte{first}, 0)
 	}()
-	go func() { results <- s.writePacket(second) }()
+	go func() { results <- s.writePackets([][]byte{second}, 0) }()
 	for i := 0; i < 2; i++ {
 		select {
 		case <-d.entered:
@@ -383,10 +477,9 @@ func TestMipsDarwinConcurrentOutputAndReflection(t *testing.T) {
 	second := ipPacket(netip.MustParseAddr("fd00::1"), netip.MustParseAddr("fd00::2"), 253, []byte("reflection"))
 	results := make(chan error, 2)
 	go func() {
-		var scratch [][]byte
-		results <- s.writePacketsWithBuffers([][]byte{first}, &scratch)
+		results <- s.writePackets([][]byte{first}, 0)
 	}()
-	go func() { results <- s.writePacket(second) }()
+	go func() { results <- s.writePackets([][]byte{second}, 0) }()
 	for i := 0; i < 2; i++ {
 		select {
 		case <-d.entered:

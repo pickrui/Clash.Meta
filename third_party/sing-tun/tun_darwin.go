@@ -1,10 +1,12 @@
 package tun
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"os"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -39,6 +41,11 @@ type NativeTun struct {
 	inet6Address  [16]byte
 	routeSet      bool
 	writeMsgX     bool
+
+	// writeAccess serializes writers on tunFd: sendmsg_x uses MSG_DONTWAIT, so a
+	// concurrent writer holding SB_LOCK makes the kernel free the whole batch yet
+	// still report it as fully sent. Held unconditionally to keep one write path.
+	writeAccess sync.Mutex
 }
 
 type iovecBuffer struct {
@@ -98,14 +105,14 @@ func New(options Options) (Tun, error) {
 			unix.Close(tunFd)
 			return nil, err
 		}
-		err = configure(tunFd, options.EXP_RecvMsgX, batchSize)
+		err = configure(tunFd, options.EXP_RecvMsgX, int(options.MTU))
 		if err != nil {
 			unix.Close(tunFd)
 			return nil, err
 		}
 	} else {
 		tunFd = options.FileDescriptor
-		err := configure(tunFd, options.EXP_RecvMsgX, batchSize)
+		err := configure(tunFd, options.EXP_RecvMsgX, int(options.MTU))
 		if err != nil {
 			return nil, err
 		}
@@ -140,6 +147,8 @@ func (t *NativeTun) Read(p []byte) (n int, err error) {
 }
 
 func (t *NativeTun) Write(p []byte) (n int, err error) {
+	t.writeAccess.Lock()
+	defer t.writeAccess.Unlock()
 	return t.tunFile.Write(p)
 }
 
@@ -321,19 +330,58 @@ func create(tunFd int, ifIndex int, name string, options Options) error {
 	return nil
 }
 
-func configure(tunFd int, recvMsgX bool, batchSize int) error {
+const (
+	utunReceiveBufferTarget  = 8 << 20
+	utunReceiveBufferMinimum = 1 << 20
+	utunReceiveBufferDefault = 512 << 10
+	utunMaxPendingPackets    = 64
+)
+
+func configure(tunFd int, recvMsgX bool, mtu int) error {
 	err := unix.SetNonblock(tunFd, true)
 	if err != nil {
 		return os.NewSyscallError("SetNonblock", err)
 	}
-	if recvMsgX {
-		const UTUN_OPT_MAX_PENDING_PACKETS = 16
-		err = unix.SetsockoptInt(tunFd, 2, UTUN_OPT_MAX_PENDING_PACKETS, batchSize)
-		if err != nil {
-			return os.NewSyscallError("SetsockoptInt UTUN_OPT_MAX_PENDING_PACKETS", err)
-		}
+	if !recvMsgX {
+		return nil
+	}
+	// The utun control socket drops outbound packets with ENOBUFS once the queued bytes reach
+	// SO_RCVBUF (kern_control.c ctl_rcvbspace; sbspace counts bytes only for SB_KCTL, default
+	// 512 KB), whereas reaching UTUN_OPT_MAX_PENDING_PACKETS pauses the interface until the
+	// socket is read (if_utun.c utun_start / utun_ctl_rcvd). SO_RCVBUF is clamped to
+	// kern.ipc.maxsockbuf by sbreserve.
+	receiveBuffer := raiseReceiveBuffer(tunFd)
+	pending := receiveBuffer / 8 * 7 / (mtu + PacketOffset)
+	if pending > utunMaxPendingPackets {
+		pending = utunMaxPendingPackets
+	}
+	if pending < 1 {
+		pending = 1
+	}
+	const UTUN_OPT_MAX_PENDING_PACKETS = 16
+	err = unix.SetsockoptInt(tunFd, 2, UTUN_OPT_MAX_PENDING_PACKETS, pending)
+	if err != nil {
+		return os.NewSyscallError("SetsockoptInt UTUN_OPT_MAX_PENDING_PACKETS", err)
 	}
 	return nil
+}
+
+func raiseReceiveBuffer(tunFd int) int {
+	for size := utunReceiveBufferTarget; size >= utunReceiveBufferMinimum; size /= 2 {
+		err := unix.SetsockoptInt(tunFd, unix.SOL_SOCKET, unix.SO_RCVBUF, size)
+		if err == nil {
+			break
+		}
+	}
+	current, err := unix.GetsockoptInt(tunFd, unix.SOL_SOCKET, unix.SO_RCVBUF)
+	if err != nil || current <= 0 {
+		return utunReceiveBufferDefault
+	}
+	return current
+}
+
+func (t *NativeTun) BatchSize() int {
+	return t.batchSize
 }
 
 func (t *NativeTun) BatchRead() ([]*buf.Buffer, error) {
@@ -352,6 +400,9 @@ func (t *NativeTun) BatchRead() ([]*buf.Buffer, error) {
 			t.iovecs[k].buffer = nil
 		}
 		t.buffers = t.buffers[:0]
+		if errors.Is(errno, syscall.ENOTSOCK) || errors.Is(errno, syscall.EBADF) {
+			return nil, os.ErrClosed
+		}
 		return nil, errno
 	}
 	if n < 0 {
@@ -372,6 +423,9 @@ func (t *NativeTun) BatchRead() ([]*buf.Buffer, error) {
 }
 
 func (t *NativeTun) BatchWrite(buffers []*buf.Buffer) error {
+	// Covers the shared iovecsOutput/msgHdrsOutput scratch as well as the syscall.
+	t.writeAccess.Lock()
+	defer t.writeAccess.Unlock()
 	if !t.writeMsgX {
 		for i, buffer := range buffers {
 			t.iovecsOutput[i].nextIovecsOutput(buffer)
@@ -379,6 +433,9 @@ func (t *NativeTun) BatchWrite(buffers []*buf.Buffer) error {
 		for i := range buffers {
 			errno := rawfile.NonBlockingWriteIovec(t.tunFd, t.iovecsOutput[i].iovecs)
 			if errno != 0 {
+				if errors.Is(errno, syscall.ENOTSOCK) || errors.Is(errno, syscall.EBADF) {
+					return os.ErrClosed
+				}
 				return errno
 			}
 		}
@@ -393,6 +450,9 @@ func (t *NativeTun) BatchWrite(buffers []*buf.Buffer) error {
 		for n != len(buffers) {
 			sent, errno := rawfile.NonBlockingSendMMsg(t.tunFd, t.msgHdrsOutput[n:len(buffers)])
 			if errno != 0 {
+				if errors.Is(errno, syscall.ENOTSOCK) || errors.Is(errno, syscall.EBADF) {
+					return os.ErrClosed
+				}
 				return errno
 			}
 			n += sent

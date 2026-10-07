@@ -34,7 +34,7 @@ func BenchmarkTCPMemoryProfileStream(b *testing.B) {
 }
 
 func benchmarkTCPMemoryStream(b *testing.B, defaults TCPSocketDefaults) {
-	conn, _, _ := benchmarkTCPProfileConnection(b, defaults, defaultMTU)
+	conn, _, _ := benchmarkTCPProfileConnection(b, defaults, defaultMTU, false, RXChecksumOffload{})
 	if err := conn.SetDeadline(time.Now().Add(time.Minute)); err != nil {
 		b.Fatal(err)
 	}

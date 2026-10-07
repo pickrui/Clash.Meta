@@ -5,7 +5,15 @@ import (
 
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
+	"github.com/metacubex/mihomo/tunnel/statistic"
 )
+
+func init() {
+	statistic.IsDirect = func(name string) bool {
+		proxy, ok := AllProxies()[name]
+		return ok && proxy.Type() == C.Direct
+	}
+}
 
 var (
 	allProxiesMu sync.Mutex
