@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-func newWriteTestClient(t *testing.T, packetIO PacketIO) (*Client, *DataChannel) {
+func newWriteTestClient(t *testing.T, packetIO ControlIO) (*Client, *DataChannel) {
 	t.Helper()
-	client, err := NewClient(&ClientConfig{Cipher: CipherAES128GCM, Auth: AuthSHA256}, packetIO)
+	client, err := newTestClient(&ClientConfig{Cipher: CipherAES128GCM, Auth: AuthSHA256}, packetIO)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestClientSerializesConcurrentWrites(t *testing.T) {
 }
 
 type failingWritePacketIO struct {
-	PacketIO
+	ControlIO
 	fail bool
 	err  error
 }
@@ -102,17 +102,36 @@ func (p *failingWritePacketIO) WritePacket(ctx context.Context, data []byte) err
 		p.fail = false
 		return p.err
 	}
-	return p.PacketIO.WritePacket(ctx, data)
+	return p.ControlIO.WritePacket(ctx, data)
 }
 func TestClientWriteFailureAndCancellationReleasePermit(t *testing.T) {
 	left, right := newMemoryPacketPair()
 	defer right.Close()
 	failure := errors.New("fixture write failed")
-	client, peer := newWriteTestClient(t, &failingWritePacketIO{PacketIO: left, fail: true, err: failure})
+	client, _ := newWriteTestClient(t, &failingWritePacketIO{ControlIO: left, fail: true, err: failure})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := client.WritePing(ctx); !errors.Is(err, failure) {
 		t.Fatalf("write error=%v", err)
+	}
+	cancelled, stop := context.WithCancel(ctx)
+	stop()
+	if err := client.WritePing(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled write=%v", err)
+	}
+	if err := client.WritePing(ctx); !errors.Is(err, failure) {
+		t.Fatalf("terminal error after failure: %v", err)
+	}
+}
+
+func TestClientDroppedWriteAndCancellationReleasePermit(t *testing.T) {
+	left, right := newMemoryPacketPair()
+	defer right.Close()
+	client, peer := newWriteTestClient(t, &failingWritePacketIO{ControlIO: left, fail: true, err: &packetDroppedError{cause: errors.New("packet loss")}})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.WritePing(ctx); err != nil {
+		t.Fatalf("recoverable packet loss: %v", err)
 	}
 	cancelled, stop := context.WithCancel(ctx)
 	stop()

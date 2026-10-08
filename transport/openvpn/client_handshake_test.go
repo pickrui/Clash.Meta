@@ -109,7 +109,7 @@ func handshakeTestClient(t *testing.T, encrypted bool, peerInfo ...handshakePeer
 		}
 	}
 	clientIO, serverIO := newMemoryPacketPair()
-	client, err := NewClient(config, clientIO)
+	client, err := newTestClient(config, clientIO)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +118,7 @@ func handshakeTestClient(t *testing.T, encrypted bool, peerInfo ...handshakePeer
 	copy(serverID[:], "server01")
 	server := NewControlChannel(serverIO, crypt, serverID)
 	server.SetRemoteSessionID(client.control.LocalSessionID())
+	startTestACKFlusher(t, server)
 	client.rekeyHandshakeTimeout = 100 * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

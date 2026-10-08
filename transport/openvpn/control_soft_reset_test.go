@@ -25,7 +25,7 @@ func TestLegacyClientClosesOnSoftReset(t *testing.T) {
 			}
 
 			clientIO, serverIO := newMemoryPacketPair()
-			client, err := NewClient(&config, clientIO)
+			client, err := newTestClient(&config, clientIO)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -55,6 +55,19 @@ func TestLegacyClientClosesOnSoftReset(t *testing.T) {
 			if _, err := serverControl.Send(ctx, PControlV1, nil); err != nil {
 				t.Fatal(err)
 			}
+			ackCtx, ackCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer ackCancel()
+			_, err = serverControl.Read(ackCtx)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("expected deadline after consuming client ack, got %v", err)
+			}
+			if serverControl.PendingMessages() != 0 {
+				t.Fatalf("expected client to ack ordinary control message: %d", serverControl.PendingMessages())
+			}
+			if client.control.PendingMessages() != 0 {
+				t.Fatalf("expected server ack to clear client pending messages: %d", client.control.PendingMessages())
+			}
+
 			if err := serverIO.WritePacket(ctx, []byte{opcodeKeyID(PControlSoftResetV1, 1)}); err != nil {
 				t.Fatal(err)
 			}
@@ -75,22 +88,13 @@ func TestLegacyClientClosesOnSoftReset(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("client did not close after soft reset")
 			}
-			if client.control.recvMessage != 1 {
-				t.Fatalf("soft reset changed the old epoch receive sequence: %d", client.control.recvMessage)
+			if client.LastRekeyError() == nil || client.control.KeyID() != 1 {
+				t.Fatalf("failed rekey did not record the new epoch: key=%d error=%v", client.control.KeyID(), client.LastRekeyError())
 			}
-			if client.control.PendingMessages() != 0 {
-				t.Fatalf("expected server ack to clear client pending messages: %d", client.control.PendingMessages())
+			if client.control.recvMessage != 1 {
+				t.Fatalf("unexpected new epoch receive sequence: %d", client.control.recvMessage)
 			}
 
-			ackCtx, ackCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-			defer ackCancel()
-			_, err = serverControl.Read(ackCtx)
-			if !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("expected deadline after consuming client ack, got %v", err)
-			}
-			if serverControl.PendingMessages() != 0 {
-				t.Fatalf("expected client to ack ordinary control message: %d", serverControl.PendingMessages())
-			}
 		})
 	}
 }
@@ -126,7 +130,7 @@ func TestLegacyClientControlWatcherIgnoresInvalidPackets(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			clientIO, serverIO := newMemoryPacketPair()
-			client, err := NewClient(&ClientConfig{}, clientIO)
+			client, err := newTestClient(&ClientConfig{}, clientIO)
 			if err != nil {
 				t.Fatal(err)
 			}
