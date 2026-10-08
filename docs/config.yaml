@@ -1680,6 +1680,7 @@ proxies: # socks5
     httpmask:
       disable: false # true 禁用所有 HTTP 伪装/隧道
       mode: legacy # 可选：legacy（默认）、stream（split-stream）、poll、auto（先 stream 再 poll）、ws（WebSocket 隧道）
+      # stream/poll/auto 需要支持 HTTPMask v0.5 上传序号的服务端；不兼容旧版 HTTP 隧道端点
       # tls: true # 可选：按需开启 HTTPS/WSS
       # host: "" # 可选：覆盖 Host/SNI（支持 example.com 或 example.com:443）；仅在 mode 为 stream/poll/auto/ws 时生效
       # path-root: "" # 可选：HTTP 隧道端点一级路径前缀（双方需一致），例如 "aabbcc" 或 "/aabbcc/" => /aabbcc/session、/aabbcc/stream、/aabbcc/api/v1/upload、/aabbcc/ws
@@ -2610,6 +2611,7 @@ listeners:
     httpmask:
       disable: false # true 禁用所有 HTTP 伪装/隧道
       mode: legacy # 可选：legacy（默认）、stream（split-stream）、poll、auto（先 stream 再 poll）、ws（WebSocket 隧道）
+      # stream/poll/auto 需要支持 HTTPMask v0.5 上传序号的服务端；不兼容旧版 HTTP 隧道端点
       # path-root: "" # 可选：HTTP 隧道端点一级路径前缀（双方需一致），例如 "aabbcc" 或 "/aabbcc/" => /aabbcc/session、/aabbcc/stream、/aabbcc/api/v1/upload、/aabbcc/ws
     #
     # fallback: "127.0.0.1:80" # 可选：用于可连接请求的回落转发，可与其他服务共端口

@@ -47,7 +47,7 @@ func TestPollPullSurvivesLongResponse(t *testing.T) {
 					ctx: ctx, cancel: cancel, client: client,
 					pullURL:    "http://fixture.invalid/stream?token=session",
 					closeURL:   "http://fixture.invalid/api/v1/upload?token=session&close=1",
-					headerHost: "fixture.invalid", auth: newTunnelAuth("", 0),
+					headerHost: "fixture.invalid",
 				}
 				defer conn.Close()
 				done := make(chan struct{})

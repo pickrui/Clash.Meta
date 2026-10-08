@@ -71,7 +71,7 @@ func TestHTTPMaskTunnelEarlyHandshakeRetries(t *testing.T) {
 					}
 					downlink = memory.Written()
 					_ = conn.Close()
-					fmt.Fprintf(w, "token=retrySession\ned=%s\n", base64.RawURLEncoding.EncodeToString(state.ResponsePayload))
+					fmt.Fprintf(w, "token=retrySession\ncap=upload-seq\ned=%s\n", base64.RawURLEncoding.EncodeToString(state.ResponsePayload))
 				case "/stream":
 					mu.Lock()
 					payload := append([]byte(nil), downlink...)
