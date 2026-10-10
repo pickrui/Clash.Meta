@@ -9,11 +9,14 @@ import (
 	stdhttp "net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/metacubex/http"
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/listener/inner"
 )
 
 type redirectDialer struct {
@@ -232,5 +235,79 @@ func TestRaceReadsDoesNotStartCanceledOperation(t *testing.T) {
 	case <-started:
 		t.Fatal("canceled operation started a read")
 	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+type forwardTunnel struct {
+	target  string
+	special string
+	once    sync.Once
+	reached chan struct{}
+}
+
+func (t *forwardTunnel) HandleTCPConn(conn net.Conn, metadata *C.Metadata) {
+	t.once.Do(func() { t.special = metadata.SpecialProxy; close(t.reached) })
+	defer conn.Close()
+	upstream, err := net.Dial("tcp", t.target)
+	if err != nil {
+		return
+	}
+	defer upstream.Close()
+	go func() { _, _ = io.Copy(upstream, conn); _ = upstream.Close() }()
+	_, _ = io.Copy(conn, upstream)
+}
+func (t *forwardTunnel) HandleUDPPacket(C.UDPPacket, *C.Metadata) {}
+func (t *forwardTunnel) NatTable() C.NatTable                     { return nil }
+
+func TestGetKeepsSpecialProxyReadsOffTheDirectRoute(t *testing.T) {
+	for _, special := range []string{"", "pinned"} {
+		t.Run(fmt.Sprintf("%q", special), func(t *testing.T) {
+			tunneled := httptest.NewServer(stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+				if special == "" {
+					<-r.Context().Done()
+					return
+				}
+				select {
+				case <-time.After(50 * time.Millisecond):
+					_, _ = io.WriteString(w, "tunneled")
+				case <-r.Context().Done():
+				}
+			}))
+			defer tunneled.Close()
+			tunnel := &forwardTunnel{target: tunneled.Listener.Addr().String(), reached: make(chan struct{})}
+			var directReads atomic.Int32
+			direct := httptest.NewServer(stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+				directReads.Add(1)
+				select {
+				case <-tunnel.reached:
+					_, _ = io.WriteString(w, "direct")
+				case <-r.Context().Done():
+				}
+			}))
+			defer direct.Close()
+			previous := inner.GetTunnel()
+			inner.New(tunnel)
+			defer inner.New(previous)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_, data, err := Get(ctx, direct.URL+"/?token=private", nil, 64, nil, WithSpecialProxy(special))
+			select {
+			case <-tunnel.reached:
+			case <-time.After(time.Second):
+				t.Fatal("configured route did not reach the tunnel")
+			}
+			if tunnel.special != special {
+				t.Fatalf("tunnel route used proxy %q", tunnel.special)
+			}
+			if special == "" {
+				if err != nil || string(data) != "direct" || directReads.Load() != 1 {
+					t.Fatalf("unpinned read lost the direct route: data=%q err=%v direct reads=%d", data, err, directReads.Load())
+				}
+				return
+			}
+			if err != nil || string(data) != "tunneled" || directReads.Load() != 0 {
+				t.Fatalf("read pinned to %q went direct: data=%q err=%v direct reads=%d", special, data, err, directReads.Load())
+			}
+		})
 	}
 }

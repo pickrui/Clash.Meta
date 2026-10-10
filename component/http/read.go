@@ -126,7 +126,8 @@ type readResponse struct {
 
 // Get reads the configured route and explicit direct route concurrently. Only a
 // complete successful body accepted by validate can win. With no configured
-// tunnel/dialer, a single explicit direct read avoids duplicate requests.
+// tunnel/dialer, a single explicit direct read avoids duplicate requests. A read
+// pinned to a special proxy uses only the configured route.
 func Get(ctx context.Context, address string, header map[string][]string, maxBytes int64, validate func(*http.Response, []byte) error, options ...Option) (*http.Response, []byte, error) {
 	if maxBytes <= 0 {
 		maxBytes = MaxReadBytes
@@ -158,6 +159,9 @@ func Get(ctx context.Context, address string, header map[string][]string, maxByt
 	routes := [][]Option{append(append([]Option{}, options...), WithDialer(direct))}
 	if inner.GetTunnel() != nil || opt.dialer != nil {
 		routes = append([][]Option{options}, routes...)
+		if opt.specialProxy != "" {
+			routes = routes[:1]
+		}
 	}
 	attempts := make([]func(context.Context) (readResponse, error), 0, len(routes))
 	for _, route := range routes {
