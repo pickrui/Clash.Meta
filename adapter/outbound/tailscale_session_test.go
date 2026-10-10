@@ -322,6 +322,53 @@ func TestTailscaleTrafficNeverBeginsALogin(t *testing.T) {
 	require.Equal(t, TailscaleIdle, status.State, "a dial started the network")
 }
 
+func ownTailscaleSession(tailscale *Tailscale) *tailscaleSession {
+	tailscale.mu.Lock()
+	defer tailscale.mu.Unlock()
+	return tailscale.session
+}
+
+// A config apply while control waits for the user replaces the outbound that
+// began the login; the new outbound takes the session over, so the linger
+// does not end the login and the routes stay published.
+func TestTailscaleApplyDuringLoginKeepsTheSession(t *testing.T) {
+	useTailscaleHome(t)
+	previousLinger := tailscaleSessionLinger
+	tailscaleSessionLinger = 20 * time.Millisecond
+	t.Cleanup(func() { tailscaleSessionLinger = previousLinger })
+
+	option := TailscaleOption{Name: "Pending", StateDir: "tailscale-networks/pending"}
+	replaced, err := NewTailscale(option)
+	require.NoError(t, err)
+	// What Login leaves while control waits: a started session whose backend
+	// is up, and no saved login profile yet.
+	session, err := replaced.acquireSession("")
+	require.NoError(t, err)
+	session.mu.Lock()
+	session.started = true
+	session.mu.Unlock()
+	session.setBackendInitialized(nil)
+	session.routes.Store(tailnet.NewRoutes(nil, []string{"nas"}, nil, nil))
+
+	current, err := NewTailscale(option)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = current.Close() })
+	// The apply closes the replaced outbound, then warms the new one.
+	require.NoError(t, replaced.Close())
+	current.Warm()
+
+	require.Eventually(t, func() bool {
+		return ownTailscaleSession(current) == session
+	}, time.Second, 5*time.Millisecond, "the new outbound takes the login session over")
+	time.Sleep(5 * tailscaleSessionLinger)
+	require.False(t, session.isClosed(), "the login outlives the linger")
+	require.NotNil(t, tailnet.Lookup("Pending"))
+	tailscaleSessions.mu.Lock()
+	refs := session.refs
+	tailscaleSessions.mu.Unlock()
+	require.Equal(t, 1, refs)
+}
+
 func TestTailscaleExitNodeKeepsPublicNamesInTheTailnet(t *testing.T) {
 	useTailscaleHome(t)
 	tailscale, err := NewTailscale(TailscaleOption{

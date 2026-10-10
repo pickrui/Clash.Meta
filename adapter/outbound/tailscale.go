@@ -257,6 +257,13 @@ func (t *Tailscale) currentSession() *tailscaleSession {
 	return session
 }
 
+// sessionRunning reports a started session serving this outbound, or one a
+// replaced outbound left in the pool.
+func (t *Tailscale) sessionRunning() bool {
+	session := t.currentSession()
+	return session != nil && !session.isClosed() && session.isStarted()
+}
+
 // startsUnattended reports a network that can come up without the user: one
 // that is signed in or has an auth key.
 func (t *Tailscale) startsUnattended() bool {
@@ -272,10 +279,7 @@ func (t *Tailscale) needsLogin() bool {
 	if closed || (own != nil && own.isClosed() && !errors.Is(own.closeError(), errTailscaleRetired)) {
 		return false
 	}
-	if session := t.currentSession(); session != nil && !session.isClosed() && session.isStarted() {
-		return false
-	}
-	return !t.startsUnattended()
+	return !t.sessionRunning() && !t.startsUnattended()
 }
 
 func (t *Tailscale) ensureStarted(ctx context.Context) (*tailscaleSession, error) {
@@ -303,10 +307,11 @@ func (t *Tailscale) ensureStarted(ctx context.Context) (*tailscaleSession, error
 	return session, nil
 }
 
-// Warm starts a network that can come up without the user. Any other network
-// waits for Login, so a config apply never requests a login page.
+// Warm starts a network that can come up without the user, and takes over a
+// session a replaced outbound left running, such as a login in progress. Any
+// other network waits for Login, so a config apply never requests a login page.
 func (t *Tailscale) Warm() {
-	if !t.startsUnattended() {
+	if !t.startsUnattended() && !t.sessionRunning() {
 		return
 	}
 	go func() {
