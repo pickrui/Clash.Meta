@@ -50,6 +50,10 @@ func (p *Pool) Get() (net.Conn, error) {
 
 func (p *Pool) GetContext(ctx context.Context) (net.Conn, error) {
 	for {
+		// A canceled request closes the connection it takes before using it.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		entry, err := p.pool.GetContext(ctx)
 		if err != nil {
 			return nil, err

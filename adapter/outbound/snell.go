@@ -409,6 +409,9 @@ func (s *Snell) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn
 			}
 			if err = s.writeHeaderContext(ctx, c, metadata); err != nil {
 				_ = c.Close()
+				if ctx.Err() != nil {
+					return nil, err
+				}
 				continue
 			}
 			if poolConn, ok := c.(*snell.PoolConn); ok {

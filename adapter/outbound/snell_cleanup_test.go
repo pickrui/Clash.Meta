@@ -13,12 +13,81 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/transport/snell"
 )
+
+// countingSnellDialer counts dials, and hands out the connections newConn makes
+// to the dials that are not canceled.
+type countingSnellDialer struct {
+	C.Dialer
+	newConn func(n int32) net.Conn // the n-th connection handed out
+	dials   atomic.Int32
+	conns   atomic.Int32
+}
+
+func (d *countingSnellDialer) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
+	d.dials.Add(1)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return d.newConn(d.conns.Add(1)), nil
+}
+
+// discardingPipe returns a connection whose peer discards what it reads.
+func discardingPipe(int32) net.Conn {
+	conn, peer := net.Pipe()
+	go func() {
+		_, _ = io.Copy(io.Discard, peer)
+		_ = peer.Close()
+	}()
+	return conn
+}
+
+// stalledConn fails its writes, or blocks them until it is closed.
+type stalledConn struct {
+	failWrites bool
+	writing    chan struct{}
+	closed     chan struct{}
+	closeOnce  sync.Once
+}
+
+func newStalledConn(failWrites bool) *stalledConn {
+	return &stalledConn{failWrites: failWrites, writing: make(chan struct{}, 1), closed: make(chan struct{})}
+}
+
+func (c *stalledConn) Read([]byte) (int, error) {
+	<-c.closed
+	return 0, net.ErrClosed
+}
+
+func (c *stalledConn) Write([]byte) (int, error) {
+	if c.failWrites {
+		return 0, io.ErrClosedPipe
+	}
+	select {
+	case c.writing <- struct{}{}:
+	default:
+	}
+	<-c.closed
+	return 0, net.ErrClosed
+}
+
+func (c *stalledConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func (*stalledConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (*stalledConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (*stalledConn) SetDeadline(time.Time) error      { return nil }
+func (*stalledConn) SetReadDeadline(time.Time) error  { return nil }
+func (*stalledConn) SetWriteDeadline(time.Time) error { return nil }
 
 type cleanupTestDialer struct {
 	C.Dialer
@@ -87,5 +156,91 @@ func TestSnellPoolWarmupCancellationClosesRawConnection(t *testing.T) {
 	}
 	if _, err := peer.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 		t.Fatalf("raw connection remains open: %v", err)
+	}
+}
+
+func TestSnellCanceledDialKeepsIdlePooledConnections(t *testing.T) {
+	dialer := &countingSnellDialer{newConn: discardingPipe}
+	adapter, err := NewSnell(SnellOption{
+		BasicOption: BasicOption{DialerForAPI: dialer},
+		Name:        "snell", Server: "127.0.0.1", Port: 443, Psk: "password", Version: snell.Version4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = adapter.Close() })
+	adapter.pool.Warm(context.Background(), 2)
+	if conns := dialer.conns.Load(); conns != 2 {
+		t.Fatalf("warmed %d connections, want 2", conns)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	conn, err := adapter.DialContext(ctx, &C.Metadata{NetWork: C.TCP, Host: "example.com", DstPort: 80})
+	if conn != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("connection=%v error=%v", conn, err)
+	}
+	if dials := dialer.dials.Load(); dials != 2 {
+		t.Errorf("canceled request dialed: %d dials, want 2", dials)
+	}
+	reused := 0
+	for range 2 {
+		conn, err := adapter.pool.GetContext(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if conn.(*snell.PoolConn).Reused() {
+			reused++
+		}
+		_ = conn.Close()
+	}
+	if reused != 2 {
+		t.Errorf("%d of 2 idle connections survived the canceled request", reused)
+	}
+}
+
+func TestSnellCanceledRequestHeaderDoesNotDialAgain(t *testing.T) {
+	stalled := newStalledConn(false)
+	dialer := &countingSnellDialer{newConn: func(n int32) net.Conn {
+		if n == 1 {
+			return newStalledConn(true)
+		}
+		return stalled
+	}}
+	adapter, err := NewSnell(SnellOption{
+		BasicOption: BasicOption{DialerForAPI: dialer},
+		Name:        "snell", Server: "127.0.0.1", Port: 443, Psk: "password", Version: snell.Version4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = adapter.Close(); _ = stalled.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		conn, err := adapter.DialContext(ctx, &C.Metadata{NetWork: C.TCP, Host: "example.com", DstPort: 80})
+		if conn != nil {
+			_ = conn.Close()
+		}
+		done <- err
+	}()
+	select {
+	case <-stalled.writing:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second attempt did not write its request")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the canceled request did not return")
+	}
+	if dials := dialer.dials.Load(); dials != 2 {
+		t.Fatalf("canceled request dialed again: %d dials, want 2", dials)
 	}
 }
