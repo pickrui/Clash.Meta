@@ -2,6 +2,7 @@ package listener
 
 func StopListener() {
 
+	socksMux.Lock()
 	if socksListener != nil {
 		_ = socksListener.Close()
 		socksListener = nil
@@ -11,12 +12,16 @@ func StopListener() {
 		_ = socksUDPListener.Close()
 		socksUDPListener = nil
 	}
+	socksMux.Unlock()
 
+	httpMux.Lock()
 	if httpListener != nil {
 		_ = httpListener.Close()
 		httpListener = nil
 	}
+	httpMux.Unlock()
 
+	redirMux.Lock()
 	if redirListener != nil {
 		_ = redirListener.Close()
 		redirListener = nil
@@ -26,7 +31,9 @@ func StopListener() {
 		_ = redirUDPListener.Close()
 		redirUDPListener = nil
 	}
+	redirMux.Unlock()
 
+	tproxyMux.Lock()
 	if tproxyListener != nil {
 		_ = tproxyListener.Close()
 		tproxyListener = nil
@@ -36,7 +43,9 @@ func StopListener() {
 		_ = tproxyUDPListener.Close()
 		tproxyUDPListener = nil
 	}
+	tproxyMux.Unlock()
 
+	mixedMux.Lock()
 	if mixedListener != nil {
 		_ = mixedListener.Close()
 		mixedListener = nil
@@ -46,24 +55,33 @@ func StopListener() {
 		_ = mixedUDPLister.Close()
 		mixedUDPLister = nil
 	}
+	mixedMux.Unlock()
 
+	tunMux.Lock()
 	if tunLister != nil {
 		_ = tunLister.Close()
 		tunLister = nil
 	}
+	tunMux.Unlock()
 
+	ssMux.Lock()
 	if shadowSocksListener != nil {
 		_ = shadowSocksListener.Close()
 		shadowSocksListener = nil
 	}
+	ssMux.Unlock()
 
+	vmessMux.Lock()
 	if vmessListener != nil {
 		_ = vmessListener.Close()
 		vmessListener = nil
 	}
+	vmessMux.Unlock()
 
+	tuicMux.Lock()
 	if tuicListener != nil {
 		_ = tuicListener.Close()
 		tuicListener = nil
 	}
+	tuicMux.Unlock()
 }
