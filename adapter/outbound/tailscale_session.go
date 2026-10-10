@@ -326,10 +326,16 @@ func (s *tailscaleSession) start() (startedNow bool, err error) {
 	return true, nil
 }
 
+// tailscaleStartError is the close reason of a session that could not start.
+type tailscaleStartError struct{ error }
+
+func (e tailscaleStartError) Unwrap() error { return e.error }
+
 // failLocked retires a session that could not start, so the next config
-// apply builds a fresh one instead of inheriting the failure.
+// apply, Login or unattended Warm builds a fresh one instead of inheriting the
+// failure.
 func (s *tailscaleSession) failLocked(err error) {
-	s.closeLocked(err)
+	s.closeLocked(tailscaleStartError{err})
 	tailscaleSessions.drop(s)
 }
 

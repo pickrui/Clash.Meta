@@ -242,6 +242,18 @@ func (t *Tailscale) releaseLocked() {
 	t.unregister = nil
 }
 
+// releaseFailedStart lets an explicit start replace a session that could not
+// start. Traffic keeps reporting the failure, as upstream keeps it for the
+// outbound's lifetime: a failed tsnet start does not release everything it
+// created, so a lasting failure is not retried for every connection.
+func (t *Tailscale) releaseFailedStart() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.session != nil && t.session.isClosed() && errors.As(t.session.closeError(), new(tailscaleStartError)) {
+		t.releaseLocked()
+	}
+}
+
 // currentSession returns the live session serving this outbound without
 // starting one.
 func (t *Tailscale) currentSession() *tailscaleSession {
@@ -307,11 +319,14 @@ func (t *Tailscale) ensureStarted(ctx context.Context) (*tailscaleSession, error
 	return session, nil
 }
 
-// Warm starts a network that can come up without the user, and takes over a
-// session a replaced outbound left running, such as a login in progress. Any
-// other network waits for Login, so a config apply never requests a login page.
+// Warm starts a network that can come up without the user, retrying one that
+// could not start, and takes over a session a replaced outbound left running,
+// such as a login in progress. Any other network waits for Login, so a config
+// apply never requests a login page.
 func (t *Tailscale) Warm() {
-	if !t.startsUnattended() && !t.sessionRunning() {
+	if t.startsUnattended() {
+		t.releaseFailedStart()
+	} else if !t.sessionRunning() {
 		return
 	}
 	go func() {
@@ -326,6 +341,7 @@ func (t *Tailscale) Warm() {
 // Login asks control to authorize this device, with authKey when given and
 // interactively otherwise; the login page then appears in Status as AuthURL.
 func (t *Tailscale) Login(ctx context.Context, authKey string) error {
+	t.releaseFailedStart()
 	session, err := t.acquireSession(authKey)
 	if err != nil {
 		return err

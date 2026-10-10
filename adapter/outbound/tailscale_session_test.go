@@ -369,6 +369,65 @@ func TestTailscaleApplyDuringLoginKeepsTheSession(t *testing.T) {
 	require.Equal(t, 1, refs)
 }
 
+// brokenTailscaleStateDir puts a file where the state directory belongs, so
+// tsnet fails to start at once, before it touches the network.
+func brokenTailscaleStateDir(t *testing.T, name string) string {
+	t.Helper()
+	networks := filepath.Join(C.Path.HomeDir(), "tailscale-networks")
+	require.NoError(t, os.MkdirAll(networks, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(networks, name), nil, 0o600))
+	return "tailscale-networks/" + name
+}
+
+func TestTailscaleLoginRetriesAFailedStart(t *testing.T) {
+	useTailscaleHome(t)
+	tailscale, err := NewTailscale(TailscaleOption{Name: "Broken", StateDir: brokenTailscaleStateDir(t, "broken")})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tailscale.Close() })
+
+	loginErr := tailscale.Login(context.Background(), "")
+	require.Error(t, loginErr)
+	failed := ownTailscaleSession(tailscale)
+	require.True(t, failed.isClosed())
+	status, err := tailscale.Status(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, TailscaleIdle, status.State)
+	require.Equal(t, loginErr.Error(), status.Error)
+
+	// Traffic keeps the error instead of starting tsnet for every connection.
+	_, err = tailscale.DialContext(context.Background(), &C.Metadata{
+		NetWork: C.TCP, DstIP: netip.MustParseAddr("100.64.0.2"), DstPort: 80,
+	})
+	require.EqualError(t, err, loginErr.Error())
+	require.Same(t, failed, ownTailscaleSession(tailscale))
+
+	require.EqualError(t, tailscale.Login(context.Background(), ""), loginErr.Error())
+	retried := ownTailscaleSession(tailscale)
+	require.NotSame(t, failed, retried, "Login starts a fresh session")
+	require.True(t, retried.isClosed())
+}
+
+func TestTailscaleWarmRetriesAFailedStart(t *testing.T) {
+	useTailscaleHome(t)
+	tailscale, err := NewTailscale(TailscaleOption{
+		Name: "BrokenKey", StateDir: brokenTailscaleStateDir(t, "broken-key"), AuthKey: "tskey-auth-test",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tailscale.Close() })
+
+	failedStart := func(previous *tailscaleSession) func() bool {
+		return func() bool {
+			session := ownTailscaleSession(tailscale)
+			return session != nil && session != previous && session.isClosed()
+		}
+	}
+	tailscale.Warm()
+	require.Eventually(t, failedStart(nil), time.Second, 5*time.Millisecond)
+	failed := ownTailscaleSession(tailscale)
+	tailscale.Warm()
+	require.Eventually(t, failedStart(failed), time.Second, 5*time.Millisecond, "Warm starts a fresh session")
+}
+
 func TestTailscaleExitNodeKeepsPublicNamesInTheTailnet(t *testing.T) {
 	useTailscaleHome(t)
 	tailscale, err := NewTailscale(TailscaleOption{
