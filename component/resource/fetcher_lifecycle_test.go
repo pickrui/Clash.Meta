@@ -3,7 +3,11 @@ package resource
 import (
 	"context"
 	"errors"
+	"io"
+	stdhttp "net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -116,5 +120,110 @@ func TestFetcherMetadataDuringUpdate(t *testing.T) {
 	group.Wait()
 	if fetcher.UpdatedAt().IsZero() {
 		t.Fatal("update time not published")
+	}
+}
+
+func TestSideUpdateDoesNotWaitForRemoteRead(t *testing.T) {
+	for _, remote := range []string{"remote", "local"} {
+		t.Run(remote, func(t *testing.T) {
+			requested, release := make(chan struct{}, 1), make(chan struct{})
+			server := httptest.NewServer(stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+				requested <- struct{}{}
+				select {
+				case <-release:
+					_, _ = io.WriteString(w, remote)
+				case <-r.Context().Done():
+				}
+			}))
+			t.Cleanup(server.Close)
+			var releaseOnce sync.Once
+			t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+			var mu sync.Mutex
+			var published, discarded []string
+			vehicle := NewHTTPVehicle(server.URL, filepath.Join(t.TempDir(), "provider"), "", nil, 5*time.Second, 0)
+			fetcher := NewFetcher("test", 0, vehicle, nil, func(data []byte) (string, error) { return string(data), nil }, func(contents string) {
+				mu.Lock()
+				defer mu.Unlock()
+				published = append(published, contents)
+			})
+			fetcher.SetDiscard(func(contents string) {
+				mu.Lock()
+				defer mu.Unlock()
+				discarded = append(discarded, contents)
+			})
+			t.Cleanup(func() { _ = fetcher.Close(); fetcher.WaitForUpdates() })
+			updated := make(chan error, 1)
+			go func() { _, _, err := fetcher.Update(); updated <- err }()
+			select {
+			case <-requested:
+			case <-time.After(time.Second):
+				t.Fatal("remote read did not start")
+			}
+			sideLoaded := make(chan error, 1)
+			go func() { _, _, err := fetcher.SideUpdate([]byte("local")); sideLoaded <- err }()
+			select {
+			case err := <-sideLoaded:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("side load waited for the remote read")
+			}
+			releaseOnce.Do(func() { close(release) })
+			if err := <-updated; err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if !slices.Equal(published, []string{"local"}) {
+				t.Fatalf("published %q; the side load must stay published exactly once", published)
+			}
+			if !slices.Equal(discarded, []string{remote}) {
+				t.Fatalf("discarded %q; the unpublished remote candidate must be released once", discarded)
+			}
+		})
+	}
+}
+
+func TestWaitForUpdatesDrainsParserInsideRemoteRead(t *testing.T) {
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) { _, _ = io.WriteString(w, "remote") }))
+	t.Cleanup(server.Close)
+	started, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	var published, discarded atomic.Int32
+	vehicle := NewHTTPVehicle(server.URL, filepath.Join(t.TempDir(), "provider"), "", nil, 5*time.Second, 0)
+	fetcher := NewFetcher("test", 0, vehicle, nil, func(data []byte) (string, error) {
+		close(started)
+		<-release
+		return string(data), nil
+	}, func(string) { published.Add(1) })
+	fetcher.SetDiscard(func(string) { discarded.Add(1) })
+	updated := make(chan error, 1)
+	go func() { _, _, err := fetcher.Update(); updated <- err }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("remote candidate was not parsed")
+	}
+	_ = fetcher.Close()
+	drained := make(chan struct{})
+	go func() { fetcher.WaitForUpdates(); close(drained) }()
+	select {
+	case <-drained:
+		t.Fatal("retirement finished while the remote candidate was still being parsed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("retirement did not drain")
+	}
+	if err := <-updated; !errors.Is(err, context.Canceled) {
+		t.Fatalf("update error = %v", err)
+	}
+	if published.Load() != 0 || discarded.Load() != 1 {
+		t.Fatalf("published=%d discarded=%d", published.Load(), discarded.Load())
 	}
 }

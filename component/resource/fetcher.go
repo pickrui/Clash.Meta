@@ -35,6 +35,7 @@ type Fetcher[V any] struct {
 	onUpdate     func(V)
 	discard      func(V)
 	watcher      *fswatch.Watcher
+	updateMutex  sync.Mutex // serializes vehicle reads; loadBufMutex only guards publishing
 	loadBufMutex sync.Mutex
 	backoff      slowdown.Backoff
 }
@@ -125,19 +126,22 @@ func (f *Fetcher[V]) Initial() (V, error) {
 func (f *Fetcher[V]) SetDiscard(discard func(V)) { f.discard = discard }
 
 func (f *Fetcher[V]) Update() (V, bool, error) {
-	f.loadBufMutex.Lock()
-	defer f.loadBufMutex.Unlock()
+	f.updateMutex.Lock()
+	defer f.updateMutex.Unlock()
 	if err := f.ctx.Err(); err != nil {
 		return lo.Empty[V](), false, err
 	}
+	f.loadBufMutex.Lock()
+	oldHash := f.hash
+	f.loadBufMutex.Unlock()
 	var buf []byte
 	var hash utils.HashType
 	var contents V
 	var parsed bool
 	var err error
 	if vehicle, ok := f.vehicle.(*HTTPVehicle); ok {
-		buf, hash, err = vehicle.ReadValidated(f.ctx, f.hash, func(data []byte) error {
-			if f.hash.Equal(utils.MakeHash(data)) {
+		buf, hash, err = vehicle.ReadValidated(f.ctx, oldHash, func(data []byte) error {
+			if oldHash.Equal(utils.MakeHash(data)) {
 				return nil
 			}
 			var parseErr error
@@ -146,7 +150,7 @@ func (f *Fetcher[V]) Update() (V, bool, error) {
 			return parseErr
 		}, true)
 	} else {
-		buf, hash, err = f.vehicle.Read(f.ctx, f.hash)
+		buf, hash, err = f.vehicle.Read(f.ctx, oldHash)
 	}
 	if err != nil {
 		if parsed && f.discard != nil {
@@ -154,6 +158,11 @@ func (f *Fetcher[V]) Update() (V, bool, error) {
 		}
 		f.backoff.AddAttempt()
 		return lo.Empty[V](), false, err
+	}
+	f.loadBufMutex.Lock()
+	defer f.loadBufMutex.Unlock()
+	if !f.hash.Equal(oldHash) && !f.hash.Equal(hash) {
+		buf = nil // a side load published during the read supersedes it
 	}
 	return f.loadBufLocked(buf, hash, f.vehicle.Type() != P.File, contents, parsed)
 }
@@ -244,6 +253,8 @@ func (f *Fetcher[V]) Close() error {
 
 // WaitForUpdates drains in-flight writes after Close; parsers may call Close themselves.
 func (f *Fetcher[V]) WaitForUpdates() {
+	f.updateMutex.Lock()
+	f.updateMutex.Unlock()
 	f.loadBufMutex.Lock()
 	f.loadBufMutex.Unlock()
 }
