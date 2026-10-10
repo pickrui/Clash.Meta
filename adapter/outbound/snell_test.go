@@ -294,3 +294,55 @@ func TestSnellRejectsDisabledIdentityForECHTLS(t *testing.T) {
 		t.Fatalf("NewSnell() error = %v, want disabled identity error", err)
 	}
 }
+
+func TestSnellClampsPreconnect(t *testing.T) {
+	echConfig, _, err := ech.GenECHConfig("front.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		obfs map[string]any
+		want int
+	}{
+		{"tls above", map[string]any{"mode": "tls", "preconnect": 200}, 4},
+		{"plain below", map[string]any{"preconnect": -1}, 0},
+		{"ech-tls above", map[string]any{"mode": "ech-tls", "ech-config": echConfig, "preconnect": 5}, 4},
+		{"ech-tls below", map[string]any{"mode": "ech-tls", "ech-config": echConfig, "preconnect": -2}, 0},
+		{"ech-tls within", map[string]any{"mode": "ech-tls", "ech-config": echConfig, "preconnect": 3}, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			adapter, err := NewSnell(SnellOption{
+				BasicOption: BasicOption{DialerForAPI: &countingSnellDialer{gate: make(chan struct{})}},
+				Name:        "snell", Server: "127.0.0.1", Port: 443, Psk: "password", Version: 4, ObfsOpts: tc.obfs,
+			})
+			if err != nil {
+				t.Fatalf("NewSnell() error = %v", err)
+			}
+			defer adapter.Close()
+			if got := adapter.obfsOption.Preconnect; got != tc.want {
+				t.Fatalf("preconnect = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSnellPreconnectWarmsAtMostTheSupportedCount(t *testing.T) {
+	dialer := &countingSnellDialer{newConn: discardingPipe}
+	adapter, err := NewSnell(SnellOption{
+		BasicOption: BasicOption{DialerForAPI: dialer},
+		Name:        "snell", Server: "127.0.0.1", Port: 443, Psk: "password", Version: 4,
+		ObfsOpts: map[string]any{"mode": "tls", "preconnect": 200},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adapter.Close()
+	for deadline := time.Now().Add(5 * time.Second); dialer.dials.Load() < 4 && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if dials := dialer.dials.Load(); dials != 4 {
+		t.Fatalf("preconnect 200 dialed %d connections, want 4", dials)
+	}
+}

@@ -135,6 +135,7 @@ const (
 	defaultSnellClientFingerprint   = "chrome"
 	snellECHTLSSessionCacheCapacity = 32
 	snellECHTLSPreconnectTimeout    = 10 * time.Second
+	snellMaxPreconnect              = 4
 )
 
 const (
@@ -721,9 +722,6 @@ func NewSnell(option SnellOption) (*Snell, error) {
 		default:
 			return nil, fmt.Errorf("unsupported snell ech-tls transport: %s", echTLSTransport)
 		}
-		if obfsOption.Preconnect < 0 || obfsOption.Preconnect > 4 {
-			return nil, fmt.Errorf("snell %s preconnect must be between 0 and 4", addr)
-		}
 		obfsOption.Host = snellECHTLSHost(obfsOption, option.Server)
 		obfsOption.SkipCertVerify = obfsOption.SkipCertVerify || obfsOption.Insecure
 		if obfsOption.SkipCertVerify {
@@ -732,6 +730,10 @@ func NewSnell(option SnellOption) (*Snell, error) {
 	}
 	if isSnellECHTLSMode(obfsOption.Mode) && obfsOption.CAFile != "" && obfsOption.SkipCertVerify {
 		return nil, fmt.Errorf("snell %s ca-file and insecure/skip-cert-verify are mutually exclusive", addr)
+	}
+	if preconnect := min(max(obfsOption.Preconnect, 0), snellMaxPreconnect); preconnect != obfsOption.Preconnect {
+		log.Warnln("[Snell] %s preconnect %d is outside 0-%d, using %d", addr, obfsOption.Preconnect, snellMaxPreconnect, preconnect)
+		obfsOption.Preconnect = preconnect
 	}
 
 	// backward compatible
