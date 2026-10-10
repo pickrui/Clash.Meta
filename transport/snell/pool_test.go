@@ -250,3 +250,81 @@ func TestPoolWarmStopsOnceClosed(t *testing.T) {
 		t.Fatalf("warm-up dialed %d connections, want 1 before the pool closed", dials)
 	}
 }
+
+// The pool only ages entries out when something asks for one, so a connection
+// nobody asks for would hold its transport (an HTTP/3 stream pins its QUIC
+// session) for as long as the pool lives.
+func TestPooledConnectionIsClosedAfterItsIdleAgeWithoutAGet(t *testing.T) {
+	pool := NewPool(func(context.Context) (*Snell, error) {
+		return &Snell{Conn: newScriptedConn()}, nil
+	})
+	pool.idleAge = 50 * time.Millisecond
+	idle := newScriptedConn()
+	pool.put(&Snell{Conn: idle}, 0)
+
+	waitClosed(t, idle)
+	conn, err := pool.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pc := conn.(*PoolConn); pc.Reused() {
+		t.Fatal("an aged-out connection was handed out")
+	}
+}
+
+func TestClaimedPooledConnectionOutlivesItsIdleAge(t *testing.T) {
+	pool := NewPool(func(context.Context) (*Snell, error) {
+		return nil, errors.New("unexpected dial")
+	})
+	pool.idleAge = 100 * time.Millisecond
+	busy := newScriptedConn()
+	pool.put(&Snell{Conn: busy}, 0)
+	conn, err := pool.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc := conn.(*PoolConn)
+	if !pc.Reused() {
+		t.Fatal("the idle connection was not reused")
+	}
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-busy.closed:
+		t.Fatal("a connection in use was closed by its idle age")
+	default:
+	}
+}
+
+func TestRepooledConnectionStartsANewIdleAge(t *testing.T) {
+	pool := NewPool(func(context.Context) (*Snell, error) {
+		return nil, errors.New("unexpected dial")
+	})
+	pool.idleAge = 300 * time.Millisecond
+	client, server := net.Pipe()
+	defer server.Close()
+	closed := make(chan struct{})
+	go func() { _, _ = io.Copy(io.Discard, server); close(closed) }()
+	pool.put(&Snell{Conn: client}, 0)
+	time.Sleep(200 * time.Millisecond)
+	taken, err := pool.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _ = server.Write([]byte{'x'}) }()
+	pooled := taken.(*PoolConn).Snell
+	if _, err = pooled.Conn.Read(make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
+	pool.put(pooled, 0)
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case <-closed:
+		t.Fatal("the first wait's timer closed a connection parked again")
+	default:
+	}
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the connection parked again was never closed")
+	}
+}

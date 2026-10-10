@@ -17,6 +17,8 @@ type Pool struct {
 	factory        func(context.Context) (*Snell, error)
 	maxUsesPerConn int
 	closed         atomic.Bool
+	// idleAge is how long a connection may wait in the pool.
+	idleAge time.Duration
 }
 
 func (p *Pool) Warm(ctx context.Context, count int) {
@@ -38,6 +40,7 @@ const (
 	poolConnClosedBeforeReuse
 
 	defaultMaxUsesPerConn = 2
+	defaultIdleAge        = 15 * time.Second
 )
 
 type pooledEntry struct {
@@ -101,7 +104,7 @@ func (p *Pool) put(conn *Snell, uses int) {
 		idle = &idleConn{Conn: conn.Conn}
 		conn.Conn = idle
 	}
-	idle.park()
+	idle.park(p.idleAge)
 	p.pool.Put(&pooledEntry{conn: conn, uses: uses, idle: idle})
 }
 
@@ -193,7 +196,7 @@ func (pc *PoolConn) Close() error {
 }
 
 func NewPool(factory func(context.Context) (*Snell, error)) *Pool {
-	p := &Pool{factory: factory, maxUsesPerConn: defaultMaxUsesPerConn}
+	p := &Pool{factory: factory, maxUsesPerConn: defaultMaxUsesPerConn, idleAge: defaultIdleAge}
 	p.pool = pool.New[*pooledEntry](
 		func(ctx context.Context) (*pooledEntry, error) {
 			conn, err := factory(ctx)
@@ -202,7 +205,7 @@ func NewPool(factory func(context.Context) (*Snell, error)) *Pool {
 			}
 			return &pooledEntry{conn: conn}, nil
 		},
-		pool.WithAge[*pooledEntry](15000),
+		pool.WithAge[*pooledEntry](defaultIdleAge.Milliseconds()),
 		pool.WithSize[*pooledEntry](10),
 		pool.WithEvict[*pooledEntry](func(item *pooledEntry) {
 			_ = item.conn.Close()
@@ -217,7 +220,8 @@ func NewPool(factory func(context.Context) (*Snell, error)) *Pool {
 // pool (restart, drain, idle timeout) is noticed at once instead of failing the
 // next request, and once the connection is taken that same Read serves the
 // reply. Nothing is in flight on an idle connection, so any byte, EOF or error
-// read while idle ends it.
+// read while idle ends it. A connection nobody takes within the pool's age is
+// closed by a timer: the pool itself only evicts when something asks it for one.
 type idleConn struct {
 	net.Conn
 	mu      sync.Mutex
@@ -226,9 +230,11 @@ type idleConn struct {
 	pending chan struct{} // closed when the parked Read returns; nil when none is in flight
 	parked  []byte        // what the parked Read got, served by the next Read
 	err     error
+	expiry  *time.Timer
+	parkGen uint64 // voids an expiry that fired for an earlier park
 }
 
-func (c *idleConn) park() {
+func (c *idleConn) park(maxAge time.Duration) {
 	c.mu.Lock()
 	if c.dead || c.pending != nil || len(c.parked) > 0 || c.err != nil {
 		// A connection with an unread result cannot be idle.
@@ -240,6 +246,11 @@ func (c *idleConn) park() {
 	c.idle = true
 	done := make(chan struct{})
 	c.pending = done
+	c.parkGen++
+	if maxAge > 0 {
+		gen := c.parkGen
+		c.expiry = time.AfterFunc(maxAge, func() { c.expire(gen) })
+	}
 	c.mu.Unlock()
 
 	go func() {
@@ -247,6 +258,10 @@ func (c *idleConn) park() {
 		n, err := c.Conn.Read(buf)
 		c.mu.Lock()
 		c.pending = nil
+		if c.expiry != nil {
+			c.expiry.Stop()
+			c.expiry = nil
+		}
 		idle := c.idle
 		if idle {
 			c.dead = true
@@ -262,6 +277,17 @@ func (c *idleConn) park() {
 	}()
 }
 
+func (c *idleConn) expire(gen uint64) {
+	c.mu.Lock()
+	if !c.idle || c.dead || c.parkGen != gen {
+		c.mu.Unlock()
+		return
+	}
+	c.dead = true
+	c.mu.Unlock()
+	_ = c.Conn.Close()
+}
+
 // claim takes the connection out of the pool; false once it closed while idle.
 func (c *idleConn) claim() bool {
 	c.mu.Lock()
@@ -270,6 +296,10 @@ func (c *idleConn) claim() bool {
 		return false
 	}
 	c.idle = false
+	if c.expiry != nil {
+		c.expiry.Stop()
+		c.expiry = nil
+	}
 	return true
 }
 
