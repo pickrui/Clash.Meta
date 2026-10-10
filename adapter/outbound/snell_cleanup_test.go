@@ -26,6 +26,7 @@ import (
 // to the dials that are not canceled.
 type countingSnellDialer struct {
 	C.Dialer
+	gate    chan struct{}          // when set, dials wait until it is closed
 	newConn func(n int32) net.Conn // the n-th connection handed out
 	dials   atomic.Int32
 	conns   atomic.Int32
@@ -33,6 +34,12 @@ type countingSnellDialer struct {
 
 func (d *countingSnellDialer) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
 	d.dials.Add(1)
+	if d.gate != nil {
+		select {
+		case <-d.gate:
+		case <-ctx.Done():
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -242,5 +249,36 @@ func TestSnellCanceledRequestHeaderDoesNotDialAgain(t *testing.T) {
 	}
 	if dials := dialer.dials.Load(); dials != 2 {
 		t.Fatalf("canceled request dialed again: %d dials, want 2", dials)
+	}
+}
+
+func TestSnellClosedProxyDoesNotPreconnect(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		waitForDial bool
+	}{{"before the dial", false}, {"during the dial", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dialer := &countingSnellDialer{gate: make(chan struct{}), newConn: discardingPipe}
+			adapter, err := NewSnell(SnellOption{
+				BasicOption: BasicOption{DialerForAPI: dialer},
+				Name:        "snell", Server: "127.0.0.1", Port: 443, Psk: "password", Version: snell.Version4,
+				ObfsOpts: map[string]any{"mode": "tls", "preconnect": 2},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for deadline := time.Now().Add(5 * time.Second); tc.waitForDial && dialer.dials.Load() == 0; {
+				if time.Now().After(deadline) {
+					t.Fatal("preconnect did not dial")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			_ = adapter.Close()
+			close(dialer.gate)
+			time.Sleep(200 * time.Millisecond)
+			if conns := dialer.conns.Load(); conns != 0 {
+				t.Fatalf("closed proxy opened %d preconnect connections", conns)
+			}
+		})
 	}
 }

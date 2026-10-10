@@ -40,6 +40,7 @@ type Snell struct {
 	option                *SnellOption
 	psk                   []byte
 	pool                  *snell.Pool
+	cancelPreconnect      context.CancelFunc
 	obfsOption            *snellObfsOption
 	echTLS                *vmess.TLSConfig
 	obfsShadowTLS         *newshadowtls.ShadowTLSOption
@@ -82,6 +83,9 @@ type SnellOption struct {
 }
 
 func (s *Snell) Close() error {
+	if s.cancelPreconnect != nil {
+		s.cancelPreconnect()
+	}
 	var h3err error
 	if s.http3 != nil {
 		h3err = s.http3.Close()
@@ -842,8 +846,9 @@ func NewSnell(option SnellOption) (*Snell, error) {
 			return stream, nil
 		})
 		if obfsOption.Preconnect > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), snellECHTLSPreconnectTimeout)
+			s.cancelPreconnect = cancel
 			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), snellECHTLSPreconnectTimeout)
 				defer cancel()
 				s.pool.Warm(ctx, obfsOption.Preconnect)
 			}()

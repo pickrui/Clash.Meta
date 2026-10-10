@@ -16,10 +16,14 @@ type Pool struct {
 	pool           *pool.Pool[*pooledEntry]
 	factory        func(context.Context) (*Snell, error)
 	maxUsesPerConn int
+	closed         atomic.Bool
 }
 
 func (p *Pool) Warm(ctx context.Context, count int) {
 	for range count {
+		if p.closed.Load() {
+			return
+		}
 		conn, err := p.factory(ctx)
 		if err != nil {
 			return
@@ -102,6 +106,7 @@ func (p *Pool) put(conn *Snell, uses int) {
 }
 
 func (p *Pool) Close() error {
+	p.closed.Store(true)
 	return p.pool.Close()
 }
 
