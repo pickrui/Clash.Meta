@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"fmt"
+	"maps"
 
 	"github.com/metacubex/mihomo/adapter/outbound"
 	"github.com/metacubex/mihomo/common/structure"
@@ -247,7 +248,20 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 	}
 
 	proxy = outbound.NewAutoCloseProxyAdapter(proxy)
-	return NewProxy(proxy), nil
+	result := NewProxy(proxy)
+	original := maps.Clone(mapping)
+	result.cloneWithDialer = func(name string) (C.Proxy, error) {
+		if opt.DialerForAPI != nil || proxyType == "direct" || proxyType == "dns" || proxyType == "reject" || proxyType == "compatible" || proxyType == "tailscale" || proxyType == "zerotier" || proxyType == "easytier" {
+			return nil, fmt.Errorf("proxy [%s] cannot be a landing group member", result.Name())
+		}
+		if previous, _ := original["dialer-proxy"].(string); previous != "" && previous != name {
+			return nil, fmt.Errorf("proxy [%s] already uses another dialer", result.Name())
+		}
+		derived := maps.Clone(original)
+		derived["dialer-proxy"] = name
+		return ParseProxy(derived, options...)
+	}
+	return result, nil
 }
 
 type proxyOption struct {

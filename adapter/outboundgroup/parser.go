@@ -23,6 +23,7 @@ var (
 )
 
 type GroupCommonOption struct {
+	DialerProxy         string   `group:"dialer-proxy,omitempty"`
 	Name                string   `group:"name"`
 	Type                string   `group:"type"`
 	Proxies             []string `group:"proxies,omitempty"`
@@ -67,14 +68,14 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 	if _, ok := config["interface-name"]; ok {
 		log.Errorln("The group [%s] with interface-name configuration was removed, please set it directly on the proxy instead", groupOption.Name)
 	}
-	if _, ok := config["dialer-proxy"]; ok {
-		log.Errorln("The group [%s] with dialer-proxy configuration is not allowed, please set it directly on the proxy instead", groupOption.Name)
-	}
 
 	groupName := groupOption.Name
 
 	if groupOption.EmptyFallback == "" {
 		groupOption.EmptyFallback = "COMPATIBLE"
+		if groupOption.DialerProxy != "" {
+			groupOption.EmptyFallback = "REJECT"
+		}
 	}
 	emptyFallback, ok := proxyMap[groupOption.EmptyFallback]
 	if !ok {
@@ -155,7 +156,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 			if groupOption.URL == "" {
 				groupOption.URL = C.DefaultTestURL
 			}
-		} else {
+		} else if groupOption.DialerProxy == "" {
 			addTestUrlToProviders(PDs, groupOption.URL, expectedStatus, groupOption.Filter, uint(groupOption.Interval))
 		}
 		providers = append(providers, PDs...)
@@ -182,7 +183,11 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 			}
 		}
 
-		hc := provider.NewHealthCheck(ps, groupOption.URL, uint(groupOption.TestTimeout), uint(groupOption.Interval), groupOption.Lazy, expectedStatus)
+		healthInterval := uint(groupOption.Interval)
+		if groupOption.DialerProxy != "" {
+			healthInterval = 0
+		}
+		hc := provider.NewHealthCheck(ps, groupOption.URL, uint(groupOption.TestTimeout), healthInterval, groupOption.Lazy, expectedStatus)
 
 		pd, err := provider.NewCompatibleProvider(groupName, ps, hc)
 		if err != nil {
@@ -192,6 +197,67 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		providers = append([]P.ProxyProvider{pd}, providers...)
 		providersMap[groupName] = pd
 	}
+
+	var derived []*provider.DialerProvider
+	if groupOption.DialerProxy != "" {
+		if groupOption.URL == "" {
+			groupOption.URL = C.DefaultTestURL
+		}
+		groupOption.URL, err = scopedDialerTestURL(groupOption.URL, groupName, groupOption.DialerProxy)
+		if err != nil {
+			return nil, err
+		}
+		if groupOption.DialerProxy == groupName {
+			return nil, fmt.Errorf("%s: circular dialer-proxy dependency", groupName)
+		}
+		if groupOption.Type != "select" && groupOption.Interval == 0 {
+			groupOption.Interval = 300
+		}
+		if emptyFallback.Type() != C.Reject && emptyFallback.Type() != C.RejectDrop {
+			clone, ok := emptyFallback.(interface{ WithDialerProxy(string) (C.Proxy, error) })
+			if !ok {
+				return nil, fmt.Errorf("%s: unsupported landing group fallback", groupName)
+			}
+			emptyFallback, err = clone.WithDialerProxy(groupOption.DialerProxy)
+			if err != nil {
+				return nil, err
+			}
+		}
+		wrapped := make([]P.ProxyProvider, 0, len(providers))
+		for _, source := range providers {
+			healthFilter := groupOption.Filter
+			if source.VehicleType() == P.Compatible {
+				healthFilter = ""
+			}
+			pd, err := provider.NewDialerProvider(source, groupOption.DialerProxy, groupOption.URL, healthFilter, uint(groupOption.TestTimeout), uint(groupOption.Interval), groupOption.Lazy, expectedStatus)
+			if err != nil {
+				for _, owned := range derived {
+					_ = owned.Close()
+				}
+				return nil, fmt.Errorf("%s: %w", groupName, err)
+			}
+			derived = append(derived, pd)
+			wrapped = append(wrapped, pd)
+		}
+		providers = wrapped
+	}
+	group, err := newProxyGroup(config, groupOption, emptyFallback, providers)
+	if err != nil {
+		for _, owned := range derived {
+			_ = owned.Close()
+		}
+		return nil, err
+	}
+	group.(interface {
+		setDialerProviders(string, string, []*provider.DialerProvider)
+	}).setDialerProviders(groupOption.DialerProxy, groupOption.URL, derived)
+	return group, nil
+}
+
+func newProxyGroup(config map[string]any, groupOption GroupCommonOption, emptyFallback C.Proxy, providers []P.ProxyProvider) (ProxyGroup, error) {
+	decoder := structure.NewDecoder(structure.Option{TagName: "group", WeaklyTypedInput: true})
+	var err error
+	groupName := groupOption.Name
 
 	switch groupOption.Type {
 	case "url-test":

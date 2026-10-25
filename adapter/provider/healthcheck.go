@@ -36,6 +36,7 @@ const (
 )
 
 type HealthCheck struct {
+	proxySource    func() []C.Proxy
 	ctx            context.Context
 	ctxCancel      context.CancelFunc
 	url            string
@@ -179,6 +180,9 @@ func (hc *HealthCheck) checkBackground(mode healthCheckMode) {
 func (hc *HealthCheck) checkWithContext(ctx context.Context, mode healthCheckMode) {
 	if healthCheckSuspended.Load() || ctx.Err() != nil {
 		return
+	}
+	if hc.proxySource != nil {
+		hc.setProxies(hc.proxySource())
 	}
 	hc.mu.Lock()
 	empty := len(hc.proxies) == 0

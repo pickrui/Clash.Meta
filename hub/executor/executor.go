@@ -117,6 +117,11 @@ func ApplyConfig(cfg *config.Config, force bool) {
 
 	initInnerTcp()
 	loadProvider(cfg.Providers)
+	for _, proxy := range cfg.Proxies {
+		if group, ok := proxy.Adapter().(interface{ InitializeDialerProviders() }); ok {
+			group.InitializeDialerProviders()
+		}
+	}
 	updateProfile(cfg)
 	loadProvider(cfg.RuleProviders)
 	if features.Android {
@@ -342,7 +347,16 @@ func updateHosts(tree *trie.DomainTrie[resolver.HostValue]) {
 }
 
 func updateProxies(proxies map[string]C.Proxy, providers map[string]P.ProxyProvider) {
+	previous := tunnel.ProxiesSnapshot()
 	tunnel.UpdateProxies(proxies, providers)
+	for name, proxy := range previous {
+		if proxies[name] == proxy {
+			continue
+		}
+		if group, ok := proxy.Adapter().(interface{ CloseDialerProviders() }); ok {
+			group.CloseDialerProviders()
+		}
+	}
 }
 
 func updateRules(rules []C.Rule, subRules map[string][]C.Rule, ruleProviders map[string]P.RuleProvider) {

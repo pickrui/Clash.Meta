@@ -35,13 +35,21 @@ type internalProxyState struct {
 
 type Proxy struct {
 	C.ProxyAdapter
-	urlTests     urlTestFlights
-	testSequence atomic.Uint64
-	testMu       sync.Mutex
-	lastTest     uint64
-	alive        atomic.Bool
-	history      delayHistory
-	extra        proxyStates
+	cloneWithDialer func(string) (C.Proxy, error)
+	urlTests        urlTestFlights
+	testSequence    atomic.Uint64
+	testMu          sync.Mutex
+	lastTest        uint64
+	alive           atomic.Bool
+	history         delayHistory
+	extra           proxyStates
+}
+
+func (p *Proxy) WithDialerProxy(name string) (C.Proxy, error) {
+	if p.cloneWithDialer == nil {
+		return nil, fmt.Errorf("proxy [%s] cannot be a landing group member", p.Name())
+	}
+	return p.cloneWithDialer(name)
 }
 
 // Adapter implements C.Proxy

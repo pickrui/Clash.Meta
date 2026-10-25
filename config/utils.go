@@ -146,42 +146,75 @@ func proxyGroupsDagSort(groupsConfig []map[string]any) error {
 
 // validateDialerProxies checks if all dialer-proxy references are valid
 func validateDialerProxies(proxies map[string]C.Proxy) error {
-	graph := make(map[string]string) // proxy name -> dialer-proxy name
-
-	// collect all proxies with dialer-proxy configured
-	for name, proxy := range proxies {
-		dialerProxy := proxy.ProxyInfo().DialerProxy
-		if dialerProxy != "" {
-			// validate each dialer-proxy reference
-			_, exist := proxies[dialerProxy]
-			if !exist {
-				return fmt.Errorf("proxy [%s] dialer-proxy [%s] not found", name, dialerProxy)
+	var roots []C.Proxy
+	for _, proxy := range proxies {
+		if dialer := proxy.ProxyInfo().DialerProxy; dialer != "" {
+			if _, exists := proxies[dialer]; !exists {
+				return fmt.Errorf("proxy [%s] dialer-proxy [%s] not found", proxy.Name(), dialer)
 			}
-
-			// build dependency graph
-			graph[name] = dialerProxy
+			roots = append(roots, proxy)
 		}
 	}
-
-	// every proxy has at most one dialer-proxy, so walk each chain once: reaching a proxy
-	// of the current walk means a cycle, reaching one an earlier walk finished does not
+	if len(roots) == 0 {
+		return nil
+	}
+	graph := make(map[C.Proxy][]C.Proxy)
+	pending := append([]C.Proxy(nil), roots...)
+	for len(pending) > 0 {
+		proxy := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if _, visited := graph[proxy]; visited {
+			continue
+		}
+		var dependencies []C.Proxy
+		if dialer := proxy.ProxyInfo().DialerProxy; dialer != "" {
+			target, exists := proxies[dialer]
+			if !exists {
+				return fmt.Errorf("proxy [%s] dialer-proxy [%s] not found", proxy.Name(), dialer)
+			}
+			dependencies = append(dependencies, target)
+		}
+		if group, ok := proxy.Adapter().(outboundgroup.ProxyGroup); ok {
+			dependencies = append(dependencies, group.Proxies()...)
+			if fallback, ok := group.(interface{ EmptyFallback() C.Proxy }); ok {
+				dependencies = append(dependencies, fallback.EmptyFallback())
+			}
+		}
+		graph[proxy] = dependencies
+		pending = append(pending, dependencies...)
+	}
 	const onPath, acyclic = 1, 2
-	state := make(map[string]uint8, len(graph))
-	var path []string
-	for name := range graph {
-		path = path[:0]
-		for current, ok := name, true; ok && state[current] != acyclic; current, ok = graph[current] {
-			if state[current] == onPath {
-				return fmt.Errorf("proxy [%s] has circular dialer-proxy dependency", name)
-			}
-			state[current] = onPath
-			path = append(path, current)
+	state := make(map[C.Proxy]uint8, len(graph))
+	type step struct {
+		proxy C.Proxy
+		next  int
+	}
+	var path []step
+	for _, root := range roots {
+		if state[root] == acyclic {
+			continue
 		}
-		for _, p := range path {
-			state[p] = acyclic
+		path = append(path[:0], step{proxy: root})
+		state[root] = onPath
+		for len(path) > 0 {
+			current := &path[len(path)-1]
+			members := graph[current.proxy]
+			if current.next == len(members) {
+				state[current.proxy] = acyclic
+				path = path[:len(path)-1]
+				continue
+			}
+			next := members[current.next]
+			current.next++
+			if state[next] == onPath {
+				return fmt.Errorf("proxy [%s] has circular dialer-proxy dependency", root.Name())
+			}
+			if state[next] != acyclic {
+				state[next] = onPath
+				path = append(path, step{proxy: next})
+			}
 		}
 	}
-
 	return nil
 }
 

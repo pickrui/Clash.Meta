@@ -21,6 +21,9 @@ import (
 
 type GroupBase struct {
 	*outbound.Base
+	dialerTestURL     string
+	dialerProxy       string
+	dialerProviders   []*provider.DialerProvider
 	hidden            bool
 	icon              string
 	filterRegs        []*regexp2.Regexp
@@ -103,6 +106,38 @@ func NewGroupBase(opt GroupBaseOption) *GroupBase {
 	}
 
 	return gb
+}
+
+func (gb *GroupBase) setDialerProviders(name, testURL string, providers []*provider.DialerProvider) {
+	gb.dialerProxy, gb.dialerProviders = name, providers
+	if name != "" {
+		gb.dialerTestURL = testURL
+	}
+}
+
+func (gb *GroupBase) DialerTestURL() string { return gb.dialerTestURL }
+
+func (gb *GroupBase) ProxyInfo() C.ProxyInfo {
+	info := gb.Base.ProxyInfo()
+	info.DialerProxy = gb.dialerProxy
+	return info
+}
+
+func (gb *GroupBase) InitializeDialerProviders() {
+	for _, provider := range gb.dialerProviders {
+		_ = provider.Initial()
+	}
+}
+
+func (gb *GroupBase) CloseDialerProviders() {
+	for _, provider := range gb.dialerProviders {
+		_ = provider.Close()
+	}
+}
+
+func (gb *GroupBase) Close() error {
+	gb.CloseDialerProviders()
+	return nil
 }
 
 func (gb *GroupBase) Hidden() bool {

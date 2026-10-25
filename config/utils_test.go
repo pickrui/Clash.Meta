@@ -147,3 +147,129 @@ func TestValidateDialerProxies(t *testing.T) {
 		})
 	}
 }
+
+func TestValidatePolicyGroupDialer(t *testing.T) {
+	for _, kind := range []string{"select", "url-test", "fallback", "load-balance"} {
+		for _, scenario := range []struct {
+			name    string
+			options map[string]any
+			cycle   bool
+		}{
+			{"fixed-members", map[string]any{"proxies": []string{"a", "b"}}, false},
+			{"direct-cycle", map[string]any{"proxies": []string{"a", "exit"}}, true},
+			{"nested-cycle", map[string]any{"proxies": []string{"nested"}}, true},
+			{"include-all-cycle", map[string]any{"include-all-proxies": true}, true},
+			{"filtered-safe", map[string]any{"include-all-proxies": true, "filter": "^(a|b)$"}, false},
+			{"filtered-cycle", map[string]any{"include-all-proxies": true, "filter": "^(a|exit)$"}, true},
+			{"excluded-exit", map[string]any{"proxies": []string{"a", "exit"}, "exclude-filter": "^exit$"}, false},
+			{"fallback-cycle", map[string]any{"proxies": []string{"a"}, "empty-fallback": "exit"}, true},
+		} {
+			t.Run(kind+"/"+scenario.name, func(t *testing.T) {
+				entry := map[string]any{"name": "entry", "type": kind}
+				for key, value := range scenario.options {
+					entry[key] = value
+				}
+				raw := RawConfig{
+					Proxy: []map[string]any{
+						{"name": "a", "type": "http", "server": "127.0.0.1", "port": 1080},
+						{"name": "b", "type": "http", "server": "127.0.0.1", "port": 1081},
+						{"name": "exit", "type": "http", "server": "127.0.0.1", "port": 1082, "dialer-proxy": "entry"},
+					},
+					ProxyGroup: []map[string]any{
+						entry,
+						{"name": "nested", "type": "select", "proxies": []string{"exit"}},
+					},
+				}
+				_, providers, err := parseProxies(&raw)
+				for _, provider := range providers {
+					if closer, ok := provider.(interface{ Close() error }); ok {
+						_ = closer.Close()
+					}
+				}
+				if scenario.cycle {
+					if assert.Error(t, err) {
+						assert.Contains(t, err.Error(), "circular dialer-proxy dependency")
+					}
+				} else {
+					assert.NoError(t, err)
+				}
+			})
+		}
+	}
+}
+
+func TestPolicyGroupDialerProviderMembers(t *testing.T) {
+	for _, circular := range []bool{false, true} {
+		t.Run(map[bool]string{false: "same-name-independent-node", true: "provider-dialer-cycle"}[circular], func(t *testing.T) {
+			member := map[string]any{"name": "exit", "type": "http", "server": "127.0.0.1", "port": 1081}
+			if circular {
+				member["dialer-proxy"] = "entry"
+			}
+			raw := RawConfig{
+				Proxy: []map[string]any{
+					{"name": "exit", "type": "http", "server": "127.0.0.1", "port": 1082, "dialer-proxy": "entry"},
+				},
+				ProxyGroup: []map[string]any{
+					{"name": "entry", "type": "select", "use": []string{"Airport"}, "empty-fallback": "REJECT"},
+				},
+				ProxyProvider: map[string]map[string]any{
+					"Airport": {"type": "inline", "payload": []map[string]any{member}},
+				},
+			}
+			_, providers, err := parseProxies(&raw)
+			for _, provider := range providers {
+				if closer, ok := provider.(interface{ Close() error }); ok {
+					_ = closer.Close()
+				}
+			}
+			if circular {
+				if assert.Error(t, err) {
+					assert.Contains(t, err.Error(), "circular dialer-proxy dependency")
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidateLandingPolicyGroups(t *testing.T) {
+	for _, kind := range []string{"select", "url-test", "fallback", "load-balance"} {
+		for _, scenario := range []string{"valid", "missing-entry", "cycle", "nested-landing"} {
+			t.Run(kind+"/"+scenario, func(t *testing.T) {
+				entryMembers := []string{"a", "b"}
+				landingMembers := []string{"exit-a", "exit-b"}
+				underlying := "entry"
+				switch scenario {
+				case "missing-entry":
+					underlying = "missing"
+				case "cycle":
+					entryMembers = []string{"landing"}
+				case "nested-landing":
+					landingMembers = []string{"entry"}
+				}
+				raw := RawConfig{ProxyGroup: []map[string]any{
+					{"name": "entry", "type": "select", "proxies": entryMembers},
+					{"name": "landing", "type": kind, "proxies": landingMembers, "dialer-proxy": underlying},
+				}}
+				for _, name := range []string{"a", "b", "exit-a", "exit-b"} {
+					raw.Proxy = append(raw.Proxy, map[string]any{"name": name, "type": "http", "server": "127.0.0.1", "port": 1080})
+				}
+				proxies, providers, err := parseProxies(&raw)
+				for _, proxy := range proxies {
+					_ = proxy.Close()
+				}
+				for _, provider := range providers {
+					if closer, ok := provider.(interface{ Close() error }); ok {
+						_ = closer.Close()
+					}
+				}
+				if scenario == "valid" {
+					assert.NoError(t, err)
+				} else {
+					assert.Error(t, err)
+				}
+			})
+		}
+	}
+}
