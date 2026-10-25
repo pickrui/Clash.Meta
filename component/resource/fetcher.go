@@ -35,6 +35,7 @@ type Fetcher[V any] struct {
 	interval     time.Duration
 	onUpdate     func(V)
 	discard      func(V)
+	watcherMutex sync.Mutex
 	watcher      *fswatch.Watcher
 	updateMutex  sync.Mutex // serializes vehicle reads; loadBufMutex only guards publishing
 	loadBufMutex sync.Mutex
@@ -278,6 +279,8 @@ func (f *Fetcher[V]) ReadSnapshot(maxBytes int64) ([]byte, error) {
 
 func (f *Fetcher[V]) Close() error {
 	f.ctxCancel()
+	f.watcherMutex.Lock()
+	defer f.watcherMutex.Unlock()
 	if f.watcher != nil {
 		_ = f.watcher.Close()
 	}
@@ -330,21 +333,83 @@ func (f *Fetcher[V]) pullLoop(forceUpdate bool) {
 func (f *Fetcher[V]) startPullLoop(forceUpdate bool) (err error) {
 	// pull contents automatically
 	if f.vehicle.Type() == P.File {
-		f.watcher, err = fswatch.NewWatcher(fswatch.Options{
-			Path:     []string{f.vehicle.Path()},
-			Callback: f.updateCallback,
-		})
-		if err != nil {
+		watcher, watchErr := f.fileWatcher(f.vehicle.Path())
+		if watchErr != nil {
+			return watchErr
+		}
+		f.watcherMutex.Lock()
+		defer f.watcherMutex.Unlock()
+		if err := f.ctx.Err(); err != nil {
+			_ = watcher.Close()
 			return err
 		}
-		err = f.watcher.Start()
-		if err != nil {
-			return err
-		}
+		f.watcher = watcher
 	} else if f.interval > 0 {
 		go f.pullLoop(forceUpdate)
 	}
 	return
+}
+
+func (f *Fetcher[V]) fileWatcher(path string) (*fswatch.Watcher, error) {
+	watcher, err := fswatch.NewWatcher(fswatch.Options{Path: []string{path}, Callback: f.updateCallback})
+	if err != nil {
+		return nil, err
+	}
+	if err = watcher.Start(); err != nil {
+		_ = watcher.Close()
+		return nil, err
+	}
+	return watcher, nil
+}
+
+// ReplaceFile publishes a parsed immutable revision without overwriting its predecessor.
+func (f *Fetcher[V]) ReplaceFile(expectedPath, path string, expected, data []byte) error {
+	f.updateMutex.Lock()
+	defer f.updateMutex.Unlock()
+	f.loadBufMutex.Lock()
+	defer f.loadBufMutex.Unlock()
+	vehicle, ok := f.vehicle.(*FileVehicle)
+	if !ok || vehicle.Path() != expectedPath || !f.hash.Equal(utils.MakeHash(expected)) {
+		return errors.New("provider file revision changed")
+	}
+	if err := f.ctx.Err(); err != nil {
+		return err
+	}
+	contents, err := f.parser(data)
+	if err != nil {
+		return err
+	}
+	published := false
+	defer func() {
+		if !published && f.discard != nil {
+			f.discard(contents)
+		}
+	}()
+	watcher, err := f.fileWatcher(path)
+	if err != nil {
+		return err
+	}
+	f.watcherMutex.Lock()
+	if err := f.ctx.Err(); err != nil {
+		f.watcherMutex.Unlock()
+		_ = watcher.Close()
+		return err
+	}
+	previous := f.watcher
+	f.watcher = watcher
+	vehicle.path.Store(path)
+	f.watcherMutex.Unlock()
+	if previous != nil {
+		_ = previous.Close()
+	}
+	f.hash = utils.MakeHash(data)
+	f.updatedAt.Store(time.Now())
+	f.backoff.Reset()
+	if f.onUpdate != nil {
+		f.onUpdate(contents)
+	}
+	published = true
+	return nil
 }
 
 func (f *Fetcher[V]) updateCallback(path string) {

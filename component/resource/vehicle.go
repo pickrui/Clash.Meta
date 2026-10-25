@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/utils"
 	mihomoHttp "github.com/metacubex/mihomo/component/http"
 	"github.com/metacubex/mihomo/component/profile/cachefile"
@@ -33,7 +34,7 @@ func SetETag(b bool) {
 }
 
 type FileVehicle struct {
-	path string
+	path atomic.TypedValue[string]
 }
 
 func (f *FileVehicle) Type() P.VehicleType {
@@ -41,15 +42,15 @@ func (f *FileVehicle) Type() P.VehicleType {
 }
 
 func (f *FileVehicle) Path() string {
-	return f.path
+	return f.path.Load()
 }
 
 func (f *FileVehicle) Url() string {
-	return "file://" + f.path
+	return "file://" + f.Path()
 }
 
 func (f *FileVehicle) Read(ctx context.Context, oldHash utils.HashType) (buf []byte, hash utils.HashType, err error) {
-	buf, err = os.ReadFile(f.path)
+	buf, err = os.ReadFile(f.Path())
 	if err != nil {
 		return
 	}
@@ -66,11 +67,13 @@ func (f *FileVehicle) Write(buf []byte) error {
 }
 
 func (f *FileVehicle) WriteContext(ctx context.Context, buf []byte) error {
-	return utils.WriteFileAtomic(ctx, f.path, buf, fileMode)
+	return utils.WriteFileAtomic(ctx, f.Path(), buf, fileMode)
 }
 
 func NewFileVehicle(path string) *FileVehicle {
-	return &FileVehicle{path: path}
+	vehicle := &FileVehicle{}
+	vehicle.path.Store(path)
+	return vehicle
 }
 
 type HTTPVehicle struct {
