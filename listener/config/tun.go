@@ -64,8 +64,9 @@ type Tun struct {
 	Inet6RouteExcludeAddress []netip.Prefix `yaml:"inet6-route-exclude-address" json:"inet6-route-exclude-address,omitempty"`
 
 	// darwin special config
-	RecvMsgX bool `yaml:"recvmsgx" json:"recvmsgx,omitempty"`
-	SendMsgX bool `yaml:"sendmsgx" json:"sendmsgx,omitempty"`
+	RecvMsgX             bool `yaml:"recvmsgx" json:"recvmsgx,omitempty"`
+	SendMsgX             bool `yaml:"sendmsgx" json:"sendmsgx,omitempty"`
+	ProcessorsPerChannel int  `yaml:"processors-per-channel" json:"processors-per-channel,omitempty"`
 }
 
 func (t *Tun) Sort() {
@@ -240,6 +241,9 @@ func (t *Tun) Equal(other Tun) bool {
 	if t.SendMsgX != other.SendMsgX {
 		return false
 	}
+	if t.ProcessorsPerChannel != other.ProcessorsPerChannel {
+		return false
+	}
 
 	return true
 }
@@ -251,4 +255,12 @@ func ValidateTunDNSMode(mode string) error {
 	default:
 		return fmt.Errorf("invalid dns-mode: %s", mode)
 	}
+}
+
+func ValidateTunProcessorsPerChannel(count int) error {
+	// Each worker allocates queues and GRO state, even before any packets arrive.
+	if count < 0 || count > 256 {
+		return fmt.Errorf("processors-per-channel must be between 0 and 256: %d", count)
+	}
+	return nil
 }

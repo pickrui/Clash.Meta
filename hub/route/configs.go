@@ -108,8 +108,9 @@ type tunSchema struct {
 	Inet6RouteExcludeAddress *[]netip.Prefix `yaml:"inet6-route-exclude-address" json:"inet6-route-exclude-address,omitempty"`
 
 	// darwin special config
-	RecvMsgX *bool `yaml:"recvmsgx" json:"recvmsgx,omitempty"`
-	SendMsgX *bool `yaml:"sendmsgx" json:"sendmsgx,omitempty"`
+	RecvMsgX             *bool `yaml:"recvmsgx" json:"recvmsgx,omitempty"`
+	SendMsgX             *bool `yaml:"sendmsgx" json:"sendmsgx,omitempty"`
+	ProcessorsPerChannel *int  `yaml:"processors-per-channel" json:"processors-per-channel,omitempty"`
 }
 
 type tuicServerSchema struct {
@@ -278,6 +279,9 @@ func pointerOrDefaultTun(p *tunSchema, def LC.Tun) LC.Tun {
 		if p.SendMsgX != nil {
 			def.SendMsgX = *p.SendMsgX
 		}
+		if p.ProcessorsPerChannel != nil {
+			def.ProcessorsPerChannel = *p.ProcessorsPerChannel
+		}
 	}
 	return def
 }
@@ -335,6 +339,13 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 
 	if general.Tun != nil && general.Tun.DNSMode != nil {
 		if err := LC.ValidateTunDNSMode(*general.Tun.DNSMode); err != nil {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, ErrBadRequest)
+			return
+		}
+	}
+	if general.Tun != nil && general.Tun.ProcessorsPerChannel != nil {
+		if err := LC.ValidateTunProcessorsPerChannel(*general.Tun.ProcessorsPerChannel); err != nil {
 			render.Status(r, http.StatusBadRequest)
 			render.JSON(w, r, ErrBadRequest)
 			return

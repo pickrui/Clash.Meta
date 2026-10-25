@@ -171,3 +171,6 @@ replace github.com/metacubex/sing-tun => ./third_party/sing-tun
 
 // Release the watcher when adding a path fails (see fswatch README.oix.md).
 replace github.com/metacubex/fswatch => ./third_party/fswatch
+
+// Bound HTTP/2 SETTINGS I/O without expiring already received frames.
+replace github.com/metacubex/http => ./third_party/http

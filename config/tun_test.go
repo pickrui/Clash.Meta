@@ -6,6 +6,49 @@ import (
 	"testing"
 )
 
+func TestTunProcessorsPerChannel(t *testing.T) {
+	for _, tc := range []struct {
+		name, input string
+		want        int
+	}{
+		{"default", "{}", 1},
+		{"automatic", "tun:\n  processors-per-channel: 0\n", 0},
+		{"explicit", "tun:\n  processors-per-channel: 2\n", 2},
+		{"maximum", "tun:\n  processors-per-channel: 256\n", 256},
+		{"negative", "tun:\n  processors-per-channel: -1\n", -1},
+		{"excessive", "tun:\n  processors-per-channel: 257\n", -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := UnmarshalRawConfig([]byte(tc.input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			general := &General{}
+			err = parseTun(raw.Tun, &DNS{}, general)
+			_, inboundErr := inbound.NewTun(&inbound.TunOption{
+				ProcessorsPerChannel: raw.Tun.ProcessorsPerChannel,
+			})
+			if tc.want < 0 {
+				if err == nil || inboundErr == nil {
+					t.Fatal("unsafe processor count reached listener setup")
+				}
+				return
+			}
+			if err != nil || inboundErr != nil {
+				t.Fatalf("parse: %v, inbound: %v", err, inboundErr)
+			}
+			if got := general.Tun.ProcessorsPerChannel; got != tc.want {
+				t.Fatalf("processor count = %v, want %d", got, tc.want)
+			}
+			changed := general.Tun
+			changed.ProcessorsPerChannel++
+			if general.Tun.Equal(changed) {
+				t.Fatal("changed processor count would reuse the old listener")
+			}
+		})
+	}
+}
+
 func TestParseTunKeepsCongestionController(t *testing.T) {
 	raw, err := UnmarshalRawConfig([]byte("tun:\n  stack: mips\n  congestion-controller: bbr\n"))
 	if err != nil {

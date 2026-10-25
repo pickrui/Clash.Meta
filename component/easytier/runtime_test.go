@@ -39,18 +39,25 @@ func (offlinePlatform) LocalAddrForRemote(context.Context, *net.UDPAddr, platfor
 }
 
 func TestEmbeddedRuntimeLifecycle(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	platform := platform.Services{Sockets: offlinePlatform{}, DNS: offlinePlatform{}, Environment: offlinePlatform{}}
-	host, err := corehost.New(ctx, corehost.Options{Platform: platform})
+	// Compiling the embedded module under -race must not spend the lifecycle deadline.
+	buildCtx, cancelBuild := context.WithTimeout(context.Background(), 2*time.Minute)
+	started := time.Now()
+	host, err := corehost.New(buildCtx, corehost.Options{Platform: platform})
+	cancelBuild()
+	t.Logf("embedded module initialization: %v", time.Since(started))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := host.Close(context.Background()); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		if err := host.Close(ctx); err != nil {
 			t.Error(err)
 		}
 	})
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	config, err := (Config{
 		NetworkName: "fixture", NetworkSecret: "fixture-only", Hostname: "isolated-node",
 		IPv4: "10.144.144.1/24", Peers: []string{"tcp://127.0.0.1:1"}, DisableP2P: new(true),

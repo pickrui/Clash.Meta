@@ -325,8 +325,9 @@ type RawTun struct {
 	Inet6RouteExcludeAddress []netip.Prefix `yaml:"inet6-route-exclude-address" json:"inet6-route-exclude-address,omitempty"`
 
 	// darwin special config
-	RecvMsgX bool `yaml:"recvmsgx" json:"recvmsgx,omitempty"`
-	SendMsgX bool `yaml:"sendmsgx" json:"sendmsgx,omitempty"`
+	RecvMsgX             bool `yaml:"recvmsgx" json:"recvmsgx,omitempty"`
+	SendMsgX             bool `yaml:"sendmsgx" json:"sendmsgx,omitempty"`
+	ProcessorsPerChannel int  `yaml:"processors-per-channel" json:"processors-per-channel,omitempty"`
 }
 
 type RawTuicServer struct {
@@ -541,15 +542,16 @@ func DefaultRawConfig() *RawConfig {
 			Interval:      30,
 		},
 		Tun: RawTun{
-			Enable:              false,
-			Device:              "",
-			Stack:               C.TunGvisor,
-			DNSHijack:           []string{"0.0.0.0:53"}, // default hijack all dns query
-			AutoRoute:           true,
-			AutoDetectInterface: true,
-			Inet6Address:        []netip.Prefix{netip.MustParsePrefix("fdfe:dcba:9876::1/126")},
-			RecvMsgX:            true,
-			SendMsgX:            false, // In the current implementation, if enabled, the kernel may freeze during multi-thread downloads, so it is disabled by default.
+			Enable:               false,
+			Device:               "",
+			Stack:                C.TunGvisor,
+			DNSHijack:            []string{"0.0.0.0:53"}, // default hijack all dns query
+			AutoRoute:            true,
+			AutoDetectInterface:  true,
+			Inet6Address:         []netip.Prefix{netip.MustParsePrefix("fdfe:dcba:9876::1/126")},
+			RecvMsgX:             true,
+			SendMsgX:             false, // In the current implementation, if enabled, the kernel may freeze during multi-thread downloads, so it is disabled by default.
+			ProcessorsPerChannel: 1,
 		},
 		TuicServer: RawTuicServer{
 			Enable:                false,
@@ -1682,6 +1684,9 @@ func parseIPV6(rawCfg *RawConfig) {
 }
 
 func parseTun(rawTun RawTun, dns *DNS, general *General) error {
+	if err := LC.ValidateTunProcessorsPerChannel(rawTun.ProcessorsPerChannel); err != nil {
+		return err
+	}
 	if err := LC.ValidateTunDNSMode(rawTun.DNSMode); err != nil {
 		return err
 	}
@@ -1744,8 +1749,9 @@ func parseTun(rawTun RawTun, dns *DNS, general *General) error {
 		Inet4RouteExcludeAddress: rawTun.Inet4RouteExcludeAddress,
 		Inet6RouteExcludeAddress: rawTun.Inet6RouteExcludeAddress,
 
-		RecvMsgX: rawTun.RecvMsgX,
-		SendMsgX: rawTun.SendMsgX,
+		RecvMsgX:             rawTun.RecvMsgX,
+		SendMsgX:             rawTun.SendMsgX,
+		ProcessorsPerChannel: rawTun.ProcessorsPerChannel,
 	}
 
 	return nil
