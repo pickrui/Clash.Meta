@@ -174,3 +174,6 @@ replace github.com/metacubex/fswatch => ./third_party/fswatch
 
 // Bound HTTP/2 SETTINGS I/O without expiring already received frames.
 replace github.com/metacubex/http => ./third_party/http
+
+// Match Windows TFO socket layouts to the pinned Go toolchain.
+replace github.com/metacubex/tfo-go => ./third_party/tfo-go
