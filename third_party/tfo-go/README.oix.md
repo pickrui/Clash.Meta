@@ -1,4 +1,4 @@
-# Local Windows TCP Fast Open layout fix
+# Local TCP Fast Open compatibility fixes
 
 Source: `github.com/metacubex/tfo-go v0.0.0-20260623020846-376a77860b8c`,
 module checksum `h1:+2C1UshSLzaogLY/IDz1XhOLxjhs3rkhVHB4eCN9Zto=`.
@@ -23,13 +23,18 @@ data. This fallback runs before socket creation, never retries partially sent
 data, and uses the existing context-aware write and failure cleanup path.
 Short early-data writes now return `io.ErrShortWrite` instead of succeeding.
 Windows listeners already use `net.ListenConfig` and do not use private FDs.
+On Darwin, a listener that successfully bound remains open when enabling TFO
+returns `ErrUnsupported` and fallback is allowed; other errors still close it.
 
 `TestWindowsPollFDLayout` in the existing test file checks the copied fields
 against the selected toolchain's Windows source on any host. The Windows-only
 regression checks the actual reflection guard and reuses the existing early-data
 roundtrip helper with a forced incompatible layout, a local bind and ControlContext.
 It also checks cancellation before the fallback dial. Existing TFO roundtrip,
-address, Control and deadline tests are retained.
+address, Control and deadline tests are retained. Roundtrip fixtures join their
+server goroutines on every exit so a dial failure retains its original error
+instead of panicking after the test has finished. The discard server also joins
+its accepted-connection workers before completing cleanup.
 
 Run from either enclosing module to use the application's dependency versions:
 

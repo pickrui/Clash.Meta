@@ -62,8 +62,8 @@ func (lc *ListenConfig) listenTFO(ctx context.Context, network, address string) 
 	}
 
 	if err != nil {
-		ln.Close()
 		if !fallback || !errors.Is(err, ErrUnsupported) {
+			ln.Close()
 			return nil, wrapSyscallError("setsockopt(TCP_FASTOPEN)", err)
 		}
 		runtimeListenNoTFO.Store(true)
