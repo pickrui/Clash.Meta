@@ -34,7 +34,9 @@ It also checks cancellation before the fallback dial. Existing TFO roundtrip,
 address, Control and deadline tests are retained. Roundtrip fixtures join their
 server goroutines on every exit so a dial failure retains its original error
 instead of panicking after the test has finished. The discard server also joins
-its accepted-connection workers before completing cleanup.
+its accepted-connection workers before completing cleanup. Control and address
+fixtures start an accept loop rather than closing listeners with pending peers.
+The TCPAddr variants run concurrently and join their workers even on dial failure.
 
 Run from either enclosing module to use the application's dependency versions:
 

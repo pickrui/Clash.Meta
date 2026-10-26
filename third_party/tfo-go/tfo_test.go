@@ -643,6 +643,7 @@ func TestDialCtrlFn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	s.Start(t)
 	defer s.Close()
 
 	address := s.Addr().String()
@@ -845,7 +846,9 @@ func testAddrFunctions(t *testing.T, lc ListenConfig, d Dialer) {
 		t.Fatal(err)
 	}
 	lntcp := ln.(*net.TCPListener)
-	defer lntcp.Close()
+	server := &discardTCPServer{ln: lntcp}
+	server.Start(t)
+	defer server.Close()
 
 	addr := lntcp.Addr().(*net.TCPAddr)
 	if !addr.IP.Equal(net.IPv6loopback) {

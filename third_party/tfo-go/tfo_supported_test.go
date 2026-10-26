@@ -3,8 +3,10 @@
 package tfo
 
 import (
+	"errors"
 	"net"
 	"testing"
+	"time"
 )
 
 func testClientWriteReadServerReadWriteTCPAddr(listenTCPAddr, dialLocalTCPAddr *net.TCPAddr, t *testing.T) {
@@ -15,24 +17,30 @@ func testClientWriteReadServerReadWriteTCPAddr(listenTCPAddr, dialLocalTCPAddr *
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lntcp.Close()
 	t.Log("Started listener on", lntcp.Addr())
 
 	ctrlCh := make(chan struct{})
+	defer func() {
+		_ = lntcp.Close()
+		<-ctrlCh
+	}()
 	go func() {
+		defer close(ctrlCh)
 		conn, err := lntcp.AcceptTCP()
 		if err != nil {
-			t.Error(err)
+			if !errors.Is(err, net.ErrClosed) {
+				t.Error(err)
+			}
 			return
 		}
 		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 		t.Log("Accepted", conn.RemoteAddr())
 
 		readUntilEOF(conn, helloworld, t)
 		write(conn, world, t)
 		write(conn, hello, t)
 		conn.CloseWrite()
-		close(ctrlCh)
 	}()
 
 	port := lntcp.Addr().(*net.TCPAddr).Port
@@ -89,7 +97,9 @@ func TestClientWriteReadServerReadWriteTCPAddr(t *testing.T) {
 			},
 		},
 	} {
+		c := c
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			testClientWriteReadServerReadWriteTCPAddr(c.listenTCPAddr, c.dialLocalTCPAddr, t)
 		})
 	}
