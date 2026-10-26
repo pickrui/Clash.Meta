@@ -1,10 +1,10 @@
 module github.com/metacubex/mihomo
 
 // Keep the minimum compatible with the standalone LoongArch ABI1 toolchain.
-// FlClash builds pin GOTOOLCHAIN=go1.26.8 independently of this minimum.
+// FlClash builds pin GOTOOLCHAIN=go1.27.3 independently of this minimum.
 go 1.26.0
 
-toolchain go1.26.8
+toolchain go1.27.3
 
 require (
 	github.com/bahlo/generic-list-go v0.2.0
@@ -42,7 +42,7 @@ require (
 	github.com/metacubex/sing-mux v0.3.12
 	github.com/metacubex/sing-quic v0.0.0-20260904234848-1c242664697a
 	github.com/metacubex/sing-shadowsocks v0.2.13
-	github.com/metacubex/sing-shadowsocks2 v0.2.7
+	github.com/metacubex/sing-shadowsocks2 v0.2.8
 	github.com/metacubex/sing-shadowtls v0.0.0-20260517015314-c11c36474edc
 	github.com/metacubex/sing-tun v0.4.28
 	github.com/metacubex/sing-vmess v0.2.5
@@ -77,7 +77,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/crypto v0.57.0
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/time v0.16.0

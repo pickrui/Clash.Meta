@@ -25,12 +25,10 @@ type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	numconn uint16
-	muxes   []timedSession
-	rr      uint16
-	connMu  sync.Mutex
-
-	chScavenger chan timedSession
+	muxes    []timedSession
+	rr       int
+	connMu   sync.Mutex
+	sessions map[*smux.Session]time.Time
 }
 
 func NewClient(config Config) *Client {
@@ -40,21 +38,38 @@ func NewClient(config Config) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Client{
-		config: config,
-		block:  block,
-		ctx:    ctx,
-		cancel: cancel,
+		config:   config,
+		block:    block,
+		ctx:      ctx,
+		cancel:   cancel,
+		muxes:    make([]timedSession, config.Conn),
+		sessions: make(map[*smux.Session]time.Time),
 	}
 }
 
 func (c *Client) Close() error {
 	c.cancel()
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	for session := range c.sessions {
+		_ = session.Close()
+		delete(c.sessions, session)
+	}
+	clear(c.muxes)
 	return nil
 }
 
 func (c *Client) createConn(ctx context.Context, dial DialFn) (*smux.Session, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(c.ctx, cancel)
+	defer stop()
+	defer cancel()
 	conn, addr, err := dial(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err = ctx.Err(); err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
 
@@ -100,40 +115,39 @@ func (c *Client) createConn(ctx context.Context, dial DialFn) (*smux.Session, er
 }
 
 func (c *Client) OpenStream(ctx context.Context, dial DialFn) (*smux.Stream, error) {
-	c.once.Do(func() {
-		// start scavenger if autoexpire is set
-		c.chScavenger = make(chan timedSession, 128)
-		if c.config.AutoExpire > 0 {
-			go scavenger(c.ctx, c.chScavenger, &c.config)
-		}
-
-		c.numconn = uint16(c.config.Conn)
-		c.muxes = make([]timedSession, c.config.Conn)
-		c.rr = uint16(0)
-	})
-
 	c.connMu.Lock()
-	idx := c.rr % c.numconn
-
-	// do auto expiration && reconnection
-	if c.muxes[idx].session == nil || c.muxes[idx].session.IsClosed() ||
+	if err := c.ctx.Err(); err != nil {
+		c.connMu.Unlock()
+		return nil, net.ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		c.connMu.Unlock()
+		return nil, err
+	}
+	c.once.Do(func() {
+		if c.config.AutoExpire > 0 {
+			go c.scavenge()
+		}
+	})
+	idx := c.rr
+	session := c.muxes[idx].session
+	if session == nil || session.IsClosed() ||
 		(c.config.AutoExpire > 0 && time.Now().After(c.muxes[idx].expiryDate)) {
+		if session != nil && session.IsClosed() {
+			delete(c.sessions, session)
+		}
 		var err error
-		c.muxes[idx].session, err = c.createConn(ctx, dial)
+		session, err = c.createConn(ctx, dial)
 		if err != nil {
 			c.connMu.Unlock()
 			return nil, err
 		}
-		c.muxes[idx].expiryDate = time.Now().Add(time.Duration(c.config.AutoExpire) * time.Second)
-		if c.config.AutoExpire > 0 { // only when autoexpire set
-			c.chScavenger <- c.muxes[idx]
-		}
-
+		expires := time.Now().Add(time.Duration(c.config.AutoExpire) * time.Second)
+		c.muxes[idx] = timedSession{session: session, expiryDate: expires}
+		c.sessions[session] = expires.Add(time.Duration(c.config.ScavengeTTL) * time.Second)
 	}
-	c.rr++
-	session := c.muxes[idx].session
+	c.rr = (idx + 1) % len(c.muxes)
 	c.connMu.Unlock()
-
 	return session.OpenStream()
 }
 
@@ -143,32 +157,24 @@ type timedSession struct {
 	expiryDate time.Time
 }
 
-// scavenger goroutine is used to close expired sessions
-func scavenger(ctx context.Context, ch chan timedSession, config *Config) {
+func (c *Client) scavenge() {
 	ticker := time.NewTicker(scavengePeriod * time.Second)
 	defer ticker.Stop()
-	var sessionList []timedSession
 	for {
 		select {
-		case item := <-ch:
-			sessionList = append(sessionList, timedSession{
-				item.session,
-				item.expiryDate.Add(time.Duration(config.ScavengeTTL) * time.Second)})
-		case <-ticker.C:
-			var newList []timedSession
-			for k := range sessionList {
-				s := sessionList[k]
-				if s.session.IsClosed() {
-					log.Debugln("scavenger: session normally closed: %s", s.session.LocalAddr())
-				} else if time.Now().After(s.expiryDate) {
-					s.session.Close()
-					log.Debugln("scavenger: session closed due to ttl: %s", s.session.LocalAddr())
-				} else {
-					newList = append(newList, sessionList[k])
+		case now := <-ticker.C:
+			c.connMu.Lock()
+			for session, expires := range c.sessions {
+				if session.IsClosed() {
+					delete(c.sessions, session)
+				} else if now.After(expires) {
+					_ = session.Close()
+					delete(c.sessions, session)
+					log.Debugln("scavenger: session closed due to ttl: %s", session.LocalAddr())
 				}
 			}
-			sessionList = newList
-		case <-ctx.Done():
+			c.connMu.Unlock()
+		case <-c.ctx.Done():
 			return
 		}
 	}

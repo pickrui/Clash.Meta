@@ -2,9 +2,12 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +17,7 @@ import (
 	"github.com/metacubex/mihomo/component/trie"
 	"github.com/metacubex/mihomo/internal/testutil"
 
+	"github.com/metacubex/quic-go"
 	D "github.com/miekg/dns"
 )
 
@@ -188,5 +192,98 @@ func BenchmarkResetPolicyConnections(b *testing.B) {
 			}
 			b.ReportMetric(float64(raw.resets.Load())/float64(b.N), "resets/op")
 		})
+	}
+}
+
+func TestDoQConcurrentConnectionLifetime(t *testing.T) {
+	cert := testutil.NewCertificate(t, "front.test")
+	if err := ca.AddCertificate(cert.RootPEM); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ca.ResetCertificate)
+	previousHosts := resolver.DefaultHosts
+	resolver.DefaultHosts = resolver.NewHosts(trie.New[resolver.HostValue]())
+	t.Cleanup(func() { resolver.DefaultHosts = previousHosts })
+	if err := resolver.DefaultHosts.Insert("front.test", resolver.HostValue{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}); err != nil {
+		t.Fatal(err)
+	}
+	cancelQuery := make(chan context.CancelFunc, 1)
+	release := make(chan struct{})
+	address, _ := nameDNSServer(t, "quic", cert.TLS, func() {
+		select {
+		case cancel := <-cancelQuery:
+			cancel()
+			<-release
+		default:
+		}
+	})
+	client := newDoQ(address, nil, nil, nil, "")
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	var ready, done sync.WaitGroup
+	connections := make([]*quic.Conn, 8)
+	client.connMu.Lock()
+	for i := range connections {
+		ready.Add(1)
+		done.Go(func() {
+			ready.Done()
+			conn, err := client.getConnection(ctx)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			connections[i] = conn
+			if _, err := client.ExchangeContext(ctx, dnsQuestion(fmt.Sprintf("query-%d.test", i))); err != nil {
+				t.Error(err)
+			}
+			t.Cleanup(func() { _ = conn.CloseWithError(0, "") })
+		})
+	}
+	ready.Wait()
+	client.connMu.Unlock()
+	done.Wait()
+	for _, conn := range connections {
+		if conn != connections[0] {
+			t.Error("concurrent queries opened separate QUIC connections")
+		}
+	}
+	conn := connections[0]
+	if conn == nil {
+		return
+	}
+	canceled, stop := context.WithCancel(ctx)
+	defer stop()
+	cancelQuery <- stop
+	_, err := client.ExchangeContext(canceled, dnsQuestion("canceled.test"))
+	close(release)
+	if err == nil || !errors.Is(canceled.Err(), context.Canceled) {
+		t.Errorf("query was not canceled while waiting for its response: %v", err)
+	}
+	if conn.Context().Err() != nil {
+		t.Error("canceled query closed the shared connection")
+	}
+	client.ResetConnection()
+	if conn.Context().Err() == nil {
+		t.Error("reset kept the old connection alive")
+	}
+	if _, err := client.ExchangeContext(ctx, dnsQuestion("after-reset.test")); err != nil {
+		t.Fatal(err)
+	}
+	current, err := client.getConnection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.closeConnWithError(conn, errors.New("stale query failed after reset"))
+	if current.Context().Err() != nil {
+		t.Error("stale failure closed the new connection")
+	}
+	_ = current.CloseWithError(QUICCodeNoError, "idle server")
+	if _, err := client.ExchangeContext(ctx, dnsQuestion("after-server-close.test")); err != nil {
+		t.Fatalf("failed to reconnect a closed shared connection: %v", err)
+	}
+	_ = client.Close()
+	if _, err := client.getConnection(ctx); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("closed client reused or opened a connection: %v", err)
 	}
 }

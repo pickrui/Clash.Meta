@@ -86,7 +86,7 @@ func nameDNSReply(packet []byte) ([]byte, error) {
 	return new(D.Msg).SetReply(query).Pack()
 }
 
-func nameDNSServer(t *testing.T, protocol string, certificate tls.Certificate) (string, <-chan string) {
+func nameDNSServer(t *testing.T, protocol string, certificate tls.Certificate, onQUICQuery ...func()) (string, <-chan string) {
 	t.Helper()
 	seen := make(chan string, 16)
 	config := &tls.Config{Certificates: []tls.Certificate{certificate}, GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) { seen <- hello.ServerName; return nil, nil }}
@@ -106,34 +106,32 @@ func nameDNSServer(t *testing.T, protocol string, certificate tls.Certificate) (
 				}
 				workers.Go(func() {
 					defer conn.CloseWithError(0, "")
-					stream, err := conn.AcceptStream(ctx)
-					if err != nil {
-						return
-					}
-					_ = stream.SetDeadline(time.Now().Add(5 * time.Second))
-					var size uint16
-					if binary.Read(stream, binary.BigEndian, &size) != nil {
-						return
-					}
-					packet := make([]byte, size)
-					if _, err = io.ReadFull(stream, packet); err != nil {
-						return
-					}
-					reply, err := nameDNSReply(packet)
-					if err != nil {
-						return
-					}
-					_, err = stream.Write(binary.BigEndian.AppendUint16(nil, uint16(len(reply))))
-					if err != nil {
-						return
-					}
-					if _, err = stream.Write(reply); err != nil {
-						return
-					}
-					_ = stream.Close()
-					select {
-					case <-conn.Context().Done():
-					case <-ctx.Done():
+					for {
+						stream, err := conn.AcceptStream(ctx)
+						if err != nil {
+							return
+						}
+						workers.Go(func() {
+							defer stream.Close()
+							defer stream.CancelRead(0)
+							_ = stream.SetDeadline(time.Now().Add(5 * time.Second))
+							var size uint16
+							if binary.Read(stream, binary.BigEndian, &size) != nil {
+								return
+							}
+							packet := make([]byte, size)
+							if _, err := io.ReadFull(stream, packet); err != nil {
+								return
+							}
+							for _, onQuery := range onQUICQuery {
+								onQuery()
+							}
+							reply, err := nameDNSReply(packet)
+							if err != nil {
+								return
+							}
+							_, _ = stream.Write(append(binary.BigEndian.AppendUint16(nil, uint16(len(reply))), reply...))
+						})
 					}
 				})
 			}

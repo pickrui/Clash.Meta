@@ -56,22 +56,13 @@ func TestUTLSMarshalNoOp(t *testing.T) {
 	}
 }
 
-func TestUTLSHandshakeClientParrotGolang(t *testing.T) {
-	hello := &helloID{HelloGolang}
-
-	t.Skip("Skipping golang parroting tests until adjusting for new fingerprints")
-
-	testUTLSHandshakeClientECDHE_ECDSA_WITH_CHACHA20_POLY1305(t, hello)
-	testUTLSHandshakeClientECDHE_RSA_WITH_CHACHA20_POLY1305(t, hello)
-
-	testUTLSHandshakeClientECDHE_RSA_AES128_GCM_SHA256(t, hello)
-	testUTLSHandshakeClientECDHE_ECDSA_AES128_GCM_SHA256(t, hello)
-	testUTLSHandshakeClientECDHE_RSA_AES256_CBC_SHA(t, hello)
-	testUTLSHandshakeClientECDHE_ECDSA_AES256_CBC_SHA(t, hello)
-	testUTLSHandshakeClientECDHE_RSA_AES128_CBC_SHA(t, hello)
-	testUTLSHandshakeClientECDHE_ECDSA_AES128_CBC_SHA(t, hello)
-
-	testUTLSHandshakeClientRSA_AES128_GCM_SHA256(t, hello)
+func TestUTLSRejectsGolangClientHello(t *testing.T) {
+	defer func() {
+		if got := recover(); got != "Golang ClientHello is disabled" {
+			t.Fatalf("disabled ClientHello was not rejected: %v", got)
+		}
+	}()
+	_ = UClient(nil, testConfig, HelloGolang).BuildHandshakeState()
 }
 
 func TestUTLSHandshakeClientParrotChrome_70(t *testing.T) {

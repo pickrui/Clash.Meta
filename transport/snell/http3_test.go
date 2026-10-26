@@ -579,7 +579,17 @@ func TestHTTP3OpenRetriesOnFreshSessionAfterGoAway(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("server shutdown did not finish")
 	}
-	client.mu.Lock()
+	// Context cancellation precedes the asynchronous session-table cleanup.
+	deadline := time.Now().Add(time.Second)
+	for {
+		client.mu.Lock()
+		_, tracked := client.connections[draining]
+		if !tracked || time.Now().After(deadline) {
+			break
+		}
+		client.mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
 	defer client.mu.Unlock()
 	if len(client.connections) > 1 {
 		t.Fatalf("%d sessions tracked after the drained one closed", len(client.connections))

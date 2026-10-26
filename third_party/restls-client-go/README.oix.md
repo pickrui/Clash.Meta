@@ -24,7 +24,7 @@ Closing a raw socket alone leaves both transfer goroutines waiting on long rate
 reservations. The server lifecycle regression at `listener/restls/restls_test.go`
 reproduces this using a one-bit-per-second fallback: shutdown must finish before
 the next eight-second byte interval. The local `go.mod` minimum is Go 1.21 for
-`context.AfterFunc`; the enclosing application already uses Go 1.26.
+`context.AfterFunc`; the enclosing application now uses Go 1.27.
 
 The parent `core/go.mod` and the nested core's `go.mod` both replace the module
 with this directory. Both replacements are needed: dependency-module replace
@@ -57,3 +57,22 @@ before sending the request record, preventing fast replies from being lost.
 `restls_server_flow_control_test.go` deterministically reproduces both failures
 without a network or a 40-second yamux keepalive timeout. Application writes remain
 ordered; control records can progress during a flow-control wait.
+
+The TLS 1.3 resumption diagnostic uses the owned `Conn` rather than dereferencing
+an optional `UConn`; the existing `TestResumption/TLSv13` covers the plain TLS
+path that previously panicked after certificate-clock failures were removed.
+
+Legacy handshake tests pin certificate validation to October 2016 and advance
+that clock past ticket expiry boundaries. Their OCSP/SCT test owns its certificate
+slice and name index. `TestMain` sets `GODEBUG=cryptocustomrand=1` so Go 1.26+
+continues using each test's `Config.Rand` for recorded wire bytes. This setting is
+limited to this package's test process; application cryptography is unchanged.
+Eight ECDSA transcripts were regenerated using Go 1.27.3 and OpenSSL 1.1.1w
+(`enable-weak-ssl-ciphers no-shared`), then checked through the normal parallel
+suite. OpenSSL source SHA256:
+`cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8`.
+Normal tests replay these transcripts and do not require OpenSSL or external
+network access. The complete Restls suite is included in the deep CI check.
+The disabled `HelloGolang` branch keeps its rejection behavior; unreachable
+handshake code after that rejection was removed. Its formerly skipped parroting
+test now checks that the disabled mode stays rejected.

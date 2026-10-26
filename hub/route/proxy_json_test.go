@@ -156,7 +156,13 @@ func TestControllerJSONEarlyErrorsKeepHTTP500(t *testing.T) {
 			tc.write(got, request)
 			require.Equal(t, http.StatusInternalServerError, got.Code)
 			require.Equal(t, want.Header(), got.Header())
-			require.Equal(t, want.Body.String(), got.Body.String())
+			// Go 1.27 can name an interface instead of its concrete type in JSON errors.
+			cause := want.Body.String()
+			if index := strings.LastIndex(cause, ": "); index >= 0 {
+				cause = cause[index+2:]
+			}
+			require.True(t, strings.HasPrefix(got.Body.String(), "json:"), got.Body.String())
+			require.True(t, strings.HasSuffix(got.Body.String(), cause), got.Body.String())
 		}
 	}
 }

@@ -55,56 +55,27 @@ func UClient(conn net.Conn, config *Config, clientHelloID ClientHelloID) *UConn 
 	return &uconn
 }
 
-// BuildHandshakeState behavior varies based on ClientHelloID and
-// whether it was already called before.
-// If HelloGolang:
-//
-//	[only once] make default ClientHello and overwrite existing state
-//
-// If any other mimicking ClientHelloID is used:
-//
-//	[only once] make ClientHello based on ID and overwrite existing state
-//	[each call] apply uconn.Extensions config to internal crypto/tls structures
-//	[each call] marshal ClientHello.
-//
-// BuildHandshakeState is automatically called before uTLS performs handshake,
-// amd should only be called explicitly to inspect/change fields of
-// default/mimicked ClientHello.
+// BuildHandshakeState applies the selected mimicking ClientHello and extensions.
+// HelloGolang is disabled by Restls. Handshakes call this method automatically.
 func (uconn *UConn) BuildHandshakeState() error {
 	if uconn.ClientHelloID == HelloGolang {
 		panic("Golang ClientHello is disabled") // #Restls#
-		if uconn.ClientHelloBuilt {
-			return nil
-		}
-
-		// use default Golang ClientHello.
-		hello, ecdheKey, err := uconn.makeClientHello()
+	}
+	if !uconn.ClientHelloBuilt {
+		err := uconn.applyPresetByID(uconn.ClientHelloID)
 		if err != nil {
 			return err
 		}
+		if uconn.omitSNIExtension {
+			uconn.removeSNIExtension()
+		}
+	}
 
-		uconn.HandshakeState.Hello = hello.getPublicPtr()
-		uconn.HandshakeState.State13.EcdheKey = ecdheKey
-		uconn.HandshakeState.C = uconn.Conn
-	} else {
-		if !uconn.ClientHelloBuilt {
-			err := uconn.applyPresetByID(uconn.ClientHelloID)
-			if err != nil {
-				return err
-			}
-			if uconn.omitSNIExtension {
-				uconn.removeSNIExtension()
-			}
-		}
-
-		err := uconn.ApplyConfig()
-		if err != nil {
-			return err
-		}
-		err = uconn.MarshalClientHello()
-		if err != nil {
-			return err
-		}
+	if err := uconn.ApplyConfig(); err != nil {
+		return err
+	}
+	if err := uconn.MarshalClientHello(); err != nil {
+		return err
 	}
 	uconn.ClientHelloBuilt = true
 	return nil

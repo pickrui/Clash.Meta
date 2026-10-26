@@ -878,6 +878,7 @@ func testResumption(t *testing.T, version uint16) {
 		t.Skip("skipping in -short mode")
 	}
 	serverConfig := &Config{
+		Time:         testCertificateTime,
 		MaxVersion:   version,
 		CipherSuites: []uint16{TLS_RSA_WITH_RC4_128_SHA, TLS_ECDHE_RSA_WITH_RC4_128_SHA},
 		Certificates: testConfig.Certificates,
@@ -892,6 +893,7 @@ func testResumption(t *testing.T, version uint16) {
 	rootCAs.AddCert(issuer)
 
 	clientConfig := &Config{
+		Time:               testCertificateTime,
 		MaxVersion:         version,
 		CipherSuites:       []uint16{TLS_RSA_WITH_RC4_128_SHA},
 		ClientSessionCache: NewLRUClientSessionCache(32),
@@ -943,7 +945,7 @@ func testResumption(t *testing.T, version uint16) {
 
 	// An old session ticket is replaced with a ticket encrypted with a fresh key.
 	ticket = getTicket()
-	serverConfig.Time = func() time.Time { return time.Now().Add(24*time.Hour + time.Minute) }
+	serverConfig.Time = func() time.Time { return testCertificateTime().Add(24*time.Hour + time.Minute) }
 	testResumeState("ResumeWithOldTicket", true)
 	if bytes.Equal(ticket, getTicket()) {
 		t.Fatal("old first ticket matches the fresh one")
@@ -951,13 +953,13 @@ func testResumption(t *testing.T, version uint16) {
 
 	// Once the session master secret is expired, a full handshake should occur.
 	ticket = getTicket()
-	serverConfig.Time = func() time.Time { return time.Now().Add(24*8*time.Hour + time.Minute) }
+	serverConfig.Time = func() time.Time { return testCertificateTime().Add(24*8*time.Hour + 2*time.Minute) }
 	testResumeState("ResumeWithExpiredTicket", false)
 	if bytes.Equal(ticket, getTicket()) {
 		t.Fatal("expired first ticket matches the fresh one")
 	}
 
-	serverConfig.Time = func() time.Time { return time.Now() } // reset the time back
+	serverConfig.Time = testCertificateTime
 	key1 := randomKey()
 	serverConfig.SetSessionTicketKeys([][32]byte{key1})
 
@@ -974,11 +976,11 @@ func testResumption(t *testing.T, version uint16) {
 	testResumeState("KeyChangeFinish", true)
 
 	// Age the session ticket a bit, but not yet expired.
-	serverConfig.Time = func() time.Time { return time.Now().Add(24*time.Hour + time.Minute) }
+	serverConfig.Time = func() time.Time { return testCertificateTime().Add(24*time.Hour + time.Minute) }
 	testResumeState("OldSessionTicket", true)
 	ticket = getTicket()
 	// Expire the session ticket, which would force a full handshake.
-	serverConfig.Time = func() time.Time { return time.Now().Add(24*8*time.Hour + time.Minute) }
+	serverConfig.Time = func() time.Time { return testCertificateTime().Add(24*8*time.Hour + 2*time.Minute) }
 	testResumeState("ExpiredSessionTicket", false)
 	if bytes.Equal(ticket, getTicket()) {
 		t.Fatal("new ticket wasn't provided after old ticket expired")
@@ -986,7 +988,7 @@ func testResumption(t *testing.T, version uint16) {
 
 	// Age the session ticket a bit at a time, but don't expire it.
 	d := 0 * time.Hour
-	serverConfig.Time = func() time.Time { return time.Now().Add(d) }
+	serverConfig.Time = func() time.Time { return testCertificateTime().Add(d) }
 	deleteTicket()
 	testResumeState("GetFreshSessionTicket", false)
 	for i := 0; i < 13; i++ {
@@ -997,7 +999,7 @@ func testResumption(t *testing.T, version uint16) {
 	// handshake occurs for TLS 1.2. Resumption should still occur for
 	// TLS 1.3 since the client should be using a fresh ticket sent over
 	// by the server.
-	d += 12 * time.Hour
+	d += 12*time.Hour + time.Minute
 	if version == VersionTLS13 {
 		testResumeState("ExpiredSessionTicket", true)
 	} else {
@@ -1010,6 +1012,7 @@ func testResumption(t *testing.T, version uint16) {
 	// Reset serverConfig to ensure that calling SetSessionTicketKeys
 	// before the serverConfig is used works.
 	serverConfig = &Config{
+		Time:         testCertificateTime,
 		MaxVersion:   version,
 		CipherSuites: []uint16{TLS_RSA_WITH_RC4_128_SHA, TLS_ECDHE_RSA_WITH_RC4_128_SHA},
 		Certificates: testConfig.Certificates,
@@ -1034,6 +1037,7 @@ func testResumption(t *testing.T, version uint16) {
 	if version == VersionTLS13 {
 		deleteTicket()
 		serverConfig = &Config{
+			Time: testCertificateTime,
 			// Use a different curve than the client to force a HelloRetryRequest.
 			CurvePreferences: []CurveID{CurveP521, CurveP384, CurveP256},
 			MaxVersion:       version,
@@ -1044,6 +1048,7 @@ func testResumption(t *testing.T, version uint16) {
 
 		// Reset serverConfig back.
 		serverConfig = &Config{
+			Time:         testCertificateTime,
 			MaxVersion:   version,
 			CipherSuites: []uint16{TLS_RSA_WITH_RC4_128_SHA, TLS_ECDHE_RSA_WITH_RC4_128_SHA},
 			Certificates: testConfig.Certificates,
@@ -1759,6 +1764,7 @@ func testVerifyConnection(t *testing.T, version uint16) {
 		var serverCalled, clientCalled int
 
 		serverConfig := &Config{
+			Time:         testCertificateTime,
 			MaxVersion:   version,
 			Certificates: []Certificate{testConfig.Certificates[0]},
 			ClientCAs:    rootCAs,
@@ -1769,6 +1775,7 @@ func testVerifyConnection(t *testing.T, version uint16) {
 		test.configureServer(serverConfig, &serverCalled)
 
 		clientConfig := &Config{
+			Time:               testCertificateTime,
 			MaxVersion:         version,
 			ClientSessionCache: NewLRUClientSessionCache(32),
 			RootCAs:            rootCAs,
@@ -2560,12 +2567,16 @@ func testResumptionKeepsOCSPAndSCT(t *testing.T, ver uint16) {
 	roots := x509.NewCertPool()
 	roots.AddCert(issuer)
 	clientConfig := &Config{
+		Time:               testCertificateTime,
 		MaxVersion:         ver,
 		ClientSessionCache: NewLRUClientSessionCache(32),
 		ServerName:         "example.golang",
 		RootCAs:            roots,
 	}
 	serverConfig := testConfig.Clone()
+	serverConfig.Time = testCertificateTime
+	serverConfig.Certificates = append([]Certificate(nil), serverConfig.Certificates...)
+	serverConfig.BuildNameToCertificate()
 	serverConfig.MaxVersion = ver
 	serverConfig.Certificates[0].OCSPStaple = []byte{1, 2, 3}
 	serverConfig.Certificates[0].SignedCertificateTimestamps = [][]byte{{4, 5, 6}}

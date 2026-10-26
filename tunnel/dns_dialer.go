@@ -169,6 +169,14 @@ func (d *DNSDialer) ListenPacket(ctx context.Context, network, addr string) (net
 	}
 
 	if proxyAdapter == nil {
+		// Darwin may assign a dual-stack socket an ephemeral port already occupied by IPv4.
+		if network == "udp" {
+			if metadata.DstIP.Unmap().Is4() {
+				network = "udp4"
+			} else if metadata.DstIP.Is6() {
+				network = "udp6"
+			}
+		}
 		return dialer.NewDialer(opts...).ListenPacket(ctx, network, "", metadata.AddrPort())
 	}
 

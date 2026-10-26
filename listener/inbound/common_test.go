@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	AI "github.com/metacubex/mihomo/adapter/inbound"
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/pool"
 	"github.com/metacubex/mihomo/common/utils"
@@ -67,6 +68,19 @@ type TestDialer struct {
 }
 
 func (t *TestDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	var admission *testTCPAdmission
+	if entry, ok := testTCPListeners.Load(address); ok && strings.HasPrefix(network, "tcp") {
+		admission = entry.(*testTCPAdmission)
+		select {
+		case admission.slots <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-admission.done:
+			return nil, net.ErrClosed
+		}
+		defer func() { <-admission.slots }()
+	}
+
 start:
 	conn, err := t.dialer.DialContext(ctx, network, address)
 	if err != nil && ctx.Err() == nil && t.ctx.Err() == nil {
@@ -75,6 +89,17 @@ start:
 		// This can lead to various errors such as WSAECONNREFUSED and WSAENOBUFS.
 		// So we just retry if the context is not canceled.
 		goto start
+	}
+	if err == nil && admission != nil {
+		select {
+		case <-admission.accepted:
+		case <-ctx.Done():
+			conn.Close()
+			return nil, ctx.Err()
+		case <-admission.done:
+			conn.Close()
+			return nil, net.ErrClosed
+		}
 	}
 	return conn, err
 }
@@ -367,3 +392,57 @@ func NewHttpTestTunnel() *TestTunnel {
 	}
 	return tunnel
 }
+
+// Darwin can reset sockets before Accept when its small listen queue fills.
+// Bound pending admission only; handshakes and transfers keep their parallelism.
+var testTCPListeners sync.Map
+
+type testTCPAdmission struct {
+	slots    chan struct{}
+	accepted chan struct{}
+	done     chan struct{}
+	once     sync.Once
+}
+
+type testListenConfig struct{ C.InboundListenConfig }
+
+func (lc testListenConfig) Listen(ctx context.Context, network, address string) (net.Listener, error) {
+	listener, err := lc.InboundListenConfig.Listen(ctx, network, address)
+	if err != nil || runtime.GOOS != "darwin" {
+		return listener, err
+	}
+	admission := &testTCPAdmission{
+		slots:    make(chan struct{}, 32),
+		accepted: make(chan struct{}, 32),
+		done:     make(chan struct{}),
+	}
+	testTCPListeners.Store(listener.Addr().String(), admission)
+	return &testTCPListener{Listener: listener, admission: admission}, nil
+}
+
+type testTCPListener struct {
+	net.Listener
+	admission *testTCPAdmission
+}
+
+func (l *testTCPListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err == nil {
+		select {
+		case l.admission.accepted <- struct{}{}:
+		case <-l.admission.done:
+			conn.Close()
+			return nil, net.ErrClosed
+		}
+	}
+	return conn, err
+}
+func (l *testTCPListener) Close() error {
+	l.admission.once.Do(func() {
+		testTCPListeners.CompareAndDelete(l.Addr().String(), l.admission)
+		close(l.admission.done)
+	})
+	return l.Listener.Close()
+}
+
+func newTestListenConfig() C.InboundListenConfig { return testListenConfig{AI.NewListenConfig()} }

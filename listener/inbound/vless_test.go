@@ -14,9 +14,10 @@ import (
 func testInboundVless(t *testing.T, inboundOptions inbound.VlessOption, outboundOptions outbound.VlessOption) {
 	t.Parallel()
 	inboundOptions.BaseOption = inbound.BaseOption{
-		NameStr: "vless_inbound",
-		Listen:  "127.0.0.1",
-		Port:    "0",
+		NameStr:            "vless_inbound",
+		ListenConfigForAPI: newTestListenConfig(),
+		Listen:             "127.0.0.1",
+		Port:               "0",
 	}
 	inboundOptions.Users = []inbound.VlessUser{
 		{Username: "test", UUID: userUUID, Flow: "xtls-rprx-vision"},

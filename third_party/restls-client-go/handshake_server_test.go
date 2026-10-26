@@ -479,10 +479,12 @@ func TestCrossVersionResume(t *testing.T) {
 
 func testCrossVersionResume(t *testing.T, version uint16) {
 	serverConfig := &Config{
+		Time:         testCertificateTime,
 		CipherSuites: []uint16{TLS_RSA_WITH_AES_128_CBC_SHA},
 		Certificates: testConfig.Certificates,
 	}
 	clientConfig := &Config{
+		Time:               testCertificateTime,
 		CipherSuites:       []uint16{TLS_RSA_WITH_AES_128_CBC_SHA},
 		InsecureSkipVerify: true,
 		ClientSessionCache: NewLRUClientSessionCache(1),

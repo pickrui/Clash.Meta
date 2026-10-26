@@ -1,12 +1,16 @@
 package inbound_test
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/metacubex/mihomo/adapter/outbound"
 	"github.com/metacubex/mihomo/listener/inbound"
@@ -250,6 +254,18 @@ func TestInboundShadowSocks_SimpleObfs_Tls(t *testing.T) {
 }
 
 func TestInboundShadowSocks_KcpTun(t *testing.T) {
+	t.Run("invalid connection count", func(t *testing.T) {
+		client, err := outbound.NewShadowSocks(outbound.ShadowSocksOption{
+			Name: "invalid-kcptun", Server: "127.0.0.1", Port: 1,
+			Cipher: "none", Plugin: kcptun.Mode, PluginOpts: map[string]any{"conn": -1},
+		})
+		if client != nil {
+			_ = client.Close()
+		}
+		if err == nil || !strings.Contains(err.Error(), "conn must not be negative") {
+			t.Fatalf("invalid connection count was not rejected: %v", err)
+		}
+	})
 	if winGo120 {
 		t.Skip("skip kcptun test on windows go1.20")
 	}
@@ -264,4 +280,81 @@ func TestInboundShadowSocks_KcpTun(t *testing.T) {
 		PluginOpts: map[string]any{"key": shadowsocksPassword16},
 	}
 	testInboundShadowSocks(t, inboundOptions, outboundOptions, shadowsocksCipherShortLists, false)
+}
+
+func TestKcpTunClientClose(t *testing.T) {
+	t.Parallel()
+	for _, autoExpire := range []int{0, 1} {
+		t.Run(fmt.Sprintf("autoexpire=%d", autoExpire), func(t *testing.T) {
+			t.Parallel()
+			sink, err := net.ListenPacket("udp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sink.Close()
+			client := kcptun.NewClient(kcptun.Config{Conn: 2, AutoExpire: autoExpire})
+			defer client.Close()
+			var sockets []net.PacketConn
+			dial := func(context.Context) (net.PacketConn, net.Addr, error) {
+				pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+				if err == nil {
+					sockets = append(sockets, pc)
+					t.Cleanup(func() { _ = pc.Close() })
+				}
+				return pc, sink.LocalAddr(), err
+			}
+			for generation := range 2 {
+				if generation > 0 && autoExpire > 0 {
+					time.Sleep(time.Second + time.Millisecond)
+				}
+				for range 2 {
+					stream, err := client.OpenStream(t.Context(), dial)
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = stream.Close() })
+				}
+			}
+			want := 2
+			if autoExpire > 0 {
+				want = 4
+			}
+			if len(sockets) != want {
+				t.Fatalf("expected %d active and retired sockets, got %d", want, len(sockets))
+			}
+			if err := client.Close(); err != nil {
+				t.Fatal(err)
+			}
+			for i, pc := range sockets {
+				if err := pc.SetReadDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
+					t.Errorf("socket %d survives client close: %v", i, err)
+				}
+			}
+			if stream, err := client.OpenStream(t.Context(), dial); err == nil {
+				_ = stream.Close()
+				t.Error("closed client opened a new stream")
+			}
+		})
+	}
+	t.Run("cancel pending dial", func(t *testing.T) {
+		t.Parallel()
+		client := kcptun.NewClient(kcptun.Config{})
+		defer client.Close()
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+		defer cancel()
+		started, result := make(chan struct{}), make(chan error, 1)
+		go func() {
+			_, err := client.OpenStream(ctx, func(ctx context.Context) (net.PacketConn, net.Addr, error) {
+				close(started)
+				<-ctx.Done()
+				return nil, nil, ctx.Err()
+			})
+			result <- err
+		}()
+		<-started
+		_ = client.Close()
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Errorf("pending dial not canceled by close: %v", err)
+		}
+	})
 }

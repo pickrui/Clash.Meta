@@ -328,8 +328,15 @@ func allCipherSuites() []uint16 {
 
 var testConfig *Config
 
+func testCertificateTime() time.Time { return time.Unix(1476984729, 0) }
+
 func TestMain(m *testing.M) {
 	flag.Parse()
+	// Wire fixtures require Config.Rand; Go 1.26+ otherwise ignores custom readers.
+	if err := os.Setenv("GODEBUG", os.Getenv("GODEBUG")+",cryptocustomrand=1"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	os.Exit(runMain(m))
 }
 
