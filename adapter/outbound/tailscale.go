@@ -180,7 +180,7 @@ func (t *Tailscale) serverFactory() func(authKey string) *tsnet.Server {
 			ExtraRootCAs: ca.GetCertPool(),
 			LookupHook: func(ctx context.Context, host string) ([]netip.Addr, error) {
 				log.Debugln("[Tailscale](%s) LookupHook: start lookup %s", option.Name, host)
-				ips, err := resolver.LookupIPWithResolver(ctx, host, resolver.ProxyServerHostResolver)
+				ips, err := resolver.LookupIPWithResolver(ctx, host, resolver.ProxyServerHostResolver.Load())
 				log.Debugln("[Tailscale](%s) LookupHook: finish lookup %s, ips: %v, err: %v", option.Name, host, ips, err)
 				return ips, err
 			},
@@ -618,7 +618,7 @@ func (t *Tailscale) routedAddr(ctx context.Context, metadata *C.Metadata) (netip
 	if _, err := resolveIPWithResolver(ctx, metadata.Host, t.prefer, t.dnsResolver); err == nil {
 		return netip.Addr{}, false
 	}
-	addrs, err := resolver.LookupIPWithResolver(ctx, metadata.Host, resolver.DirectHostResolver)
+	addrs, err := resolver.LookupIPWithResolver(ctx, metadata.Host, resolver.DirectHostResolver.Load())
 	if err != nil {
 		return netip.Addr{}, false
 	}

@@ -259,22 +259,22 @@ var dnsRetireAfter = time.AfterFunc
 var WrapProxyServerResolver func(resolver.Resolver) resolver.Resolver
 
 func installedResolvers() []resolver.Resolver {
-	return []resolver.Resolver{resolver.DefaultResolver, resolver.ProxyServerHostResolver, resolver.DirectHostResolver}
+	return []resolver.Resolver{resolver.DefaultResolver.Load(), resolver.ProxyServerHostResolver.Load(), resolver.DirectHostResolver.Load()}
 }
 
 func stopDNS() {
 	retired := installedResolvers()
-	resolver.DefaultResolver = nil
-	resolver.DefaultService = nil
-	resolver.ProxyServerHostResolver = nil
-	resolver.DirectHostResolver = nil
+	resolver.DefaultResolver.Store(nil)
+	resolver.DefaultService.Store(nil)
+	resolver.ProxyServerHostResolver.Store(nil)
+	resolver.DirectHostResolver.Store(nil)
 	resolver.CloseQueries(retired...)
 	dns.ReCreateServer("", nil, nil)
 }
 
 func updateDNS(c *config.DNS, generalIPv6 bool) {
 	if !c.Enable {
-		resolver.DefaultHostMapper = nil
+		resolver.DefaultHostMapper.Store(nil)
 		stopDNS()
 		return
 	}
@@ -309,30 +309,30 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 	})
 
 	// reuse cache of old host mapper
-	if old := resolver.DefaultHostMapper; old != nil {
+	if old := resolver.DefaultHostMapper.Load(); old != nil {
 		m.PatchFrom(old.(*dns.ResolverEnhancer))
 	}
 
 	s := dns.NewService(r, m)
 
-	resolver.DefaultResolver = r
-	resolver.DefaultHostMapper = m
-	resolver.DefaultService = s
-	resolver.UseSystemHosts = c.UseSystemHosts
+	resolver.DefaultResolver.Store(r)
+	resolver.DefaultHostMapper.Store(m)
+	resolver.DefaultService.Store(s)
+	resolver.UseSystemHosts.Store(c.UseSystemHosts)
 
+	var proxyResolver resolver.Resolver = r.Resolver
 	if r.ProxyResolver.Invalid() {
-		resolver.ProxyServerHostResolver = r.ProxyResolver
-	} else {
-		resolver.ProxyServerHostResolver = r.Resolver
+		proxyResolver = r.ProxyResolver
 	}
 	if WrapProxyServerResolver != nil {
-		resolver.ProxyServerHostResolver = WrapProxyServerResolver(resolver.ProxyServerHostResolver)
+		proxyResolver = WrapProxyServerResolver(proxyResolver)
 	}
+	resolver.ProxyServerHostResolver.Store(proxyResolver)
 
 	if r.DirectResolver.Invalid() {
-		resolver.DirectHostResolver = r.DirectResolver
+		resolver.DirectHostResolver.Store(r.DirectResolver)
 	} else {
-		resolver.DirectHostResolver = r.Resolver
+		resolver.DirectHostResolver.Store(r.Resolver)
 	}
 
 	lc := inbound.NewListenConfig()
@@ -343,7 +343,7 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 }
 
 func updateHosts(tree *trie.DomainTrie[resolver.HostValue]) {
-	resolver.DefaultHosts = resolver.NewHosts(tree)
+	resolver.DefaultHosts.Store(resolver.NewHosts(tree))
 }
 
 func updateProxies(proxies map[string]C.Proxy, providers map[string]P.ProxyProvider) {

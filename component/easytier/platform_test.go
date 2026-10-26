@@ -26,9 +26,9 @@ func (r *testDNSResolver) ExchangeContext(ctx context.Context, m *D.Msg) (*D.Msg
 }
 
 func TestDNSRecordsUseMihomoResolver(t *testing.T) {
-	oldProxy, oldDefault := resolver.ProxyServerHostResolver, net.DefaultResolver
+	oldProxy, oldDefault := resolver.ProxyServerHostResolver.Load(), net.DefaultResolver
 	t.Cleanup(func() {
-		resolver.ProxyServerHostResolver = oldProxy
+		resolver.ProxyServerHostResolver.Store(oldProxy)
 		net.DefaultResolver = oldDefault
 	})
 	net.DefaultResolver = &net.Resolver{
@@ -38,7 +38,7 @@ func TestDNSRecordsUseMihomoResolver(t *testing.T) {
 			return nil, errors.New("forbidden resolver")
 		},
 	}
-	resolver.ProxyServerHostResolver = &testDNSResolver{exchange: func(_ context.Context, m *D.Msg) (*D.Msg, error) {
+	resolver.ProxyServerHostResolver.Store(&testDNSResolver{exchange: func(_ context.Context, m *D.Msg) (*D.Msg, error) {
 		reply := new(D.Msg).SetReply(m)
 		switch m.Question[0].Qtype {
 		case D.TypeTXT:
@@ -47,7 +47,7 @@ func TestDNSRecordsUseMihomoResolver(t *testing.T) {
 			reply.Answer = []D.RR{&D.SRV{Target: "peer.example.", Port: 11010}}
 		}
 		return reply, nil
-	}}
+	}})
 
 	txt, err := (DNSResolver{}).LookupTXT(context.Background(), platform.DNSQuery{Host: "example"})
 	if err != nil || txt != "ok" {

@@ -27,10 +27,10 @@ func TestEncryptedDNSNameCertVerify(t *testing.T) {
 	untrusted := testutil.NewCertificate(t, "certificate.test")
 	require.NoError(t, ca.AddCertificate(cert.RootPEM))
 	t.Cleanup(ca.ResetCertificate)
-	previousHosts := resolver.DefaultHosts
-	resolver.DefaultHosts = resolver.NewHosts(trie.New[resolver.HostValue]())
-	require.NoError(t, resolver.DefaultHosts.Insert("front.test", resolver.HostValue{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}))
-	t.Cleanup(func() { resolver.DefaultHosts = previousHosts })
+	previousHosts := resolver.DefaultHosts.Load()
+	resolver.DefaultHosts.Store(resolver.NewHosts(trie.New[resolver.HostValue]()))
+	require.NoError(t, resolver.DefaultHosts.Load().Insert("front.test", resolver.HostValue{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}))
+	t.Cleanup(func() { resolver.DefaultHosts.Store(previousHosts) })
 	for _, protocol := range []string{"tls", "https", "quic"} {
 		for _, scenario := range []string{"valid", "wrong name", "untrusted", "default SNI", "skip cannot bypass"} {
 			t.Run(protocol+"/"+scenario, func(t *testing.T) {

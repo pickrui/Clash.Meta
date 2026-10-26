@@ -29,10 +29,10 @@ func (r *realmTestResolver) LookupIP(context.Context, string) ([]netip.Addr, err
 	return []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("2001:db8::1")}, r.err
 }
 func TestRealmResolvesRequestedAddressFamilies(t *testing.T) {
-	previous, disabled := ProxyServerHostResolver, DisableIPv6.Load()
-	t.Cleanup(func() { ProxyServerHostResolver = previous; DisableIPv6.Store(disabled) })
+	previous, disabled := ProxyServerHostResolver.Load(), DisableIPv6.Load()
+	t.Cleanup(func() { ProxyServerHostResolver.Store(previous); DisableIPv6.Store(disabled) })
 	fake := &realmTestResolver{}
-	ProxyServerHostResolver = fake
+	ProxyServerHostResolver.Store(fake)
 	DisableIPv6.Store(false)
 	for _, tc := range []struct {
 		name   string

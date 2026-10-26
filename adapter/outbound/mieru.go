@@ -63,7 +63,7 @@ type mieruDNSResolver struct {
 var _ mierucommon.DNSResolver = (*mieruDNSResolver)(nil)
 
 func (dr mieruDNSResolver) LookupIP(ctx context.Context, network, host string) (_ []net.IP, err error) {
-	ip, err := resolveIPWithResolver(ctx, host, dr.prefer, resolver.ProxyServerHostResolver)
+	ip, err := resolveIPWithResolver(ctx, host, dr.prefer, resolver.ProxyServerHostResolver.Load())
 	if err != nil {
 		return nil, fmt.Errorf("can't resolve ip: %w", err)
 	}

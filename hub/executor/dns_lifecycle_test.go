@@ -20,17 +20,25 @@ import (
 
 func keepDNSGlobals(t *testing.T) *[]func() {
 	t.Helper()
-	oldDefault, oldProxy, oldDirect, oldSystem := resolver.DefaultResolver, resolver.ProxyServerHostResolver, resolver.DirectHostResolver, resolver.SystemResolver
-	oldMapper, oldService, oldHosts := resolver.DefaultHostMapper, resolver.DefaultService, resolver.UseSystemHosts
+	oldDefault, oldProxy, oldDirect, oldSystem := resolver.DefaultResolver.Load(), resolver.ProxyServerHostResolver.Load(), resolver.DirectHostResolver.Load(), resolver.SystemResolver
+	oldMapper, oldService, oldHosts := resolver.DefaultHostMapper.Load(), resolver.DefaultService.Load(), resolver.UseSystemHosts.Load()
 	oldRetire := dnsRetireAfter
 	t.Cleanup(func() {
 		updateDNS(&config.DNS{}, false)
 		dnsRetireAfter = oldRetire
-		resolver.DefaultResolver, resolver.ProxyServerHostResolver, resolver.DirectHostResolver, resolver.SystemResolver = oldDefault, oldProxy, oldDirect, oldSystem
-		resolver.DefaultHostMapper, resolver.DefaultService, resolver.UseSystemHosts = oldMapper, oldService, oldHosts
+		resolver.DefaultResolver.Store(oldDefault)
+		resolver.ProxyServerHostResolver.Store(oldProxy)
+		resolver.DirectHostResolver.Store(oldDirect)
+		resolver.SystemResolver = oldSystem
+		resolver.DefaultHostMapper.Store(oldMapper)
+		resolver.DefaultService.Store(oldService)
+		resolver.UseSystemHosts.Store(oldHosts)
 	})
-	resolver.DefaultResolver, resolver.ProxyServerHostResolver, resolver.DirectHostResolver = nil, nil, nil
-	resolver.DefaultHostMapper, resolver.DefaultService = nil, nil
+	resolver.DefaultResolver.Store(nil)
+	resolver.ProxyServerHostResolver.Store(nil)
+	resolver.DirectHostResolver.Store(nil)
+	resolver.DefaultHostMapper.Store(nil)
+	resolver.DefaultService.Store(nil)
 	scheduled := new([]func())
 	dnsRetireAfter = func(grace time.Duration, retire func()) *time.Timer {
 		if grace != resolver.DefaultDNSTimeout {
@@ -87,11 +95,11 @@ func TestDNSReplacementRetiresOnlyConfiguredResolvers(t *testing.T) {
 	if len(*scheduled) != 1 {
 		t.Fatal("disabled DNS deferred its retirement")
 	}
-	if resolver.DefaultResolver != nil || resolver.ProxyServerHostResolver != nil || resolver.DirectHostResolver != nil || resolver.DefaultService != nil || resolver.DefaultHostMapper != nil {
+	if resolver.DefaultResolver.Load() != nil || resolver.ProxyServerHostResolver.Load() != nil || resolver.DirectHostResolver.Load() != nil || resolver.DefaultService.Load() != nil || resolver.DefaultHostMapper.Load() != nil {
 		t.Fatal("disabled DNS retained retired configuration")
 	}
 	updateDNS(cfg, true)
-	check(resolver.DefaultResolver, false)
+	check(resolver.DefaultResolver.Load(), false)
 	check(system, false)
 }
 
@@ -129,7 +137,7 @@ func TestDNSReloadLetsInFlightLookupsFinish(t *testing.T) {
 	proxy := &heldDNSProxy{Base: outbound.NewBase(outbound.BaseOption{Name: "held-dns"}), started: make(chan struct{}, 4), release: make(chan struct{})}
 	cfg := &config.DNS{Enable: true, NameServer: []dns.NameServer{{Net: "tcp", Addr: "127.0.0.1:53", ProxyAdapter: proxy}}}
 	updateDNS(cfg, true)
-	previous := resolver.DefaultResolver
+	previous := resolver.DefaultResolver.Load()
 	type result struct {
 		ips []netip.Addr
 		err error
@@ -177,7 +185,7 @@ func TestShutdownKeepsFakeIPMappings(t *testing.T) {
 	retired := installedResolvers()
 	ip := first.FakeIPPool.Lookup("kept.test")
 	Shutdown()
-	if resolver.DefaultResolver != nil || resolver.ProxyServerHostResolver != nil || resolver.DirectHostResolver != nil || resolver.DefaultService != nil {
+	if resolver.DefaultResolver.Load() != nil || resolver.ProxyServerHostResolver.Load() != nil || resolver.DirectHostResolver.Load() != nil || resolver.DefaultService.Load() != nil {
 		t.Fatal("shutdown left configured resolvers installed")
 	}
 	query := new(D.Msg).SetQuestion("shutdown.test.", D.TypeA)
@@ -204,7 +212,7 @@ func TestDNSInstallWrapsProxyServerResolverBeforeProvidersLoad(t *testing.T) {
 	WrapProxyServerResolver = func(r resolver.Resolver) resolver.Resolver { return &wrapped{r} }
 	servers := []dns.NameServer{{Net: "rcode", Addr: "success"}}
 	updateDNS(&config.DNS{Enable: true, NameServer: servers, ProxyServerNameserver: servers}, true)
-	if _, ok := resolver.ProxyServerHostResolver.(*wrapped); !ok {
-		t.Fatalf("proxy-server resolver = %T, want the installed wrapper", resolver.ProxyServerHostResolver)
+	if _, ok := resolver.ProxyServerHostResolver.Load().(*wrapped); !ok {
+		t.Fatalf("proxy-server resolver = %T, want the installed wrapper", resolver.ProxyServerHostResolver.Load())
 	}
 }

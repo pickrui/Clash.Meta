@@ -16,7 +16,7 @@ func dohRouter() http.Handler {
 }
 
 func dohHandler(w http.ResponseWriter, r *http.Request) {
-	if resolver.DefaultResolver == nil {
+	if resolver.DefaultResolver.Load() == nil {
 		render.Status(r, http.StatusInternalServerError)
 		render.PlainText(w, r, "DNS section is disabled")
 		return

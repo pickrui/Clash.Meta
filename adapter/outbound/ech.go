@@ -34,7 +34,7 @@ func (o ECHOptions) Parse() (*ech.Config, error) {
 			if o.QueryServerName != "" { // overrides the domain name used for ECH HTTPS record queries
 				serverName = o.QueryServerName
 			}
-			return resolver.ResolveECHWithResolver(ctx, serverName, resolver.ProxyServerHostResolver)
+			return resolver.ResolveECHWithResolver(ctx, serverName, resolver.ProxyServerHostResolver.Load())
 		}
 	}
 	return echConfig, nil

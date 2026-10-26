@@ -19,7 +19,7 @@ type nodeDNS struct {
 
 func (d *nodeDNS) get(ctx context.Context) (resolver.Resolver, error) {
 	if d == nil {
-		return resolver.DefaultResolver, nil
+		return resolver.DefaultResolver.Load(), nil
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()

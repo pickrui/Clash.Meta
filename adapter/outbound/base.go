@@ -177,7 +177,7 @@ func (b *Base) DialOptions() (opts []dialer.Option) {
 
 func (b *Base) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
 	if !metadata.Resolved() {
-		ip, err := resolveIPWithResolver(ctx, metadata.Host, b.prefer, resolver.DefaultResolver)
+		ip, err := resolveIPWithResolver(ctx, metadata.Host, b.prefer, resolver.DefaultResolver.Load())
 		if err != nil {
 			return fmt.Errorf("can't resolve ip: %w", err)
 		}

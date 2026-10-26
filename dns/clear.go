@@ -10,7 +10,7 @@ import (
 // ClearAll resets learned DNS state without closing the resolver or its callers.
 func ClearAll() {
 	var pending []*Resolver
-	for _, root := range []resolver.Resolver{resolver.DefaultResolver, resolver.SystemResolver} {
+	for _, root := range []resolver.Resolver{resolver.DefaultResolver.Load(), resolver.SystemResolver} {
 		switch root := root.(type) {
 		case *Resolver:
 			pending = append(pending, root)

@@ -190,11 +190,11 @@ func New(config LC.Hysteria2Server, lc C.InboundListenConfig, tunnel C.Tunnel, a
 			}},
 			Resolver: func(ctx context.Context, host string, ipv4, ipv6 bool) ([]netip.Addr, error) {
 				if ipv4 && !ipv6 {
-					return resolver.LookupIPv4WithResolver(ctx, host, resolver.ProxyServerHostResolver)
+					return resolver.LookupIPv4WithResolver(ctx, host, resolver.ProxyServerHostResolver.Load())
 				} else if ipv6 && !ipv4 {
-					return resolver.LookupIPv6WithResolver(ctx, host, resolver.ProxyServerHostResolver)
+					return resolver.LookupIPv6WithResolver(ctx, host, resolver.ProxyServerHostResolver.Load())
 				}
-				return resolver.LookupIPWithResolver(ctx, host, resolver.ProxyServerHostResolver)
+				return resolver.LookupIPWithResolver(ctx, host, resolver.ProxyServerHostResolver.Load())
 			},
 			Logger: log.SingLogger,
 		}

@@ -3,10 +3,12 @@ package resolver
 import (
 	"context"
 
+	"github.com/metacubex/mihomo/common/atomic"
+
 	D "github.com/miekg/dns"
 )
 
-var DefaultService Service
+var DefaultService atomic.TypedValue[Service]
 
 type Service interface {
 	ServeMsg(ctx context.Context, msg *D.Msg) (*D.Msg, error)
@@ -14,7 +16,7 @@ type Service interface {
 
 // ServeMsg with a dns.Msg, return resolve dns.Msg
 func ServeMsg(ctx context.Context, msg *D.Msg) (*D.Msg, error) {
-	if server := DefaultService; server != nil {
+	if server := DefaultService.Load(); server != nil {
 		return server.ServeMsg(ctx, msg)
 	}
 

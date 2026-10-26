@@ -163,7 +163,7 @@ func (o *OpenVPN) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Co
 	var conn net.Conn
 	if !metadata.Resolved() || r != nil {
 		if r == nil {
-			r = resolver.DefaultResolver
+			r = resolver.DefaultResolver.Load()
 		}
 		options := o.DialOptions()
 		options = append(options, dialer.WithResolver(r))
@@ -212,7 +212,7 @@ func (o *OpenVPN) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
 func (o *OpenVPN) resolveUDP(ctx context.Context, metadata *C.Metadata, r resolver.Resolver) error {
 	if (!metadata.Resolved() || r != nil) && metadata.Host != "" {
 		if r == nil {
-			r = resolver.DefaultResolver
+			r = resolver.DefaultResolver.Load()
 		}
 		ip, err := resolveIPWithResolver(ctx, metadata.Host, o.prefer, r)
 		if err != nil {

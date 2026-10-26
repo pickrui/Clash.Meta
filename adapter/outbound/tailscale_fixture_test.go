@@ -309,9 +309,9 @@ func TestTailscaleFixtureSubnetRoute(t *testing.T) {
 	// name that points into the subnet: the rules' address is dialed instead,
 	// and without one the local answer is used.
 	requireTCPEcho(t, ctx, tailscale, &C.Metadata{NetWork: C.TCP, Host: "nas.fixture.invalid", DstIP: host, DstPort: 8080})
-	previous := resolver.DirectHostResolver
-	resolver.DirectHostResolver = fixtureLocalResolver{"nas.fixture.invalid": host}
-	t.Cleanup(func() { resolver.DirectHostResolver = previous })
+	previous := resolver.DirectHostResolver.Load()
+	resolver.DirectHostResolver.Store(fixtureLocalResolver{"nas.fixture.invalid": host})
+	t.Cleanup(func() { resolver.DirectHostResolver.Store(previous) })
 	requireTCPEcho(t, ctx, tailscale, &C.Metadata{NetWork: C.TCP, Host: "nas.fixture.invalid", DstPort: 8080})
 	udp := &C.Metadata{NetWork: C.UDP, Host: "nas.fixture.invalid", DstPort: 8080}
 	require.NoError(t, tailscale.ResolveUDP(ctx, udp))

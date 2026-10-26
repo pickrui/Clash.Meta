@@ -155,7 +155,7 @@ func Get(ctx context.Context, address string, header map[string][]string, maxByt
 			}
 		}
 	}
-	direct := dialer.NewDialer(dialer.WithResolver(resolver.DirectHostResolver))
+	direct := dialer.NewDialer(dialer.WithResolver(resolver.DirectHostResolver.Load()))
 	routes := [][]Option{append(append([]Option{}, options...), WithDialer(direct))}
 	if inner.GetTunnel() != nil || opt.dialer != nil {
 		routes = append([][]Option{options}, routes...)

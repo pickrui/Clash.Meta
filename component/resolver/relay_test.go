@@ -31,9 +31,9 @@ func (s relayTestService) ServeMsg(_ context.Context, query *D.Msg) (*D.Msg, err
 
 func useRelayTestService(t *testing.T, service Service) {
 	t.Helper()
-	old := DefaultService
-	DefaultService = service
-	t.Cleanup(func() { DefaultService = old })
+	old := DefaultService.Load()
+	DefaultService.Store(service)
+	t.Cleanup(func() { DefaultService.Store(old) })
 }
 
 func TestRelayDNSPacketCopiesReallocatedCompressedData(t *testing.T) {

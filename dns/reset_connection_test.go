@@ -84,10 +84,10 @@ func TestResetConnectionReopensConfiguredPolicyTransports(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(ca.ResetCertificate)
-	previousHosts := resolver.DefaultHosts
-	resolver.DefaultHosts = resolver.NewHosts(trie.New[resolver.HostValue]())
-	t.Cleanup(func() { resolver.DefaultHosts = previousHosts })
-	if err := resolver.DefaultHosts.Insert("front.test", resolver.HostValue{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}); err != nil {
+	previousHosts := resolver.DefaultHosts.Load()
+	resolver.DefaultHosts.Store(resolver.NewHosts(trie.New[resolver.HostValue]()))
+	t.Cleanup(func() { resolver.DefaultHosts.Store(previousHosts) })
+	if err := resolver.DefaultHosts.Load().Insert("front.test", resolver.HostValue{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}); err != nil {
 		t.Fatal(err)
 	}
 	for _, protocol := range []string{"tls", "https", "quic"} {
@@ -201,10 +201,10 @@ func TestDoQConcurrentConnectionLifetime(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(ca.ResetCertificate)
-	previousHosts := resolver.DefaultHosts
-	resolver.DefaultHosts = resolver.NewHosts(trie.New[resolver.HostValue]())
-	t.Cleanup(func() { resolver.DefaultHosts = previousHosts })
-	if err := resolver.DefaultHosts.Insert("front.test", resolver.HostValue{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}); err != nil {
+	previousHosts := resolver.DefaultHosts.Load()
+	resolver.DefaultHosts.Store(resolver.NewHosts(trie.New[resolver.HostValue]()))
+	t.Cleanup(func() { resolver.DefaultHosts.Store(previousHosts) })
+	if err := resolver.DefaultHosts.Load().Insert("front.test", resolver.HostValue{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}); err != nil {
 		t.Fatal(err)
 	}
 	cancelQuery := make(chan context.CancelFunc, 1)

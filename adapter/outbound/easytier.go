@@ -419,7 +419,7 @@ func (e *EasyTier) resolveIPv4(ctx context.Context, host string) (netip.Addr, er
 	if easytier.IsMagicDNS(host, e.zone) {
 		return netip.Addr{}, fmt.Errorf("easytier: overlay hostname %q was not found", host)
 	}
-	ips, err := resolver.LookupIPv4WithResolver(ctx, host, resolver.ProxyServerHostResolver)
+	ips, err := resolver.LookupIPv4WithResolver(ctx, host, resolver.ProxyServerHostResolver.Load())
 	if err != nil {
 		return netip.Addr{}, err
 	}

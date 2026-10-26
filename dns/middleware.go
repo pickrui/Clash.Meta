@@ -36,7 +36,7 @@ func withHosts(mapping *lru.LruCache[netip.Addr, string]) middleware {
 				rr.Target = domain + "."
 				resp.Answer = append([]D.RR{rr}, resp.Answer...)
 			}
-			record, ok := resolver.DefaultHosts.Search(host, q.Qtype != D.TypeA && q.Qtype != D.TypeAAAA)
+			record, ok := resolver.DefaultHosts.Load().Search(host, q.Qtype != D.TypeA && q.Qtype != D.TypeAAAA)
 			if !ok {
 				if record != nil && record.IsDomain {
 					// replace request domain

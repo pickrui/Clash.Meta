@@ -302,7 +302,7 @@ func preHandleMetadata(metadata *C.Metadata) error {
 				// only clear dstIP if it is confirmed to be a fake IP
 				metadata.DstIP = netip.Addr{}
 				metadata.DNSMode = C.DNSFakeIP
-			} else if node, ok := resolver.DefaultHosts.Search(host, false); ok {
+			} else if node, ok := resolver.DefaultHosts.Load().Search(host, false); ok {
 				// redir-host should lookup the hosts
 				metadata.DstIP, _ = node.RandIP()
 			} else if node != nil && node.IsDomain {
@@ -311,7 +311,7 @@ func preHandleMetadata(metadata *C.Metadata) error {
 		} else if resolver.IsFakeIP(metadata.DstIP) {
 			return fmt.Errorf("fake DNS record %s missing", metadata.DstIP)
 		}
-	} else if node, ok := resolver.DefaultHosts.Search(metadata.Host, true); ok {
+	} else if node, ok := resolver.DefaultHosts.Load().Search(metadata.Host, true); ok {
 		// try use domain mapping
 		metadata.Host = node.Domain
 	}
@@ -358,7 +358,7 @@ func resolveMetadataWithProcess(metadata *C.Metadata, findProcess func(*C.Metada
 		attemptProcessLookup = metadata.Type != C.INNER
 	)
 
-	if node, ok := resolver.DefaultHosts.Search(metadata.Host, false); ok {
+	if node, ok := resolver.DefaultHosts.Load().Search(metadata.Host, false); ok {
 		metadata.DstIP, _ = node.RandIP()
 		resolved = true
 	}
@@ -600,7 +600,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 
 	dialMetadata := metadata
 	if len(metadata.Host) > 0 {
-		if node, ok := resolver.DefaultHosts.Search(metadata.Host, false); ok {
+		if node, ok := resolver.DefaultHosts.Load().Search(metadata.Host, false); ok {
 			if dstIp, _ := node.RandIP(); !resolver.IsFakeIP(dstIp) {
 				dialMetadata.DstIP = dstIp
 				dialMetadata.DNSMode = C.DNSHosts
@@ -700,7 +700,7 @@ type resolvedClaim struct {
 
 // directLookup resolves as DIRECT's own dial would, so the dial reuses it.
 var directLookup = func(ctx context.Context, host string) (netip.Addr, error) {
-	return resolver.ResolveIPWithResolver(resolver.WithInitiator(ctx, resolver.InitiatorDirect), host, resolver.DirectHostResolver)
+	return resolver.ResolveIPWithResolver(resolver.WithInitiator(ctx, resolver.InitiatorDirect), host, resolver.DirectHostResolver.Load())
 }
 
 func dialsDirect(proxy C.Proxy, metadata *C.Metadata) bool {

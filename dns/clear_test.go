@@ -14,10 +14,12 @@ import (
 
 func useClearResolvers(t *testing.T, primary, system resolver.Resolver) {
 	t.Helper()
-	previous, previousSystem := resolver.DefaultResolver, resolver.SystemResolver
-	resolver.DefaultResolver, resolver.SystemResolver = primary, system
+	previous, previousSystem := resolver.DefaultResolver.Load(), resolver.SystemResolver
+	resolver.DefaultResolver.Store(primary)
+	resolver.SystemResolver = system
 	t.Cleanup(func() {
-		resolver.DefaultResolver, resolver.SystemResolver = previous, previousSystem
+		resolver.DefaultResolver.Store(previous)
+		resolver.SystemResolver = previousSystem
 		answeredBy.Clear()
 	})
 }
@@ -92,7 +94,8 @@ func TestClearAllHandlesStandaloneAndNilRoots(t *testing.T) {
 	if c.resets.Load() != 1 {
 		t.Fatal("shared standalone resolver reset more than once")
 	}
-	resolver.DefaultResolver, resolver.SystemResolver = (*Resolver)(nil), (*Resolvers)(nil)
+	resolver.DefaultResolver.Store((*Resolver)(nil))
+	resolver.SystemResolver = (*Resolvers)(nil)
 	ClearAll()
 }
 

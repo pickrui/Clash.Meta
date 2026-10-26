@@ -78,10 +78,10 @@ func TestServicePreservesErrorsAndRejectsEmptyQuestion(t *testing.T) {
 }
 
 func TestHostsCNAMEAnswersWithoutMutatingRequest(t *testing.T) {
-	old := resolver.DefaultHosts
-	t.Cleanup(func() { resolver.DefaultHosts = old })
-	resolver.DefaultHosts = resolver.NewHosts(trie.New[resolver.HostValue]())
-	if err := resolver.DefaultHosts.Insert("alias.example.test", resolver.HostValue{IsDomain: true, Domain: "target.example.test"}); err != nil {
+	old := resolver.DefaultHosts.Load()
+	t.Cleanup(func() { resolver.DefaultHosts.Store(old) })
+	resolver.DefaultHosts.Store(resolver.NewHosts(trie.New[resolver.HostValue]()))
+	if err := resolver.DefaultHosts.Load().Insert("alias.example.test", resolver.HostValue{IsDomain: true, Domain: "target.example.test"}); err != nil {
 		t.Fatal(err)
 	}
 	handler := withHosts(nil)(func(_ *icontext.DNSContext, _ *D.Msg) (*D.Msg, error) {

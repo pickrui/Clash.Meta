@@ -207,15 +207,15 @@ func TestNodeDNSPreservesRoutingCacheAndFamily(t *testing.T) {
 	_, err = owner.get(context.Background())
 	require.ErrorIs(t, err, net.ErrClosed)
 
-	previous := resolver.DefaultResolver
+	previous := resolver.DefaultResolver.Load()
 	global := dns.NewResolver(dns.Config{Main: []dns.NameServer{{Net: "rcode", Addr: "success"}}})
-	resolver.DefaultResolver = global
-	t.Cleanup(func() { resolver.DefaultResolver = previous; global.CloseQueries() })
+	resolver.DefaultResolver.Store(global)
+	t.Cleanup(func() { resolver.DefaultResolver.Store(previous); global.CloseQueries() })
 	var none *nodeDNS
 	none.close()
 	fallback, err := none.get(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, resolver.DefaultResolver, fallback)
+	require.Equal(t, resolver.DefaultResolver.Load(), fallback)
 	_, err = fallback.ExchangeContext(context.Background(), new(D.Msg).SetQuestion("global.test.", D.TypeA))
 	require.NoError(t, err)
 	_, err = owner.get(context.Background())

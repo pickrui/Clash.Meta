@@ -385,7 +385,7 @@ func parseAddr(ctx context.Context, network, address string, preferResolver reso
 	}
 
 	if preferResolver == nil {
-		preferResolver = resolver.ProxyServerHostResolver
+		preferResolver = resolver.ProxyServerHostResolver.Load()
 		ctx = resolver.WithInitiator(ctx, resolver.InitiatorProxy)
 	}
 

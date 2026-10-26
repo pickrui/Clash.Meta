@@ -440,9 +440,9 @@ func TestTailscaleExitNodeKeepsPublicNamesInTheTailnet(t *testing.T) {
 		nil, nil, nil, []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")},
 	)})
 	t.Cleanup(unregister)
-	previous := resolver.DirectHostResolver
-	resolver.DirectHostResolver = fixtureLocalResolver{"nas.fixture.invalid": subnetHost}
-	t.Cleanup(func() { resolver.DirectHostResolver = previous })
+	previous := resolver.DirectHostResolver.Load()
+	resolver.DirectHostResolver.Store(fixtureLocalResolver{"nas.fixture.invalid": subnetHost})
+	t.Cleanup(func() { resolver.DirectHostResolver.Store(previous) })
 
 	// The exit node's DNS answers public names, so the local answer is unused.
 	_, ok := tailscale.routedAddr(context.Background(), &C.Metadata{Host: "nas.fixture.invalid"})
