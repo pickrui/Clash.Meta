@@ -84,4 +84,7 @@ func StopListener() {
 		tuicListener = nil
 	}
 	tuicMux.Unlock()
+
+	PatchInboundListeners(nil, nil, true)
+	PatchTunnel(nil, nil)
 }

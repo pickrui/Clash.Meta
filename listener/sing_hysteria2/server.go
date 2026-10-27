@@ -34,7 +34,6 @@ import (
 )
 
 type Listener struct {
-	closed       bool
 	config       LC.Hysteria2Server
 	udpListeners []net.PacketConn
 	services     []*hysteria2.Service[string]
@@ -60,7 +59,7 @@ func New(config LC.Hysteria2Server, lc C.InboundListenConfig, tunnel C.Tunnel, a
 		return nil, err
 	}
 
-	sl = &Listener{false, config, nil, nil}
+	sl = &Listener{config: config}
 
 	tlsConfig := &tls.Config{
 		Time:       ntp.Now,
@@ -213,7 +212,7 @@ func New(config LC.Hysteria2Server, lc C.InboundListenConfig, tunnel C.Tunnel, a
 		MaxConnectionReceiveWindow:     config.MaxConnectionReceiveWindow,
 	}
 
-	service, err := hysteria2.NewService[string](hysteria2.ServiceOptions{
+	serviceOptions := hysteria2.ServiceOptions{
 		Context:               context.Background(),
 		Logger:                log.SingLogger,
 		SendBPS:               utils.StringToBps(config.Up),
@@ -233,9 +232,6 @@ func New(config LC.Hysteria2Server, lc C.InboundListenConfig, tunnel C.Tunnel, a
 		SetBBRCongestion: func(quicConn *quic.Conn) {
 			common.SetCongestionController(quicConn, "bbr", config.CWND, config.BBRProfile)
 		},
-	})
-	if err != nil {
-		return nil, err
 	}
 
 	userNameList := make([]string, 0, len(config.Users))
@@ -244,15 +240,18 @@ func New(config LC.Hysteria2Server, lc C.InboundListenConfig, tunnel C.Tunnel, a
 		userNameList = append(userNameList, name)
 		userPasswordList = append(userPasswordList, password)
 	}
-	service.UpdateUsers(userNameList, userPasswordList)
 
 	for _, addr := range strings.Split(config.Listen, ",") {
-		addr := addr
-		_service := *service
-		service := &_service // make a copy
+		service, err := hysteria2.NewService[string](serviceOptions)
+		if err != nil {
+			_ = sl.Close()
+			return nil, err
+		}
+		service.UpdateUsers(userNameList, userPasswordList)
 
 		ul, err := lc.ListenPacket(context.Background(), "udp", addr)
 		if err != nil {
+			_ = sl.Close()
 			return nil, err
 		}
 
@@ -263,16 +262,16 @@ func New(config LC.Hysteria2Server, lc C.InboundListenConfig, tunnel C.Tunnel, a
 		sl.udpListeners = append(sl.udpListeners, ul)
 		sl.services = append(sl.services, service)
 
-		go func() {
-			_ = service.Start(ul)
-		}()
+		if err := service.Start(ul); err != nil {
+			_ = sl.Close()
+			return nil, err
+		}
 	}
 
 	return sl, nil
 }
 
 func (l *Listener) Close() error {
-	l.closed = true
 	var retErr error
 	for _, service := range l.services {
 		err := service.Close()

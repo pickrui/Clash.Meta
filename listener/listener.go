@@ -628,15 +628,23 @@ func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C
 	defer inboundMux.Unlock()
 
 	for name, newListener := range newListenerMap {
-		if oldListener, ok := inboundListeners[name]; ok {
-			if !oldListener.Config().Equal(newListener.Config()) {
-				_ = oldListener.Close()
-			} else {
+		oldListener, exists := inboundListeners[name]
+		if exists {
+			if oldListener.Config().Equal(newListener.Config()) {
 				continue
 			}
+			_ = oldListener.Close()
+			delete(inboundListeners, name)
 		}
 		if err := newListener.Listen(tunnel); err != nil {
 			log.Errorln("Listener %s listen err: %s", name, err.Error())
+			if exists {
+				if restoreErr := oldListener.Listen(tunnel); restoreErr != nil {
+					log.Errorln("Listener %s restore err: %s", name, restoreErr.Error())
+				} else {
+					inboundListeners[name] = oldListener
+				}
+			}
 			continue
 		}
 		inboundListeners[name] = newListener

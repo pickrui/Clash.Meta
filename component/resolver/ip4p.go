@@ -5,25 +5,26 @@ import (
 	"net/netip"
 	"strconv"
 
+	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/log"
 )
 
 var (
-	ip4PEnable bool
+	ip4PEnable atomic.Bool
 )
 
 func GetIP4PEnable() bool {
-	return ip4PEnable
+	return ip4PEnable.Load()
 }
 
 func SetIP4PEnable(enableIP4PConvert bool) {
-	ip4PEnable = enableIP4PConvert
+	ip4PEnable.Store(enableIP4PConvert)
 }
 
 // kanged from https://github.com/heiher/frp/blob/ip4p/client/ip4p.go
 
 func LookupIP4P(addr netip.Addr, port string) (netip.Addr, string) {
-	if ip4PEnable {
+	if ip4PEnable.Load() && addr.Is6() {
 		ip := addr.AsSlice()
 		if ip[0] == 0x20 && ip[1] == 0x01 &&
 			ip[2] == 0x00 && ip[3] == 0x00 {

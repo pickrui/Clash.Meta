@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -127,7 +128,9 @@ func vmessInteropGo(t *testing.T, goBin, dir string, args ...string) {
 }
 
 func vmessInteropGoEnv() []string {
-	env := os.Environ()
+	env := slices.DeleteFunc(os.Environ(), func(value string) bool {
+		return strings.HasPrefix(value, "GOROOT=")
+	})
 	hasGoToolchain := false
 	for i, value := range env {
 		if strings.HasPrefix(value, "GOTOOLCHAIN=") {

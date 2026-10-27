@@ -78,6 +78,7 @@ func (h *HTTP) Listen(tunnel C.Tunnel) error {
 			h.Additions()...,
 		)
 		if err != nil {
+			_ = h.Close()
 			return err
 		}
 		h.l = append(h.l, l)
@@ -95,6 +96,7 @@ func (h *HTTP) Close() error {
 			errs = append(errs, fmt.Errorf("close tcp listener %s err: %w", l.Address(), err))
 		}
 	}
+	h.l = nil
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}

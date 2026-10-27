@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	N "github.com/metacubex/mihomo/common/net"
@@ -258,10 +259,10 @@ func (l *Listener) handleTCP(stream *snell.Snell, br *bufio.Reader, reuse bool, 
 		reuse:  reuse,
 	}
 	tunnel.HandleTCPConn(conn, metadata)
-	if !reuse {
-		return false, nil
+	if err := conn.Close(); err != nil {
+		return false, err
 	}
-	return true, nil
+	return conn.reusable, nil
 }
 
 func (l *Listener) handleUDP(stream *snell.Snell, clientID string, tunnel C.Tunnel, additions ...inbound.Addition) error {
@@ -338,14 +339,31 @@ type tcpRequestConn struct {
 	net.Conn
 	reader       *bufio.Reader
 	reuse        bool
+	readMu       sync.Mutex
+	peerEOF      atomic.Bool
 	writeMu      sync.Mutex
-	closeOnce    sync.Once
 	replyWritten bool
+	writeClosed  bool
+	writeErr     error
+	deadlineMu   sync.Mutex
+	closed       atomic.Bool
+	closeOnce    sync.Once
+	closeErr     error
+	reusable     bool
 }
 
 func (c *tcpRequestConn) Read(p []byte) (int, error) {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	if c.closed.Load() {
+		return 0, net.ErrClosed
+	}
+	if c.peerEOF.Load() {
+		return 0, io.EOF
+	}
 	n, err := c.reader.Read(p)
 	if errors.Is(err, shadowaead.ErrZeroChunk) {
+		c.peerEOF.Store(true)
 		err = io.EOF
 	}
 	return n, err
@@ -354,6 +372,9 @@ func (c *tcpRequestConn) Read(p []byte) (int, error) {
 func (c *tcpRequestConn) Write(p []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if c.closed.Load() || c.writeClosed {
+		return 0, net.ErrClosed
+	}
 
 	if !c.replyWritten {
 		payload := make([]byte, 1+len(p))
@@ -368,30 +389,113 @@ func (c *tcpRequestConn) Write(p []byte) (int, error) {
 	return c.Conn.Write(p)
 }
 
+func (c *tcpRequestConn) SetDeadline(deadline time.Time) error {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	if c.closed.Load() {
+		return net.ErrClosed
+	}
+	return c.Conn.SetDeadline(deadline)
+}
+
+func (c *tcpRequestConn) SetReadDeadline(deadline time.Time) error {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	if c.closed.Load() {
+		return net.ErrClosed
+	}
+	return c.Conn.SetReadDeadline(deadline)
+}
+
+func (c *tcpRequestConn) SetWriteDeadline(deadline time.Time) error {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	if c.closed.Load() {
+		return net.ErrClosed
+	}
+	return c.Conn.SetWriteDeadline(deadline)
+}
+
 func (c *tcpRequestConn) CloseWrite() error {
-	return c.Close()
+	if c.closed.Load() {
+		return net.ErrClosed
+	}
+	abort := func() {
+		c.deadlineMu.Lock()
+		c.closed.Store(true)
+		_ = c.Conn.SetWriteDeadline(time.Now())
+		c.deadlineMu.Unlock()
+		_ = c.Conn.Close()
+	}
+	var finished sync.Once
+	timer := time.AfterFunc(C.DefaultTCPTimeout, func() { finished.Do(abort) })
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	defer func() {
+		finished.Do(func() {})
+		timer.Stop()
+	}()
+	if c.closed.Load() {
+		return net.ErrClosed
+	}
+	err := c.closeWriteLocked()
+	if err != nil {
+		finished.Do(abort)
+	}
+	return err
+}
+
+func (c *tcpRequestConn) closeWriteLocked() error {
+	if c.writeClosed {
+		return c.writeErr
+	}
+	c.writeClosed = true
+	if !c.replyWritten {
+		c.writeErr = writeCommandError(c.Conn, 0x65, "Remote EOF")
+		if !c.reuse {
+			c.writeErr = errors.Join(c.writeErr, c.Conn.Close())
+		}
+	} else if c.reuse {
+		_, c.writeErr = c.Conn.Write(nil)
+	} else {
+		c.writeErr = c.Conn.Close()
+	}
+	return c.writeErr
 }
 
 func (c *tcpRequestConn) Close() error {
-	var err error
 	c.closeOnce.Do(func() {
-		c.writeMu.Lock()
-		defer c.writeMu.Unlock()
+		c.deadlineMu.Lock()
+		c.closed.Store(true)
+		c.deadlineMu.Unlock()
 
-		if !c.replyWritten {
-			err = writeCommandError(c.Conn, 0x65, "Remote EOF")
-			if !c.reuse {
-				err = errors.Join(err, c.Conn.Close())
+		if c.writeMu.TryLock() {
+			if !c.replyWritten || c.reuse && c.peerEOF.Load() {
+				if !c.writeClosed {
+					c.closeErr = c.Conn.SetWriteDeadline(time.Now().Add(C.DefaultTCPTimeout))
+				}
+				if c.closeErr == nil {
+					c.closeErr = c.closeWriteLocked()
+				}
 			}
-			return
+			c.writeMu.Unlock()
+			if c.reuse && c.peerEOF.Load() && c.closeErr == nil {
+				c.readMu.Lock()
+				c.readMu.Unlock()
+				c.closeErr = c.Conn.SetDeadline(time.Time{})
+				if c.closeErr == nil {
+					c.reusable = true
+					return
+				}
+			}
 		}
-		if c.reuse {
-			_, err = c.Conn.Write(nil)
-			return
+		if err := c.Conn.Close(); !errors.Is(err, net.ErrClosed) {
+			c.closeErr = errors.Join(c.closeErr, err)
 		}
-		err = c.Conn.Close()
+		c.readMu.Lock()
+		c.readMu.Unlock()
 	})
-	return err
+	return c.closeErr
 }
 
 type udpPacket struct {

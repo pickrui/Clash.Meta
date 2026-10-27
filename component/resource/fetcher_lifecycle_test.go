@@ -227,3 +227,52 @@ func TestWaitForUpdatesDrainsParserInsideRemoteRead(t *testing.T) {
 		t.Fatalf("published=%d discarded=%d", published.Load(), discarded.Load())
 	}
 }
+
+type countedReadVehicle struct {
+	blockingWriteVehicle
+	reads chan struct{}
+	err   error
+}
+
+func (v *countedReadVehicle) Read(context.Context, utils.HashType) ([]byte, utils.HashType, error) {
+	v.reads <- struct{}{}
+	data := []byte("valid")
+	return data, utils.MakeHash(data), v.err
+}
+
+func TestPullLoopDoesNotImmediatelyRepeatAnOverdueRead(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		force bool
+		fail  bool
+	}{
+		{name: "forced-stale-refresh", force: true},
+		{name: "failed-initial-read", fail: true},
+		{name: "due-cached-file"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			vehicle := &countedReadVehicle{reads: make(chan struct{}, 8)}
+			if test.fail {
+				vehicle.err = errors.New("download failed")
+			}
+			fetcher := NewFetcher("test", time.Hour, vehicle, nil, func(data []byte) (string, error) { return string(data), nil }, nil)
+			fetcher.updatedAt.Store(time.Now().Add(-2 * time.Hour))
+			if test.fail {
+				_, _, _ = fetcher.Update()
+			}
+			done := make(chan struct{})
+			go func() { fetcher.pullLoop(test.force); close(done) }()
+			t.Cleanup(func() { _ = fetcher.Close(); <-done })
+			select {
+			case <-vehicle.reads:
+			case <-time.After(time.Second):
+				t.Fatal("initial read did not start")
+			}
+			select {
+			case <-vehicle.reads:
+				t.Fatal("overdue initial timestamp caused an immediate duplicate read")
+			case <-time.After(50 * time.Millisecond):
+			}
+		})
+	}
+}

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -68,11 +67,6 @@ func NewWatcher(options Options) (*Watcher, error) {
 			}
 			watchTarget = append(watchTarget, path)
 		}
-		watchTarget = slices.DeleteFunc(watchTarget, func(it string) bool {
-			return slices.ContainsFunc(watchTarget, func(path string) bool {
-				return len(path) > len(it) && strings.HasPrefix(path, it)
-			})
-		})
 	}
 	return &Watcher{
 		watchDirect: options.Direct,
@@ -111,6 +105,14 @@ func (w *Watcher) Close() error {
 func (w *Watcher) loopUpdate() {
 	var timerAccess sync.Mutex
 	timerMap := make(map[string]*time.Timer)
+	defer func() {
+		timerAccess.Lock()
+		defer timerAccess.Unlock()
+		for _, timer := range timerMap {
+			timer.Stop()
+		}
+		timerMap = nil
+	}()
 	for {
 		select {
 		case event, loaded := <-w.watcher.Events:
@@ -128,10 +130,14 @@ func (w *Watcher) loopUpdate() {
 					timer.Reset(w.waitTimeout)
 				} else {
 					timerMap[event.Name] = time.AfterFunc(w.waitTimeout, func() {
-						w.callback(event.Name)
 						timerAccess.Lock()
+						if timerMap == nil {
+							timerAccess.Unlock()
+							return
+						}
 						delete(timerMap, event.Name)
 						timerAccess.Unlock()
+						w.callback(event.Name)
 					})
 				}
 				timerAccess.Unlock()

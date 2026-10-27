@@ -60,11 +60,13 @@ func New(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener
 	tl := l.(*net.TCPListener)
 	rc, err := tl.SyscallConn()
 	if err != nil {
+		_ = l.Close()
 		return nil, err
 	}
 
 	err = setsockopt(rc, addr)
 	if err != nil {
+		_ = l.Close()
 		return nil, err
 	}
 

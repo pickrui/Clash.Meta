@@ -79,12 +79,14 @@ func (m *Mixed) Listen(tunnel C.Tunnel) error {
 		}
 		l, err := mixed.NewWithConfig(config, lc, tunnel, m.Additions()...)
 		if err != nil {
+			_ = m.Close()
 			return err
 		}
 		m.l = append(m.l, l)
 		if m.udp {
 			lUDP, err := socks.NewUDPWithConfig(config, lc, tunnel, m.Additions()...)
 			if err != nil {
+				_ = m.Close()
 				return err
 			}
 			m.lUDP = append(m.lUDP, lUDP)
@@ -109,6 +111,8 @@ func (m *Mixed) Close() error {
 			errs = append(errs, fmt.Errorf("close udp listener %s err: %w", l.Address(), err))
 		}
 	}
+	m.l = nil
+	m.lUDP = nil
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}

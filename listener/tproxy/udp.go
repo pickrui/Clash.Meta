@@ -55,11 +55,13 @@ func NewUDP(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPLi
 
 	rc, err := c.SyscallConn()
 	if err != nil {
+		_ = l.Close()
 		return nil, err
 	}
 
 	err = setsockopt(rc, addr)
 	if err != nil {
+		_ = l.Close()
 		return nil, err
 	}
 

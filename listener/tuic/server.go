@@ -27,7 +27,6 @@ import (
 const ServerMaxIncomingStreams = (1 << 32) - 1
 
 type Listener struct {
-	closed       bool
 	config       LC.TuicServer
 	udpListeners []net.PacketConn
 	servers      []*tuic.Server
@@ -173,13 +172,14 @@ func New(config LC.TuicServer, lc C.InboundListenConfig, tunnel C.Tunnel, additi
 		option.Users = users
 	}
 
-	sl := &Listener{false, config, nil, nil}
+	sl := &Listener{config: config}
 
 	for _, addr := range strings.Split(config.Listen, ",") {
 		addr := addr
 
 		ul, err := lc.ListenPacket(context.Background(), "udp", addr)
 		if err != nil {
+			_ = sl.Close()
 			return nil, err
 		}
 
@@ -192,18 +192,14 @@ func New(config LC.TuicServer, lc C.InboundListenConfig, tunnel C.Tunnel, additi
 		var server *tuic.Server
 		server, err = tuic.NewServer(option, ul)
 		if err != nil {
+			_ = sl.Close()
 			return nil, err
 		}
 
 		sl.servers = append(sl.servers, server)
 
 		go func() {
-			err := server.Serve()
-			if err != nil {
-				if sl.closed {
-					return
-				}
-			}
+			_ = server.Serve()
 		}()
 	}
 
@@ -211,7 +207,6 @@ func New(config LC.TuicServer, lc C.InboundListenConfig, tunnel C.Tunnel, additi
 }
 
 func (l *Listener) Close() error {
-	l.closed = true
 	var retErr error
 	for _, lis := range l.servers {
 		err := lis.Close()

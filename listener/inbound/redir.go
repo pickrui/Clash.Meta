@@ -54,6 +54,7 @@ func (r *Redir) Listen(tunnel C.Tunnel) error {
 	for _, addr := range strings.Split(r.RawAddress(), ",") {
 		l, err := redir.New(addr, tunnel, r.Additions()...)
 		if err != nil {
+			_ = r.Close()
 			return err
 		}
 		r.l = append(r.l, l)
@@ -71,6 +72,7 @@ func (r *Redir) Close() error {
 			errs = append(errs, fmt.Errorf("close redir listener %s err: %w", l.Address(), err))
 		}
 	}
+	r.l = nil
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}

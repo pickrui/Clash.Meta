@@ -67,6 +67,8 @@ func (s *Socks) Close() error {
 			errs = append(errs, fmt.Errorf("close udp listener %s err: %w", l.Address(), err))
 		}
 	}
+	s.stl = nil
+	s.sul = nil
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
@@ -99,12 +101,14 @@ func (s *Socks) Listen(tunnel C.Tunnel) error {
 		}
 		stl, err := socks.NewWithConfig(config, lc, tunnel, s.Additions()...)
 		if err != nil {
+			_ = s.Close()
 			return err
 		}
 		s.stl = append(s.stl, stl)
 		if s.udp {
 			sul, err := socks.NewUDPWithConfig(config, lc, tunnel, s.Additions()...)
 			if err != nil {
+				_ = s.Close()
 				return err
 			}
 			s.sul = append(s.sul, sul)

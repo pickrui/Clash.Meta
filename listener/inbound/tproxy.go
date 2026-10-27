@@ -59,12 +59,14 @@ func (t *TProxy) Listen(tunnel C.Tunnel) error {
 	for _, addr := range strings.Split(t.RawAddress(), ",") {
 		lTCP, err := tproxy.New(addr, tunnel, t.Additions()...)
 		if err != nil {
+			_ = t.Close()
 			return err
 		}
 		t.lTCP = append(t.lTCP, lTCP)
 		if t.udp {
 			lUDP, err := tproxy.NewUDP(addr, tunnel, t.Additions()...)
 			if err != nil {
+				_ = t.Close()
 				return err
 			}
 			t.lUDP = append(t.lUDP, lUDP)
@@ -89,6 +91,8 @@ func (t *TProxy) Close() error {
 			errs = append(errs, fmt.Errorf("close udp listener %s err: %w", l.Address(), err))
 		}
 	}
+	t.lTCP = nil
+	t.lUDP = nil
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}

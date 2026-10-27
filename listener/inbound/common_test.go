@@ -214,9 +214,7 @@ func NewHttpTestTunnel() *TestTunnel {
 		io.Copy(io.Discard, r.Body)
 		render.Data(w, r, httpData[:size])
 	})
-	//h2Server := &http.Http2Server{}
 	server := http.Server{Handler: r}
-	//_ = http.Http2ConfigureServer(&server, h2Server)
 	go server.Serve(ln)
 	testFn := func(t *testing.T, proxy C.ProxyAdapter, proto string, size int) {
 		req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s://%s%s?size=%d", proto, remoteAddr, httpPath, size), bytes.NewReader(httpData[:size]))
@@ -268,11 +266,6 @@ func NewHttpTestTunnel() *TestTunnel {
 				extraConnsMu.Unlock()
 				return conn, nil
 			},
-			//// from http.DefaultTransport
-			//MaxIdleConns:          100,
-			//IdleConnTimeout:       90 * time.Second,
-			//TLSHandshakeTimeout:   10 * time.Second,
-			//ExpectContinueTimeout: 1 * time.Second,
 			// for our self-signed cert
 			TLSClientConfig: tlsClientConfig.Clone(),
 			// open http2
@@ -354,6 +347,7 @@ func NewHttpTestTunnel() *TestTunnel {
 				Conn: conn,
 				ch:   make(chan struct{}),
 			}
+			var serverConn net.Conn = c
 			if metadata.DstPort == 443 {
 				tlsConn := tls.Server(c, tlsConfig)
 				if metadata.Host == realityDest { // ignore the tls handshake error for realityDest
@@ -366,26 +360,25 @@ func NewHttpTestTunnel() *TestTunnel {
 						return
 					}
 				}
-				//ctx, cancel := context.WithTimeout(ctx, C.DefaultTLSTimeout)
-				//defer cancel()
 				if err := tlsConn.HandshakeContext(ctx); err != nil {
 					return
 				}
-				//if tlsConn.ConnectionState().NegotiatedProtocol == http.Http2NextProtoTLS {
-				//	h2Server.ServeConn(tlsConn, &http.Http2ServeConnOpts{BaseConfig: &server})
-				//} else {
-				//	ln.ch <- tlsConn
-				//}
-				ln.ch <- tlsConn
-			} else {
-				ln.ch <- c
+				serverConn = tlsConn
+			}
+			select {
+			case ln.ch <- serverConn:
+			case <-ctx.Done():
+				return
 			}
 			<-c.ch
 		},
 		HandleUDPPacketFn: func(packet C.UDPPacket, metadata *C.Metadata) {
 			// TODO
 		},
-		CloseFn:            ln.Close,
+		CloseFn: func() error {
+			_ = ln.Close()
+			return server.Close()
+		},
 		DoSequentialTestFn: sequentialTestFn,
 		DoConcurrentTestFn: concurrentTestFn,
 		NewDialerFn:        func() C.Dialer { return &TestDialer{dialer: dialer.NewDialer(), ctx: ctx} },

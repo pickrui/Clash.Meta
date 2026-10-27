@@ -339,9 +339,9 @@ func (c *splitConn) pullOnce() (outcome pullOutcome, readAny bool) {
 			return pullStop, readAny
 		}
 		return pullAgain, readAny
-	case isRetryableHTTPTransportError(err):
+	case !readAny && isRetryableHTTPTransportError(err):
 		closeIdleConnections(c.client)
-		return pullRetry, readAny
+		return pullRetry, false
 	default:
 		_ = c.closeWithError(fmt.Errorf("%s pull failed: %w", mode, err))
 		return pullStop, readAny

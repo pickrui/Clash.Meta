@@ -58,6 +58,8 @@ func (t *Tunnel) Close() error {
 			errs = append(errs, fmt.Errorf("close udp listener %s err: %w", l.Address(), err))
 		}
 	}
+	t.ttl = nil
+	t.tul = nil
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
@@ -85,12 +87,14 @@ func (t *Tunnel) Listen(tunnel C.Tunnel) error {
 			case "tcp":
 				ttl, err := LT.New(addr, t.config.Target, t.config.SpecialProxy, lc, tunnel, t.Additions()...)
 				if err != nil {
+					_ = t.Close()
 					return err
 				}
 				t.ttl = append(t.ttl, ttl)
 			case "udp":
 				tul, err := LT.NewUDP(addr, t.config.Target, t.config.SpecialProxy, lc, tunnel, t.Additions()...)
 				if err != nil {
+					_ = t.Close()
 					return err
 				}
 				t.tul = append(t.tul, tul)

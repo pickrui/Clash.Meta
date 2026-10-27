@@ -296,17 +296,17 @@ func (f *Fetcher[V]) WaitForUpdates() {
 }
 
 func (f *Fetcher[V]) pullLoop(forceUpdate bool) {
-	initialInterval := f.interval - time.Since(f.UpdatedAt())
-	if initialInterval > f.interval {
-		initialInterval = f.interval
-	}
-
 	if forceUpdate {
 		log.Warnln("[Provider] %s not updated for a long time, force refresh", f.Name())
 		f.updateWithLog()
 	}
+
+	initialInterval := f.interval - time.Since(f.UpdatedAt())
+	if initialInterval > f.interval {
+		initialInterval = f.interval
+	}
 	if attempt := f.backoff.Attempt(); attempt > 0 { // f.Update() was failed, decrease the interval from backoff to achieve fast retry
-		if duration := f.backoff.ForAttempt(attempt); duration < initialInterval {
+		if duration := f.backoff.ForAttempt(attempt); initialInterval <= 0 || duration < initialInterval {
 			initialInterval = duration
 		}
 	}

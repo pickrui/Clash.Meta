@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/common/pool"
+	C "github.com/metacubex/mihomo/constant"
 )
 
 const (
@@ -40,6 +41,7 @@ const (
 )
 
 var errMuxReceiveQueueFull = errors.New("mux receive queue full")
+var errMuxStreamCloseTimeout = errors.New("mux stream close timeout")
 
 type acceptEvent struct {
 	stream  *stream
@@ -548,8 +550,9 @@ func trimASCII(b []byte) string {
 }
 
 type stream struct {
-	session *Session
-	id      uint32
+	closeOnce sync.Once
+	session   *Session
+	id        uint32
 
 	writeMu sync.Mutex
 
@@ -704,38 +707,67 @@ func (c *stream) Write(p []byte) (int, error) {
 	return written, nil
 }
 
+func (s *Session) startStreamCloseBudget() func() {
+	var finished sync.Once
+	timer := time.AfterFunc(C.DefaultTCPTimeout, func() {
+		finished.Do(func() { s.closeWithError(errMuxStreamCloseTimeout) })
+	})
+	return func() {
+		finished.Do(func() {})
+		timer.Stop()
+	}
+}
+
 func (c *stream) Close() error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-
-	c.mu.Lock()
-	// A reset preserves unread bytes until the caller reads or closes the
-	// stream. Close must release those bytes even if it is already terminal.
-	sendClose := !c.closed && !c.localWriteClosed
-	c.closed = true
-	c.localReadClosed = true
-	c.localWriteClosed = true
-	if c.closeErr == nil {
-		c.closeErr = io.ErrClosedPipe
-	}
-	c.readBuf = nil
-	c.queue = nil
-	c.queuedBytes = 0
-	c.cond.Broadcast()
-	c.mu.Unlock()
-
-	if c.session != nil {
-		if sendClose {
-			_ = c.session.sendFrame(frameClose, c.id, nil)
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		// A reset preserves unread bytes until the caller reads or closes the stream.
+		sendClose := !c.closed && !c.localWriteClosed
+		c.closed = true
+		c.localReadClosed = true
+		c.localWriteClosed = true
+		if c.closeErr == nil {
+			c.closeErr = io.ErrClosedPipe
 		}
-		c.session.removeStream(c.id)
-	}
+		c.readBuf = nil
+		c.queue = nil
+		c.queuedBytes = 0
+		c.cond.Broadcast()
+		c.mu.Unlock()
+
+		locked := c.writeMu.TryLock()
+		var finish func()
+		if c.session != nil && !c.session.IsClosed() && (sendClose || !locked) {
+			// A partially written frame cannot be canceled without closing its session.
+			finish = c.session.startStreamCloseBudget()
+		}
+		if !locked {
+			c.writeMu.Lock()
+		}
+		defer c.writeMu.Unlock()
+		if finish != nil {
+			defer finish()
+		}
+		if c.session != nil {
+			if sendClose {
+				_ = c.session.sendFrame(frameClose, c.id, nil)
+			}
+			c.session.removeStream(c.id)
+		}
+	})
 	return nil
 }
 
 func (c *stream) CloseWrite() error {
+	var finish func()
+	if c.session != nil && !c.session.IsClosed() {
+		finish = c.session.startStreamCloseBudget()
+	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if finish != nil {
+		defer finish()
+	}
 
 	c.mu.Lock()
 	if c.closed || c.localWriteClosed {

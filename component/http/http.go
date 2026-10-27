@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/component/ca"
 	"github.com/metacubex/mihomo/component/dialer"
 	C "github.com/metacubex/mihomo/constant"
@@ -18,15 +19,15 @@ import (
 )
 
 var (
-	ua string
+	ua atomic.TypedValue[string]
 )
 
 func UA() string {
-	return ua
+	return ua.Load()
 }
 
 func SetUA(UA string) {
-	ua = UA
+	ua.Store(UA)
 }
 
 func HttpRequest(ctx context.Context, url, method string, header map[string][]string, body io.Reader, options ...Option) (*http.Response, error) {
