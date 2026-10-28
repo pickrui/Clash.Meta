@@ -232,6 +232,10 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 	if err != nil {
 		return nil, err
 	}
+	if dialer, _ := mapping["dialer-proxy"].(string); dialer != "" && proxy.ProxyInfo().DialerProxy != dialer {
+		_ = proxy.Close()
+		return nil, fmt.Errorf("proxy [%s] type [%s] does not support dialer-proxy", proxy.Name(), proxyType)
+	}
 
 	if muxMapping, muxExist := mapping["smux"].(map[string]any); muxExist {
 		muxOption := &outbound.SingMuxOption{}
@@ -251,11 +255,8 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 	result := NewProxy(proxy)
 	original := maps.Clone(mapping)
 	result.cloneWithDialer = func(name string) (C.Proxy, error) {
-		if opt.DialerForAPI != nil || proxyType == "direct" || proxyType == "dns" || proxyType == "reject" || proxyType == "compatible" || proxyType == "tailscale" || proxyType == "zerotier" || proxyType == "easytier" {
+		if opt.DialerForAPI != nil || proxyType == "tailscale" || proxyType == "zerotier" || proxyType == "easytier" {
 			return nil, fmt.Errorf("proxy [%s] cannot be a landing group member", result.Name())
-		}
-		if previous, _ := original["dialer-proxy"].(string); previous != "" && previous != name {
-			return nil, fmt.Errorf("proxy [%s] already uses another dialer", result.Name())
 		}
 		derived := maps.Clone(original)
 		derived["dialer-proxy"] = name

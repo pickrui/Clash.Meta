@@ -213,7 +213,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		if groupOption.Type != "select" && groupOption.Interval == 0 {
 			groupOption.Interval = 300
 		}
-		if emptyFallback.Type() != C.Reject && emptyFallback.Type() != C.RejectDrop {
+		if emptyFallback.Type() != C.Direct && emptyFallback.Type() != C.Reject && emptyFallback.Type() != C.RejectDrop {
 			clone, ok := emptyFallback.(interface{ WithDialerProxy(string) (C.Proxy, error) })
 			if !ok {
 				return nil, fmt.Errorf("%s: unsupported landing group fallback", groupName)

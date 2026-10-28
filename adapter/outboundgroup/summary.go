@@ -12,6 +12,9 @@ func Summary(proxy C.ProxyAdapter) map[string]any {
 		return nil
 	}
 	data := map[string]any{"name": proxy.Name(), "type": proxy.Type().String(), "hidden": group.Hidden(), "icon": group.Icon()}
+	if dialer := proxy.ProxyInfo().DialerProxy; dialer != "" {
+		data["dialerProxy"] = dialer
+	}
 	switch p := proxy.(type) {
 	case *Selector:
 		data["now"] = p.Now()

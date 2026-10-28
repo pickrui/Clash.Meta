@@ -3,7 +3,10 @@ package config
 import (
 	"testing"
 
+	"github.com/metacubex/mihomo/adapter/outboundgroup"
+	C "github.com/metacubex/mihomo/constant"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestValidateDialerProxies(t *testing.T) {
@@ -60,6 +63,13 @@ func TestValidateDialerProxies(t *testing.T) {
 				{"name": "simple-proxy", "type": "socks5", "server": "127.0.0.1", "port": 1080},
 				{"name": "another-simple-proxy", "type": "socks5", "server": "127.0.0.1", "port": 1081},
 			},
+		},
+		{
+			testName: "UnsupportedNodeDialer",
+			proxy: []map[string]any{
+				{"name": "rematch", "type": "rematch", "target-rematch-name": "target", "dialer-proxy": "entry"},
+			},
+			errs: []string{"proxy 0: proxy [rematch] type [rematch] does not support dialer-proxy"},
 		},
 		{
 			testName: "SelfReference",
@@ -235,7 +245,7 @@ func TestPolicyGroupDialerProviderMembers(t *testing.T) {
 
 func TestValidateLandingPolicyGroups(t *testing.T) {
 	for _, kind := range []string{"select", "url-test", "fallback", "load-balance"} {
-		for _, scenario := range []string{"valid", "missing-entry", "cycle", "nested-landing"} {
+		for _, scenario := range []string{"valid", "missing-entry", "cycle", "nested-landing", "unsupported-member"} {
 			t.Run(kind+"/"+scenario, func(t *testing.T) {
 				entryMembers := []string{"a", "b"}
 				landingMembers := []string{"exit-a", "exit-b"}
@@ -247,6 +257,8 @@ func TestValidateLandingPolicyGroups(t *testing.T) {
 					entryMembers = []string{"landing"}
 				case "nested-landing":
 					landingMembers = []string{"entry"}
+				case "unsupported-member":
+					landingMembers = []string{"rematch"}
 				}
 				raw := RawConfig{ProxyGroup: []map[string]any{
 					{"name": "entry", "type": "select", "proxies": entryMembers},
@@ -254,6 +266,9 @@ func TestValidateLandingPolicyGroups(t *testing.T) {
 				}}
 				for _, name := range []string{"a", "b", "exit-a", "exit-b"} {
 					raw.Proxy = append(raw.Proxy, map[string]any{"name": name, "type": "http", "server": "127.0.0.1", "port": 1080})
+				}
+				if scenario == "unsupported-member" {
+					raw.Proxy = append(raw.Proxy, map[string]any{"name": "rematch", "type": "rematch", "target-rematch-name": "target"})
 				}
 				proxies, providers, err := parseProxies(&raw)
 				for _, proxy := range proxies {
@@ -264,12 +279,61 @@ func TestValidateLandingPolicyGroups(t *testing.T) {
 						_ = closer.Close()
 					}
 				}
-				if scenario == "valid" {
+				if scenario == "valid" || scenario == "nested-landing" {
 					assert.NoError(t, err)
+				} else if scenario == "unsupported-member" {
+					require.ErrorContains(t, err, "proxy [rematch] type [rematch] does not support dialer-proxy")
 				} else {
 					assert.Error(t, err)
 				}
 			})
 		}
 	}
+}
+
+func TestLandingPolicyGroupMemberSemantics(t *testing.T) {
+	raw := RawConfig{
+		Proxy: []map[string]any{
+			{"name": "node-entry", "type": "http", "server": "127.0.0.1", "port": 1079},
+			{"name": "entry-node", "type": "http", "server": "127.0.0.1", "port": 1080},
+			{"name": "exit", "type": "http", "server": "127.0.0.1", "port": 1081, "dialer-proxy": "node-entry"},
+			{"name": "named-direct", "type": "direct"},
+			{"name": "named-reject", "type": "reject"},
+		},
+		ProxyGroup: []map[string]any{
+			{"name": "nested", "type": "select", "proxies": []string{"exit"}},
+			{"name": "entry", "type": "select", "proxies": []string{"entry-node"}},
+			{"name": "landing", "type": "select", "proxies": []string{"exit", "nested", "DIRECT", "REJECT", "REJECT-DROP", "named-direct", "named-reject"}, "dialer-proxy": "entry", "empty-fallback": "DIRECT"},
+		},
+	}
+
+	proxies, providers, err := parseProxies(&raw)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		for _, proxy := range proxies {
+			_ = proxy.Close()
+		}
+		for _, provider := range providers {
+			if closer, ok := provider.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+		}
+	})
+
+	group, ok := proxies["landing"].Adapter().(outboundgroup.ProxyGroup)
+	require.True(t, ok)
+	members := make(map[string]C.Proxy)
+	for _, member := range group.Proxies() {
+		members[member.Name()] = member
+	}
+
+	require.Contains(t, members, "exit")
+	assert.NotSame(t, proxies["exit"], members["exit"])
+	assert.Equal(t, "node-entry", proxies["exit"].ProxyInfo().DialerProxy)
+	assert.Equal(t, "entry", members["exit"].ProxyInfo().DialerProxy)
+	for _, name := range []string{"nested", "DIRECT", "REJECT", "REJECT-DROP", "named-direct", "named-reject"} {
+		assert.Same(t, proxies[name], members[name], name)
+	}
+	assert.Same(t, proxies["DIRECT"], group.(interface{ EmptyFallback() C.Proxy }).EmptyFallback())
+	assert.Equal(t, "entry", outboundgroup.Summary(group)["dialerProxy"])
 }

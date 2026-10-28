@@ -35,8 +35,10 @@ func NewDialerProvider(source P.ProxyProvider, dialer, url, filter string, timeo
 		derived, err := cloneDialerMember(member, dialer)
 		if err != nil {
 			hc.close()
-			for _, owned := range inner.cache {
-				_ = owned.Close()
+			for original, proxy := range inner.cache {
+				if proxy != original {
+					_ = proxy.Close()
+				}
 			}
 			return nil, err
 		}
@@ -50,6 +52,10 @@ func NewDialerProvider(source P.ProxyProvider, dialer, url, filter string, timeo
 }
 
 func cloneDialerMember(proxy C.Proxy, dialer string) (C.Proxy, error) {
+	switch proxy.Type() {
+	case C.Direct, C.Reject, C.RejectDrop, C.Relay, C.Selector, C.Fallback, C.URLTest, C.LoadBalance:
+		return proxy, nil
+	}
 	if clone, ok := proxy.(interface{ WithDialerProxy(string) (C.Proxy, error) }); ok {
 		return clone.WithDialerProxy(dialer)
 	}
@@ -77,6 +83,7 @@ func (p *dialerProvider) Proxies() []C.Proxy {
 		next[original] = derived
 		members = append(members, derived)
 	}
+	// Active connections retain their auto-closing adapter after it leaves this cache.
 	p.cache, p.proxies, p.version = next, members, version
 	return members
 }
@@ -96,7 +103,11 @@ func (p *dialerProvider) HealthCheckURL() string { return p.hc.url }
 func (p *dialerProvider) RegisterHealthCheckTask(url string, expected utils.IntRanges[uint16], filter string, interval uint) {
 	p.hc.registerHealthCheckTask(url, expected, filter, interval)
 }
-func (p *DialerProvider) Close() error { runtime.SetFinalizer(p, nil); p.hc.close(); return nil }
+func (p *DialerProvider) Close() error {
+	runtime.SetFinalizer(p, nil)
+	p.hc.close()
+	return nil
+}
 
 type failedDialerMember struct {
 	*outbound.Base
