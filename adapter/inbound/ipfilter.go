@@ -3,27 +3,37 @@ package inbound
 import (
 	"net"
 	"net/netip"
+	"slices"
+	"sync/atomic"
 
 	C "github.com/metacubex/mihomo/constant"
 )
 
-var lanAllowedIPs []netip.Prefix
-var lanDisAllowedIPs []netip.Prefix
+var lanAllowedIPs atomic.Pointer[[]netip.Prefix]
+var lanDisAllowedIPs atomic.Pointer[[]netip.Prefix]
 
 func SetAllowedIPs(prefixes []netip.Prefix) {
-	lanAllowedIPs = prefixes
+	snapshot := slices.Clone(prefixes)
+	lanAllowedIPs.Store(&snapshot)
 }
 
 func SetDisAllowedIPs(prefixes []netip.Prefix) {
-	lanDisAllowedIPs = prefixes
+	snapshot := slices.Clone(prefixes)
+	lanDisAllowedIPs.Store(&snapshot)
 }
 
 func AllowedIPs() []netip.Prefix {
-	return lanAllowedIPs
+	if snapshot := lanAllowedIPs.Load(); snapshot != nil {
+		return slices.Clone(*snapshot)
+	}
+	return nil
 }
 
 func DisAllowedIPs() []netip.Prefix {
-	return lanDisAllowedIPs
+	if snapshot := lanDisAllowedIPs.Load(); snapshot != nil {
+		return slices.Clone(*snapshot)
+	}
+	return nil
 }
 
 func IsRemoteAddrDisAllowed(addr net.Addr) bool {
@@ -39,9 +49,11 @@ func IsRemoteAddrDisAllowed(addr net.Addr) bool {
 }
 
 func isAllowed(addr netip.Addr) bool {
-	return prefixesContains(lanAllowedIPs, addr)
+	snapshot := lanAllowedIPs.Load()
+	return snapshot != nil && prefixesContains(*snapshot, addr)
 }
 
 func isDisAllowed(addr netip.Addr) bool {
-	return prefixesContains(lanDisAllowedIPs, addr)
+	snapshot := lanDisAllowedIPs.Load()
+	return snapshot != nil && prefixesContains(*snapshot, addr)
 }
