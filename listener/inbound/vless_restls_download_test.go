@@ -30,11 +30,7 @@ func restlsDownloadFront(t *testing.T, tunnel C.Tunnel, target, password string)
 	}
 	var front net.Listener = raw
 	if password != "" {
-		front, err = LR.NewListener(raw, LC.ResTLS{Dest: realityDest, Password: password}, tunnel)
-		if err != nil {
-			raw.Close()
-			t.Fatal(err)
-		}
+		front = LR.New(LC.ResTLS{Dest: realityDest, Password: password}, tunnel).NewListener(raw)
 	}
 	var active sync.Map
 	var wg sync.WaitGroup

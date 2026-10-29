@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"strings"
-	"sync/atomic"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	"github.com/metacubex/mihomo/common/sockopt"
@@ -33,7 +32,7 @@ import (
 )
 
 type Listener struct {
-	closed       atomic.Bool
+	closed       bool
 	config       LC.ShadowsocksServer
 	listeners    []net.Listener
 	udpListeners []net.PacketConn
@@ -41,16 +40,19 @@ type Listener struct {
 	simpleObfs   func(net.Conn) net.Conn
 }
 
-var _listener atomic.Pointer[Listener]
+var _listener *Listener
 
-func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (_ C.MultiAddrListener, err error) {
+func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (C.MultiAddrListener, error) {
 	var sl *Listener
-	isDefault := len(additions) == 0
-	if isDefault {
+	var err error
+	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-SHADOWSOCKS"),
 			inbound.WithSpecialRules(""),
 		}
+		defer func() {
+			_listener = sl
+		}()
 	}
 
 	udpTimeout := int64(sing.UDPTimeout.Seconds())
@@ -66,11 +68,6 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 	}
 
 	sl = &Listener{}
-	defer func(owned *Listener) {
-		if err != nil {
-			_ = owned.Close()
-		}
-	}(sl)
 	sl.config = config
 
 	switch {
@@ -110,10 +107,9 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 		}
 	}
 
+	var restlsBuilder *restls.Builder
 	if config.ResTLS.Enable {
-		if err := restls.Validate(config.ResTLS); err != nil {
-			return nil, err
-		}
+		restlsBuilder = restls.New(config.ResTLS, tunnel)
 	}
 
 	var jlsBuilder *jls.Builder
@@ -190,7 +186,7 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 					}
 					if err != nil {
 						buff.Release()
-						if sl.closed.Load() {
+						if sl.closed {
 							break
 						}
 						continue
@@ -212,13 +208,8 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 		}
 		if shadowTLSBuilder != nil {
 			l = shadowTLSBuilder.NewListener(l)
-		} else if config.ResTLS.Enable {
-			wrapped, wrapErr := restls.NewListener(l, config.ResTLS, tunnel)
-			if wrapErr != nil {
-				_ = l.Close()
-				return nil, wrapErr
-			}
-			l = wrapped
+		} else if restlsBuilder != nil {
+			l = restlsBuilder.NewListener(l)
 		} else if jlsBuilder != nil {
 			l = jlsBuilder.NewListener(l)
 		}
@@ -228,7 +219,7 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 			for {
 				c, err := l.Accept()
 				if err != nil {
-					if sl.closed.Load() {
+					if sl.closed {
 						break
 					}
 					continue
@@ -239,16 +230,11 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 		}()
 	}
 
-	if isDefault {
-		_listener.Store(sl)
-	}
 	return sl, nil
 }
 
 func (l *Listener) Close() error {
-	if !l.closed.CompareAndSwap(false, true) {
-		return nil
-	}
+	l.closed = true
 	var retErr error
 	for _, lis := range l.listeners {
 		err := lis.Close()
@@ -302,8 +288,8 @@ func (l *Listener) HandleConn(conn net.Conn, tunnel C.Tunnel, additions ...inbou
 }
 
 func HandleShadowSocks(conn net.Conn, tunnel C.Tunnel, additions ...inbound.Addition) bool {
-	if l := _listener.Load(); l != nil && !l.closed.Load() && l.service != nil {
-		go l.HandleConn(conn, tunnel, additions...)
+	if _listener != nil && _listener.service != nil {
+		go _listener.HandleConn(conn, tunnel, additions...)
 		return true
 	}
 	return embedSS.HandleShadowSocks(conn, tunnel, additions...)

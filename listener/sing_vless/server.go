@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -32,25 +31,14 @@ import (
 )
 
 type Listener struct {
-	closed     atomic.Bool
+	closed     bool
 	config     LC.VlessServer
 	listeners  []net.Listener
 	service    *Service[string]
 	decryption *encryption.ServerInstance
 }
 
-func New(config LC.VlessServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (_ *Listener, err error) {
-	if config.ResTLS.Enable {
-		if config.Certificate != "" || config.PrivateKey != "" {
-			return nil, errors.New("certificate is unavailable in Restls")
-		}
-		if ca.ClientAuthTypeFromString(config.ClientAuthType) != tls.NoClientCert || config.ClientAuthCert != "" {
-			return nil, errors.New("client-auth is unavailable in Restls")
-		}
-		if config.EchKey != "" {
-			return nil, errors.New("ECH is unavailable in Restls")
-		}
-	}
+func New(config LC.VlessServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (sl *Listener, err error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-VLESS"),
@@ -79,16 +67,19 @@ func New(config LC.VlessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 			return it.Flow
 		}))
 
-	sl := &Listener{config: config, service: service}
-	defer func(owned *Listener) {
-		if err != nil {
-			_ = owned.Close()
-		}
-	}(sl)
+	sl = &Listener{config: config, service: service}
 
 	sl.decryption, err = encryption.NewServer(config.Decryption)
 	if err != nil {
 		return nil, err
+	}
+	if sl.decryption != nil {
+		decryption := sl.decryption
+		defer func() { // decryption must be closed to avoid the goroutine leak
+			if err != nil {
+				_ = decryption.Close()
+			}
+		}()
 	}
 
 	httpServer := http.Server{
@@ -97,6 +88,7 @@ func New(config LC.VlessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 	}
 	tlsConfig := &tls.Config{Time: ntp.Now}
 	var shadowTLSBuilder *shadowtls.Builder
+	var restlsBuilder *restls.Builder
 	var jlsBuilder *jls.Builder
 	var realityBuilder *reality.Builder
 
@@ -164,9 +156,7 @@ func New(config LC.VlessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 		}
 	}
 	if config.ResTLS.Enable {
-		if err := restls.Validate(config.ResTLS); err != nil {
-			return nil, err
-		}
+		restlsBuilder = restls.New(config.ResTLS, tunnel)
 	}
 	if config.JLSConfig.Enable {
 		jlsBuilder, err = jls.New(config.JLSConfig, tunnel)
@@ -274,13 +264,8 @@ func New(config LC.VlessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 		}
 		if shadowTLSBuilder != nil {
 			l = shadowTLSBuilder.NewListener(l)
-		} else if config.ResTLS.Enable {
-			wrapped, wrapErr := restls.NewListener(l, config.ResTLS, tunnel)
-			if wrapErr != nil {
-				_ = l.Close()
-				return nil, wrapErr
-			}
-			l = wrapped
+		} else if restlsBuilder != nil {
+			l = restlsBuilder.NewListener(l)
 		} else if jlsBuilder != nil {
 			l = jlsBuilder.NewListener(l)
 		} else if realityBuilder != nil {
@@ -288,7 +273,6 @@ func New(config LC.VlessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 		} else if tlsConfig.GetCertificate != nil {
 			l = tls.NewListener(l, tlsConfig)
 		} else if sl.decryption == nil && !config.AllowInsecure {
-			_ = l.Close()
 			return nil, errors.New("disallow using Vless without any certificates/shadow-tls/res-tls/jls/reality/decryption/allow-insecure config")
 		}
 		sl.listeners = append(sl.listeners, l)
@@ -301,7 +285,7 @@ func New(config LC.VlessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 			for {
 				c, err := l.Accept()
 				if err != nil {
-					if sl.closed.Load() {
+					if sl.closed {
 						break
 					}
 					continue
@@ -316,9 +300,7 @@ func New(config LC.VlessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 }
 
 func (l *Listener) Close() error {
-	if !l.closed.CompareAndSwap(false, true) {
-		return nil
-	}
+	l.closed = true
 	var retErr error
 	for _, lis := range l.listeners {
 		err := lis.Close()

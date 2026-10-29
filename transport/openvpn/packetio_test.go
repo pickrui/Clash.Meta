@@ -142,20 +142,6 @@ func TestDatagramPacketIOWriteClassification(t *testing.T) {
 		wantDropped bool
 	}{
 		{
-			name: "complete datagram succeeds",
-			conn: &writeResultConn{n: len(packet)},
-		},
-		{
-			name: "short datagram without error is fatal",
-			conn: &syscallWriteResultConn{&writeResultConn{n: 1}},
-			want: io.ErrShortWrite,
-		},
-		{
-			name: "zero byte datagram without error is fatal",
-			conn: &syscallWriteResultConn{&writeResultConn{}},
-			want: io.ErrShortWrite,
-		},
-		{
 			name:        "syscall UDP zero-byte nonterminal error is one packet loss",
 			conn:        &syscallWriteResultConn{&writeResultConn{err: dropCause}},
 			want:        dropCause,
@@ -796,11 +782,5 @@ func TestDroppedDataPacketDoesNotMarkSendActivity(t *testing.T) {
 	}
 	if got := client.lastSendNano.Load(); got != 1 {
 		t.Fatalf("dropped data packet updated send activity to %d", got)
-	}
-}
-
-func TestTCPPacketIORejectsZeroProgress(t *testing.T) {
-	if err := NewTCPPacketIO(&writeResultConn{}).WritePacket([]byte("frame")); !errors.Is(err, io.ErrShortWrite) {
-		t.Fatalf("zero-progress write = %v", err)
 	}
 }

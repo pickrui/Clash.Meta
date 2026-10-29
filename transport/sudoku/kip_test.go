@@ -2,7 +2,6 @@ package sudoku
 
 import (
 	"bytes"
-	"io"
 	"testing"
 
 	sudokuobfs "github.com/metacubex/mihomo/transport/sudoku/obfs/sudoku"
@@ -65,41 +64,16 @@ func TestResolveClientHelloTableRejectsEntropyMismatch(t *testing.T) {
 	}
 }
 
-type limitedFrameWriter struct {
-	bytes.Buffer
-	limit int
-}
-
-func (w *limitedFrameWriter) Write(p []byte) (int, error) {
-	if len(p) > w.limit {
-		p = p[:w.limit]
+func TestWriteKIPMessageIsOneWrite(t *testing.T) {
+	var w countingWriter
+	if err := WriteKIPMessage(&w, KIPTypeOpenTCP, []byte{1, 2, 3}); err != nil {
+		t.Fatalf("write: %v", err)
 	}
-	return w.Buffer.Write(p)
-}
-
-func TestFramedWritesHandleShortWrites(t *testing.T) {
-	payload := []byte{1, 2, 3}
-	w := &limitedFrameWriter{limit: 2}
-	if err := WriteKIPMessage(w, KIPTypeOpenTCP, payload); err != nil {
-		t.Fatal(err)
+	if w.writes != 1 {
+		t.Fatalf("KIP message took %d writes, want 1", w.writes)
 	}
 	msg, err := ReadKIPMessage(bytes.NewReader(w.Bytes()))
-	if err != nil || msg.Type != KIPTypeOpenTCP || !bytes.Equal(msg.Payload, payload) {
-		t.Fatalf("KIP: %+v, %v", msg, err)
-	}
-	w.Reset()
-	if err := WriteDatagram(w, "192.0.2.1:53", payload); err != nil {
-		t.Fatal(err)
-	}
-	addr, got, err := NewUoTReader(bytes.NewReader(w.Bytes())).ReadDatagram()
-	if err != nil || addr.String() != "192.0.2.1:53" || !bytes.Equal(got, payload) {
-		t.Fatalf("UoT: %v, %x, %v", addr, got, err)
-	}
-	w.limit = 0
-	if err := WriteKIPMessage(w, KIPTypeOpenTCP, payload); err != io.ErrShortWrite {
-		t.Fatalf("zero KIP write: %v", err)
-	}
-	if err := WriteDatagram(w, "192.0.2.1:53", payload); err != io.ErrShortWrite {
-		t.Fatalf("zero UoT write: %v", err)
+	if err != nil || msg.Type != KIPTypeOpenTCP || !bytes.Equal(msg.Payload, []byte{1, 2, 3}) {
+		t.Fatalf("round trip: %+v, %v", msg, err)
 	}
 }

@@ -151,18 +151,6 @@ require (
 // for https://github.com/golang/protobuf/issues/1704
 replace google.golang.org/protobuf => github.com/metacubex/protobuf-go v0.0.0-20260306035419-7ceee0674686
 
-// Keep the Restls diagnostic race fix in Android and desktop builds.
-replace github.com/metacubex/restls-client-go => ./third_party/restls-client-go
-
-// Own queued smux payloads after cancelled writes (see smux README.oix.md).
-replace github.com/metacubex/smux => ./third_party/smux
-
-// Serialize h2mux session closure (see sing-mux README.oix.md).
-replace github.com/metacubex/sing-mux => ./third_party/sing-mux
-
-// Publish Shadowsocks 2022 request salt before fast replies can arrive.
-replace github.com/metacubex/sing-shadowsocks2 => ./third_party/sing-shadowsocks2
-
 // Retain the mips low-memory TCP storage policy (see mipstack README.oix.md).
 replace github.com/metacubex/mipstack => ./third_party/mipstack
 
@@ -171,9 +159,6 @@ replace github.com/metacubex/sing-tun => ./third_party/sing-tun
 
 // Release the watcher when adding a path fails (see fswatch README.oix.md).
 replace github.com/metacubex/fswatch => ./third_party/fswatch
-
-// Bound HTTP/2 SETTINGS I/O without expiring already received frames.
-replace github.com/metacubex/http => ./third_party/http
 
 // Match Windows TFO socket layouts to the pinned Go toolchain.
 replace github.com/metacubex/tfo-go => ./third_party/tfo-go

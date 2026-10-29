@@ -72,9 +72,6 @@ func (d *datagramPacketIO) ReadPacket() ([]byte, error) {
 func (d *datagramPacketIO) WritePacket(packet []byte) error {
 	n, err := d.conn.Write(packet)
 	if err == nil {
-		if n != len(packet) {
-			return io.ErrShortWrite
-		}
 		return nil
 	}
 	if n != 0 || !d.recoverableUDP || terminalPacketIOError(err) {
@@ -124,17 +121,8 @@ func (s *streamPacketIO) WritePacket(packet []byte) error {
 	frame[0] = byte(len(packet) >> 8)
 	frame[1] = byte(len(packet))
 	copy(frame[2:], packet)
-	for len(frame) > 0 {
-		n, err := s.conn.Write(frame)
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
-		frame = frame[n:]
-	}
-	return nil
+	_, err := s.conn.Write(frame)
+	return err
 }
 
 func (s *streamPacketIO) Close() error {

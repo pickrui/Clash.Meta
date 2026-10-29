@@ -1,7 +1,6 @@
 package inbound
 
 import (
-	"github.com/metacubex/mihomo/listener/restls"
 	"strings"
 
 	C "github.com/metacubex/mihomo/constant"
@@ -48,11 +47,6 @@ type Vmess struct {
 }
 
 func NewVmess(options *VmessOption) (*Vmess, error) {
-	if options.ResTLS.Enable {
-		if err := restls.Validate(options.ResTLS.Build()); err != nil {
-			return nil, err
-		}
-	}
 	base, err := NewBase(&options.BaseOption)
 	if err != nil {
 		return nil, err
@@ -112,7 +106,6 @@ func (v *Vmess) Listen(tunnel C.Tunnel) error {
 	var err error
 	v.l, err = sing_vmess.New(v.vs, v.ListenConfig(), tunnel, v.Additions()...)
 	if err != nil {
-		v.l = nil
 		return err
 	}
 	log.Infoln("Vmess[%s] proxy listening at: %s", v.Name(), v.Address())
@@ -121,9 +114,6 @@ func (v *Vmess) Listen(tunnel C.Tunnel) error {
 
 // Close implements constant.InboundListener
 func (v *Vmess) Close() error {
-	if v.l == nil {
-		return nil
-	}
 	return v.l.Close()
 }
 

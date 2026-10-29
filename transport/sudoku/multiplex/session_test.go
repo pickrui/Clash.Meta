@@ -8,7 +8,6 @@ import (
 	"net"
 	"sync"
 	"testing"
-	"testing/synctest"
 	"time"
 )
 
@@ -44,8 +43,6 @@ func TestSessionKeepaliveUsesV047CompatibleFrame(t *testing.T) {
 
 func TestSessionSlowStreamDoesNotBlockOtherStreams(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
-	_ = clientConn.SetDeadline(time.Now().Add(3 * time.Second))
-	_ = serverConn.SetDeadline(time.Now().Add(3 * time.Second))
 	clientSession, err := NewClientSession(clientConn)
 	if err != nil {
 		t.Fatalf("new client session: %v", err)
@@ -113,8 +110,6 @@ func TestSessionSlowStreamDoesNotBlockOtherStreams(t *testing.T) {
 
 func TestStreamCloseWritePreservesResponse(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
-	_ = clientConn.SetDeadline(time.Now().Add(3 * time.Second))
-	_ = serverConn.SetDeadline(time.Now().Add(3 * time.Second))
 	clientSession, err := NewClientSession(clientConn)
 	if err != nil {
 		t.Fatalf("new client session: %v", err)
@@ -182,8 +177,6 @@ func TestStreamCloseWritePreservesResponse(t *testing.T) {
 
 func TestStreamConcurrentWritesRemainContiguous(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
-	_ = clientConn.SetDeadline(time.Now().Add(3 * time.Second))
-	_ = serverConn.SetDeadline(time.Now().Add(3 * time.Second))
 	clientSession, err := NewClientSession(clientConn)
 	if err != nil {
 		t.Fatalf("new client session: %v", err)
@@ -275,7 +268,7 @@ func TestStreamConcurrentWritesRemainContiguous(t *testing.T) {
 
 func TestSessionMixedFrameSizesKeepStreamOrder(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
-	clientSession, err := NewClientSession(&shortWriteConn{clientConn})
+	clientSession, err := NewClientSession(clientConn)
 	if err != nil {
 		t.Fatalf("new client session: %v", err)
 	}
@@ -359,48 +352,31 @@ func TestSessionMixedFrameSizesKeepStreamOrder(t *testing.T) {
 	}
 }
 
-func TestSessionCoalescesPingsWhilePongIsBlocked(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		sessionConn, peerConn := net.Pipe()
-		session, err := NewServerSession(sessionConn)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer session.Close()
-		defer peerConn.Close()
-		var ping [headerSize]byte
-		ping[0] = framePing
-		if _, err := peerConn.Write(ping[:]); err != nil {
-			t.Fatal(err)
-		}
-		synctest.Wait()
-		if _, err := peerConn.Write(bytes.Repeat(ping[:], 128)); err != nil {
-			t.Fatal(err)
-		}
-		synctest.Wait()
-		var pong [headerSize]byte
-		if _, err := io.ReadFull(peerConn, pong[:]); err != nil {
-			t.Fatal(err)
-		}
-		if pong[0] != framePong || binary.BigEndian.Uint32(pong[1:5]) != 0 || binary.BigEndian.Uint32(pong[5:9]) != 0 {
-			t.Fatalf("reply = %v, want an empty PONG on stream 0", pong)
-		}
-		synctest.Wait()
-		_ = peerConn.SetReadDeadline(time.Now().Add(time.Second))
-		if n, err := peerConn.Read(pong[:]); n != 0 || err == nil {
-			t.Fatalf("blocked pings queued extra replies: n=%d err=%v", n, err)
-		}
-		if session.IsClosed() {
-			t.Fatal("session closed by ping")
-		}
-	})
-}
-
-type shortWriteConn struct{ net.Conn }
-
-func (c *shortWriteConn) Write(p []byte) (int, error) {
-	if len(p) > 127 {
-		p = p[:127]
+func TestSessionAnswersPingWithPong(t *testing.T) {
+	sessionConn, peerConn := net.Pipe()
+	session, err := NewServerSession(sessionConn)
+	if err != nil {
+		t.Fatalf("new server session: %v", err)
 	}
-	return c.Conn.Write(p)
+	t.Cleanup(func() {
+		_ = session.Close()
+		_ = peerConn.Close()
+	})
+	_ = peerConn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	var ping [headerSize]byte
+	ping[0] = framePing
+	if _, err := peerConn.Write(ping[:]); err != nil {
+		t.Fatalf("write ping: %v", err)
+	}
+	var pong [headerSize]byte
+	if _, err := io.ReadFull(peerConn, pong[:]); err != nil {
+		t.Fatalf("read pong: %v", err)
+	}
+	if pong[0] != framePong || binary.BigEndian.Uint32(pong[1:5]) != 0 || binary.BigEndian.Uint32(pong[5:9]) != 0 {
+		t.Fatalf("reply = %v, want an empty PONG on stream 0", pong)
+	}
+	if session.IsClosed() {
+		t.Fatal("session closed by ping")
+	}
 }

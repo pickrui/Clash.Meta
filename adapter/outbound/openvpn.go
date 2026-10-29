@@ -240,8 +240,6 @@ func (o *OpenVPN) Close() error {
 	_ = o.runLock.Acquire(context.Background(), 1)
 	client := o.client
 	tunDevice := o.tunDevice
-	resolver.CloseQueries(o.resolver)
-	o.resolver = nil
 	o.client = nil
 	o.tunDevice = nil
 	o.running = false
@@ -391,30 +389,23 @@ func (o *OpenVPN) openPacketIO(ctx context.Context) (ovpn.PacketIO, error) {
 	}
 }
 
-func (o *OpenVPN) stopSession(client *ovpn.Client, tunDevice ipStack, remoteResolver resolver.Resolver) {
-	resolver.CloseQueries(remoteResolver)
-	_ = client.Close()
-	_ = tunDevice.Close()
-	_ = o.runLock.Acquire(context.Background(), 1)
-	if o.client == client {
-		o.resolver = nil
-		o.client = nil
-		o.tunDevice = nil
-		o.running = false
-	}
-	o.runLock.Release(1)
-}
-
 func (o *OpenVPN) startPacketLoops() {
 	runCtx, runCancel := context.WithCancel(o.runCtx)
 	client := o.client
 	tunDevice := o.tunDevice
-	remoteResolver := o.resolver
 	var stopOnce sync.Once
 	stop := func() {
 		stopOnce.Do(func() {
 			runCancel()
-			o.stopSession(client, tunDevice, remoteResolver)
+			_ = client.Close()
+			_ = tunDevice.Close()
+			_ = o.runLock.Acquire(context.Background(), 1)
+			if o.client == client {
+				o.client = nil
+				o.tunDevice = nil
+				o.running = false
+			}
+			o.runLock.Release(1)
 		})
 	}
 	go func() {

@@ -6,7 +6,6 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/listener/anytls"
 	LC "github.com/metacubex/mihomo/listener/config"
-	"github.com/metacubex/mihomo/listener/restls"
 	"github.com/metacubex/mihomo/log"
 )
 
@@ -37,11 +36,6 @@ type AnyTLS struct {
 }
 
 func NewAnyTLS(options *AnyTLSOption) (*AnyTLS, error) {
-	if options.ResTLS.Enable {
-		if err := restls.Validate(options.ResTLS.Build()); err != nil {
-			return nil, err
-		}
-	}
 	base, err := NewBase(&options.BaseOption)
 	if err != nil {
 		return nil, err
@@ -88,7 +82,6 @@ func (v *AnyTLS) Listen(tunnel C.Tunnel) error {
 	var err error
 	v.l, err = anytls.New(v.vs, v.ListenConfig(), tunnel, v.Additions()...)
 	if err != nil {
-		v.l = nil
 		return err
 	}
 	log.Infoln("AnyTLS[%s] proxy listening at: %s", v.Name(), v.Address())
@@ -97,9 +90,6 @@ func (v *AnyTLS) Listen(tunnel C.Tunnel) error {
 
 // Close implements constant.InboundListener
 func (v *AnyTLS) Close() error {
-	if v.l == nil {
-		return nil
-	}
 	return v.l.Close()
 }
 

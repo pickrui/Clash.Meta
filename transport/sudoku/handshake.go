@@ -11,10 +11,8 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/transport/sudoku/crypto"
 	"github.com/metacubex/mihomo/transport/sudoku/obfs/httpmask"
 	"github.com/metacubex/mihomo/transport/sudoku/obfs/sudoku"
@@ -167,8 +165,6 @@ type directionalConn struct {
 	reader  io.Reader
 	writer  io.Writer
 	closers []func() error
-	// The low bit seals outbound calls; higher bits count Write and CloseWrite.
-	activeCall atomic.Int32
 }
 
 func newDirectionalConn(base net.Conn, reader io.Reader, writer io.Writer, closers ...func() error) net.Conn {
@@ -184,23 +180,7 @@ func (c *directionalConn) Read(p []byte) (int, error) {
 	return c.reader.Read(p)
 }
 
-func (c *directionalConn) beginWrite() error {
-	for {
-		active := c.activeCall.Load()
-		if active&1 != 0 {
-			return net.ErrClosed
-		}
-		if c.activeCall.CompareAndSwap(active, active+2) {
-			return nil
-		}
-	}
-}
-
 func (c *directionalConn) Write(p []byte) (int, error) {
-	if err := c.beginWrite(); err != nil {
-		return 0, err
-	}
-	defer c.activeCall.Add(-2)
 	return c.writer.Write(p)
 }
 
@@ -212,37 +192,7 @@ func (c *directionalConn) ReplaceWriter(writer io.Writer, closers ...func() erro
 	c.closers = closers
 }
 
-func startDirectionalCloseBudget(cancel func()) func() {
-	var finished sync.Once
-	timer := time.AfterFunc(C.DefaultTCPTimeout, func() { finished.Do(cancel) })
-	return func() {
-		finished.Do(func() {})
-		timer.Stop()
-	}
-}
-
 func (c *directionalConn) Close() error {
-	var active int32
-	for {
-		active = c.activeCall.Load()
-		if active&1 != 0 {
-			return net.ErrClosed
-		}
-		if c.activeCall.CompareAndSwap(active, active|1) {
-			break
-		}
-	}
-	if active != 0 {
-		_ = c.Conn.SetWriteDeadline(time.Now())
-		return c.Conn.Close()
-	}
-	_ = c.Conn.SetWriteDeadline(time.Now().Add(C.DefaultTCPTimeout))
-	// HTTPMask connections ignore write deadlines.
-	finish := startDirectionalCloseBudget(func() {
-		_ = c.Conn.SetWriteDeadline(time.Now())
-		_ = c.Conn.Close()
-	})
-	defer finish()
 	var firstErr error
 	for _, fn := range c.closers {
 		if fn == nil {
@@ -262,13 +212,6 @@ func (c *directionalConn) CloseWrite() error {
 	if c == nil {
 		return nil
 	}
-	if err := c.beginWrite(); err != nil {
-		return err
-	}
-	defer c.activeCall.Add(-2)
-
-	finish := startDirectionalCloseBudget(func() { _ = c.Close() })
-	defer finish()
 
 	firstErr := c.runClosers()
 	if err := closeWrite(c.writer); err != nil && firstErr == nil {
@@ -276,9 +219,6 @@ func (c *directionalConn) CloseWrite() error {
 	}
 	if err := closeWrite(c.Conn); err != nil && firstErr == nil {
 		firstErr = err
-	}
-	if firstErr != nil {
-		_ = c.Close()
 	}
 	return firstErr
 }

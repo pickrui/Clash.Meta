@@ -239,12 +239,7 @@ func (ss *ShadowSocks) listenPacketContext(ctx context.Context) (net.PacketConn,
 		return nil, nil, err
 	}
 
-	// This socket targets one server; a dual-stack wildcard can lose IPv4 replies on Darwin.
-	network := "udp6"
-	if addr.IP.To4() != nil {
-		network = "udp4"
-	}
-	pc, err := ss.dialer.ListenPacket(ctx, network, "", addr.AddrPort())
+	pc, err := ss.dialer.ListenPacket(ctx, "udp", "", addr.AddrPort())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -461,9 +456,6 @@ func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 		kcptunOpt := &kcpTunOption{}
 		if err := decoder.Decode(option.PluginOpts, kcptunOpt); err != nil {
 			return nil, fmt.Errorf("ss %s initialize kcptun-plugin error: %w", addr, err)
-		}
-		if kcptunOpt.Conn < 0 {
-			return nil, fmt.Errorf("ss %s initialize kcptun-plugin error: conn must not be negative", addr)
 		}
 
 		kcptunClient = kcptun.NewClient(kcptun.Config{

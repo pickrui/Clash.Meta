@@ -137,14 +137,6 @@ func NewAnyTLS(option AnyTLSOption) (*AnyTLS, error) {
 	if err != nil {
 		return nil, err
 	}
-	if restlsConfig != nil {
-		if option.ECHOpts.Enable {
-			return nil, errors.New("Restls does not support ECH")
-		}
-		if option.Certificate != "" || option.PrivateKey != "" {
-			return nil, errors.New("Restls does not support client certificates")
-		}
-	}
 	securityModes := make([]string, 0, 3)
 	if shadowTLSConfig != nil {
 		securityModes = append(securityModes, "ShadowTLS")

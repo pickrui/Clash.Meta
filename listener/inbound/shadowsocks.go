@@ -1,7 +1,6 @@
 package inbound
 
 import (
-	"github.com/metacubex/mihomo/listener/restls"
 	"strings"
 
 	C "github.com/metacubex/mihomo/constant"
@@ -47,11 +46,6 @@ type ShadowSocks struct {
 }
 
 func NewShadowSocks(options *ShadowSocksOption) (*ShadowSocks, error) {
-	if options.ResTLS.Enable {
-		if err := restls.Validate(options.ResTLS.Build()); err != nil {
-			return nil, err
-		}
-	}
 	base, err := NewBase(&options.BaseOption)
 	if err != nil {
 		return nil, err
@@ -96,7 +90,6 @@ func (s *ShadowSocks) Listen(tunnel C.Tunnel) error {
 	var err error
 	s.l, err = sing_shadowsocks.New(s.ss, s.ListenConfig(), tunnel, s.Additions()...)
 	if err != nil {
-		s.l = nil
 		return err
 	}
 	log.Infoln("ShadowSocks[%s] proxy listening at: %s", s.Name(), s.Address())
@@ -105,9 +98,6 @@ func (s *ShadowSocks) Listen(tunnel C.Tunnel) error {
 
 // Close implements constant.InboundListener
 func (s *ShadowSocks) Close() error {
-	if s.l == nil {
-		return nil
-	}
 	return s.l.Close()
 }
 

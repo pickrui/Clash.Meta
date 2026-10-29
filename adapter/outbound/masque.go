@@ -12,13 +12,13 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/contextutils"
 	"github.com/metacubex/mihomo/common/pool"
 	"github.com/metacubex/mihomo/component/dialer"
+	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/dns"
 	"github.com/metacubex/mihomo/log"
@@ -36,7 +36,7 @@ type Masque struct {
 	tlsConfig   *tls.Config
 	quicConfig  *quic.Config
 	tunDevice   ipStack
-	resolver    *nodeDNS
+	resolver    resolver.Resolver
 	uri         string
 	h2Transport *http.Transport
 	l4Client    *masque.L4Client
@@ -45,11 +45,7 @@ type Masque struct {
 	runCancel context.CancelFunc
 	runLock   *semaphore.Weighted
 	running   atomic.Bool
-
-	deviceMutex   sync.Mutex
-	localPrefixes []netip.Prefix
-	runDevice     bool
-	closeOnce     sync.Once
+	runDevice atomic.Bool
 
 	option MasqueOption
 }
@@ -110,7 +106,7 @@ func (option MasqueOption) Prefixes() ([]netip.Prefix, error) {
 	return localPrefixes, nil
 }
 
-func NewMasque(option MasqueOption) (_ *Masque, resultErr error) {
+func NewMasque(option MasqueOption) (*Masque, error) {
 	if option.HandshakeTimeout < 0 {
 		return nil, errors.New("masque handshake timeout must be non-negative")
 	}
@@ -136,11 +132,6 @@ func NewMasque(option MasqueOption) (_ *Masque, resultErr error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	outbound.runCtx = ctx
 	outbound.runCancel = cancel
-	defer func() {
-		if resultErr != nil {
-			_ = outbound.Close()
-		}
-	}()
 
 	privKeyB64, err := base64.StdEncoding.DecodeString(option.PrivateKey)
 	if err != nil {
@@ -222,10 +213,12 @@ func NewMasque(option MasqueOption) (_ *Masque, resultErr error) {
 		KeepAlivePeriod:   30 * time.Second,
 	}
 
-	if option.MTU == 0 {
-		option.MTU = 1280
-	}
 	outbound.option = option
+
+	mtu := option.MTU
+	if mtu == 0 {
+		mtu = 1280
+	}
 
 	var has6 bool
 	if l4proxy {
@@ -243,13 +236,9 @@ func NewMasque(option MasqueOption) (_ *Masque, resultErr error) {
 		if len(prefixes) == 0 {
 			return nil, errors.New("missing local address")
 		}
-		outbound.localPrefixes = prefixes
-		if ipStackNeedsEagerValidation(prefixes, uint32(option.MTU)) {
-			device, err := newIPStack(option.IPStack, prefixes, uint32(option.MTU))
-			if err != nil {
-				return nil, fmt.Errorf("create device: %w", err)
-			}
-			outbound.tunDevice = device
+		outbound.tunDevice, err = newIPStack(option.IPStack, prefixes, uint32(mtu))
+		if err != nil {
+			return nil, fmt.Errorf("create device: %w", err)
 		}
 
 		for _, address := range prefixes {
@@ -268,7 +257,10 @@ func NewMasque(option MasqueOption) (_ *Masque, resultErr error) {
 		for i := range nss {
 			nss[i].ProxyAdapter = outbound
 		}
-		outbound.resolver = &nodeDNS{servers: nss, ipv6: has6}
+		outbound.resolver = dns.NewResolver(dns.Config{
+			Main: nss,
+			IPv6: has6,
+		})
 	}
 
 	return outbound, nil
@@ -285,9 +277,6 @@ func (w *Masque) dialQuic(ctx context.Context) (net.PacketConn, *quic.Conn, erro
 }
 
 func (w *Masque) run(ctx context.Context) error {
-	if err := w.runCtx.Err(); err != nil {
-		return err
-	}
 	if w.running.Load() {
 		return nil
 	}
@@ -342,8 +331,12 @@ func (w *Masque) run(ctx context.Context) error {
 }
 
 func (w *Masque) startLocked(ctx context.Context) error {
-	if err := w.startDevice(ctx); err != nil {
-		return err
+	if !w.runDevice.Load() {
+		err := w.tunDevice.Start()
+		if err != nil {
+			return err
+		}
+		w.runDevice.Store(true)
 	}
 
 	var pc net.PacketConn
@@ -435,30 +428,22 @@ func (w *Masque) startLocked(ctx context.Context) error {
 
 // Close implements C.ProxyAdapter
 func (w *Masque) Close() error {
-	w.closeOnce.Do(func() {
-		w.runCancel()
-		w.resolver.close()
-		w.deviceMutex.Lock()
-		if w.tunDevice != nil {
-			_ = w.tunDevice.Close()
-		}
-		w.deviceMutex.Unlock()
-		if w.l4Client != nil {
-			_ = w.l4Client.Close()
-		}
-		if w.h2Transport != nil {
-			w.h2Transport.CloseIdleConnections()
-		}
-	})
+	w.runCancel()
+	if w.tunDevice != nil {
+		w.tunDevice.Close()
+	}
+	if w.l4Client != nil {
+		w.l4Client.Close()
+	}
 	return nil
 }
 
 func (w *Masque) dialContextL4(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
 	var conn net.Conn
 	if !metadata.Resolved() || w.resolver != nil {
-		r, resolveErr := w.resolver.get(ctx)
-		if resolveErr != nil {
-			return nil, resolveErr
+		r := resolver.DefaultResolver.Load()
+		if w.resolver != nil {
+			r = w.resolver
 		}
 		options := w.DialOptions()
 		options = append(options, dialer.WithResolver(r))
@@ -485,9 +470,9 @@ func (w *Masque) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Con
 		return nil, err
 	}
 	if !metadata.Resolved() || w.resolver != nil {
-		r, resolveErr := w.resolver.get(ctx)
-		if resolveErr != nil {
-			return nil, resolveErr
+		r := resolver.DefaultResolver.Load()
+		if w.resolver != nil {
+			r = w.resolver
 		}
 		options := w.DialOptions()
 		options = append(options, dialer.WithResolver(r))
@@ -529,9 +514,9 @@ func (w *Masque) ListenPacketContext(ctx context.Context, metadata *C.Metadata) 
 
 func (w *Masque) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
 	if (!metadata.Resolved() || w.resolver != nil) && metadata.Host != "" {
-		r, err := w.resolver.get(ctx)
-		if err != nil {
-			return err
+		r := resolver.DefaultResolver.Load()
+		if w.resolver != nil {
+			r = w.resolver
 		}
 		ip, err := resolveIPWithResolver(ctx, metadata.Host, w.prefer, r)
 		if err != nil {

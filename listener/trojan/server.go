@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -34,7 +33,7 @@ import (
 )
 
 type Listener struct {
-	closed     atomic.Bool
+	closed     bool
 	config     LC.TrojanServer
 	listeners  []net.Listener
 	keys       map[[trojan.KeyLength]byte]string
@@ -42,18 +41,7 @@ type Listener struct {
 	handler    *sing.ListenerHandler
 }
 
-func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (_ *Listener, err error) {
-	if config.ResTLS.Enable {
-		if config.Certificate != "" || config.PrivateKey != "" {
-			return nil, errors.New("certificate is unavailable in Restls")
-		}
-		if ca.ClientAuthTypeFromString(config.ClientAuthType) != tls.NoClientCert || config.ClientAuthCert != "" {
-			return nil, errors.New("client-auth is unavailable in Restls")
-		}
-		if config.EchKey != "" {
-			return nil, errors.New("ECH is unavailable in Restls")
-		}
-	}
+func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (sl *Listener, err error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-TROJAN"),
@@ -88,12 +76,7 @@ func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 			return nil, err
 		}
 	}
-	sl := &Listener{config: config, keys: keys, pickCipher: pickCipher, handler: h}
-	defer func(owned *Listener) {
-		if err != nil {
-			_ = owned.Close()
-		}
-	}(sl)
+	sl = &Listener{false, config, nil, keys, pickCipher, h}
 
 	httpServer := http.Server{
 		IdleTimeout: 30 * time.Second,
@@ -101,6 +84,7 @@ func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 	}
 	tlsConfig := &tls.Config{Time: ntp.Now}
 	var shadowTLSBuilder *shadowtls.Builder
+	var restlsBuilder *restls.Builder
 	var jlsBuilder *jls.Builder
 	var realityBuilder *reality.Builder
 
@@ -168,9 +152,7 @@ func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 		}
 	}
 	if config.ResTLS.Enable {
-		if err := restls.Validate(config.ResTLS); err != nil {
-			return nil, err
-		}
+		restlsBuilder = restls.New(config.ResTLS, tunnel)
 	}
 	if config.JLSConfig.Enable {
 		jlsBuilder, err = jls.New(config.JLSConfig, tunnel)
@@ -222,13 +204,8 @@ func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 		}
 		if shadowTLSBuilder != nil {
 			l = shadowTLSBuilder.NewListener(l)
-		} else if config.ResTLS.Enable {
-			wrapped, wrapErr := restls.NewListener(l, config.ResTLS, tunnel)
-			if wrapErr != nil {
-				_ = l.Close()
-				return nil, wrapErr
-			}
-			l = wrapped
+		} else if restlsBuilder != nil {
+			l = restlsBuilder.NewListener(l)
 		} else if jlsBuilder != nil {
 			l = jlsBuilder.NewListener(l)
 		} else if realityBuilder != nil {
@@ -236,7 +213,6 @@ func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 		} else if tlsConfig.GetCertificate != nil {
 			l = tls.NewListener(l, tlsConfig)
 		} else if !config.TrojanSSOption.Enabled && !config.AllowInsecure {
-			_ = l.Close()
 			return nil, errors.New("disallow using Trojan without any certificates/shadow-tls/res-tls/jls/reality/ss/allow-insecure config")
 		}
 		sl.listeners = append(sl.listeners, l)
@@ -249,7 +225,7 @@ func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 			for {
 				c, err := l.Accept()
 				if err != nil {
-					if sl.closed.Load() {
+					if sl.closed {
 						break
 					}
 					continue
@@ -264,9 +240,7 @@ func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 }
 
 func (l *Listener) Close() error {
-	if !l.closed.CompareAndSwap(false, true) {
-		return nil
-	}
+	l.closed = true
 	var retErr error
 	for _, lis := range l.listeners {
 		err := lis.Close()

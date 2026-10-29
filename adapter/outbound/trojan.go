@@ -326,17 +326,6 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 	if err != nil {
 		return nil, err
 	}
-	if t.restlsConfig != nil {
-		if t.realityConfig != nil {
-			return nil, errors.New("Restls is incompatible with REALITY")
-		}
-		if option.ECHOpts.Enable {
-			return nil, errors.New("Restls does not support ECH")
-		}
-		if option.Certificate != "" || option.PrivateKey != "" {
-			return nil, errors.New("Restls does not support client certificates")
-		}
-	}
 	securityModes := make([]string, 0, 4)
 	if t.shadowTLSConfig != nil {
 		securityModes = append(securityModes, "ShadowTLS")

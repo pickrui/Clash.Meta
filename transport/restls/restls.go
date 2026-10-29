@@ -24,10 +24,6 @@ func (r *Restls) Upstream() any {
 
 type Config = tls.Config
 
-type ServerConfig = tls.RestlsServerConfig
-
-var Server = tls.RestlsServer
-
 func NewRestlsConfig(serverName, password, versionHint, restlsScript, clientID string) (*Config, error) {
 	config, err := tls.NewRestlsConfig(serverName, password, versionHint, restlsScript, clientID)
 	if err != nil {
@@ -38,7 +34,11 @@ func NewRestlsConfig(serverName, password, versionHint, restlsScript, clientID s
 	return config, nil
 }
 
-func SetFingerprint(config *Config, fingerprint string, nameCertVerify string) error {
+type ServerConfig = tls.RestlsServerConfig
+
+var Server = tls.RestlsServer
+
+func SetFingerprint(config *Config, fingerprint string, nameCertVerify string) (err error) {
 	verifier, err := ca.NewFingerprintVerifier(fingerprint, ntp.Now)
 	if err != nil {
 		return err
@@ -70,7 +70,7 @@ func NewRestls(ctx context.Context, conn net.Conn, config *Config) (net.Conn, er
 		if clientIDPtr != nil {
 			clientHellowID = *clientIDPtr
 		}
-		config = config.Clone() // The handshake adjusts TLS bounds for each fingerprint.
+		config = config.Clone() // avoid race condition in HandshakeContext
 	}
 	restls := &Restls{
 		UConn: tls.UClient(conn, config, clientHellowID),

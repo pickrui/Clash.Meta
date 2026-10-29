@@ -84,11 +84,7 @@ func (c *ProtocolConfig) Validate() error {
 			return fmt.Errorf("tables[%d] cannot be nil", i)
 		}
 	}
-	return c.ValidateOptions()
-}
 
-// ValidateOptions checks protocol settings before lazy table initialization.
-func (c *ProtocolConfig) ValidateOptions() error {
 	if c.Key == "" {
 		return fmt.Errorf("key cannot be empty")
 	}

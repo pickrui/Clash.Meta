@@ -132,20 +132,24 @@ func DialHTTPMaskTunnel(ctx context.Context, serverAddress string, cfg *Protocol
 	default:
 		return nil, fmt.Errorf("http-mask-mode=%q does not use http tunnel", cfg.HTTPMaskMode)
 	}
-	var newEarlyHandshake func() (*httpmask.ClientEarlyHandshake, error)
+	var (
+		earlyHandshake *httpmask.ClientEarlyHandshake
+		err            error
+	)
 	if upgrade != nil {
-		newEarlyHandshake = func() (*httpmask.ClientEarlyHandshake, error) {
-			return newClientHTTPMaskEarlyHandshake(cfg)
+		earlyHandshake, err = newClientHTTPMaskEarlyHandshake(cfg)
+		if err != nil {
+			return nil, err
 		}
 	}
 	return httpmask.DialTunnel(ctx, serverAddress, httpmask.TunnelDialOptions{
-		Mode:              cfg.HTTPMaskMode,
-		TLSEnabled:        cfg.HTTPMaskTLSEnabled,
-		HostOverride:      cfg.HTTPMaskHost,
-		PathRoot:          cfg.HTTPMaskPathRoot,
-		AuthKey:           ClientAEADSeed(cfg.Key),
-		NewEarlyHandshake: newEarlyHandshake,
-		Upgrade:           upgrade,
-		DialContext:       dial,
+		Mode:           cfg.HTTPMaskMode,
+		TLSEnabled:     cfg.HTTPMaskTLSEnabled,
+		HostOverride:   cfg.HTTPMaskHost,
+		PathRoot:       cfg.HTTPMaskPathRoot,
+		AuthKey:        ClientAEADSeed(cfg.Key),
+		EarlyHandshake: earlyHandshake,
+		Upgrade:        upgrade,
+		DialContext:    dial,
 	})
 }

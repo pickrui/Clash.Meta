@@ -127,7 +127,6 @@ func (s *Sudoku) Listen(tunnel C.Tunnel) error {
 		s.listeners = append(s.listeners, l)
 	}
 	if len(errs) > 0 {
-		_ = s.Close()
 		return errors.Join(errs...)
 	}
 
@@ -143,7 +142,6 @@ func (s *Sudoku) Close() error {
 			errs = append(errs, err)
 		}
 	}
-	s.listeners = nil
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}

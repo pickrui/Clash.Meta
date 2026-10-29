@@ -102,7 +102,6 @@ func (c *PacketUpWriter) flush() {
 	c.buf = c.buf[:0] // reset buffer
 	if err != nil {
 		c.flushErr = err
-		c.cancel()
 		return
 	}
 }
@@ -593,10 +592,10 @@ func (c *Client) DialPacketUp(ctx context.Context) (net.Conn, error) {
 		Path:   downloadCfg.NormalizedPath(),
 	}
 
-	reqCtx, reqCancel := context.WithCancel(c.ctx)
+	writerCtx, writerCancel := context.WithCancel(c.ctx)
 	writer := &PacketUpWriter{
-		ctx:                  reqCtx,
-		cancel:               reqCancel,
+		ctx:                  writerCtx,
+		cancel:               writerCancel,
 		cfg:                  c.cfg,
 		scMaxEachPostBytes:   c.scMaxEachPostBytes.Rand(),
 		scMinPostsIntervalMs: c.scMinPostsIntervalMs,
@@ -610,6 +609,7 @@ func (c *Client) DialPacketUp(ctx context.Context) (net.Conn, error) {
 	// Async download: avoid blocking on CDN response header buffering
 	gotConn := make(chan bool, 1)
 
+	reqCtx, reqCancel := context.WithCancel(c.ctx) // reqCtx must alive during conn not closed
 	stop := contextutils.AfterFunc(ctx, reqCancel) // temporarily connect ctx with reqCtx when dialing
 	defer stop()                                   // disconnect ctx with reqCtx after dialing
 

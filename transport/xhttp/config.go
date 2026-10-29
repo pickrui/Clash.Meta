@@ -535,10 +535,7 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 
 	if dataPlacement == PlacementBody || dataPlacement == PlacementAuto {
 		request.Header = c.GetRequestHeader()
-		request.GetBody = func() (io.ReadCloser, error) {
-			return io.NopCloser(bytes.NewReader(data)), nil
-		}
-		request.Body, _ = request.GetBody()
+		request.Body = io.NopCloser(bytes.NewReader(data))
 		request.ContentLength = int64(len(data))
 	} else {
 		request.Body = nil

@@ -366,7 +366,7 @@ func (c *RecordConn) Write(p []byte) (int, error) {
 		dst := frame[2+recordHeaderSize : 2+recordHeaderSize : frameLen]
 		_ = aead.Seal(dst[:0], header[:], chunk, header[:])
 
-		err := writeFull(c.Conn, frame)
+		_, err := c.Conn.Write(frame)
 		_ = pool.Put(frame)
 		if err != nil {
 			return total, err
@@ -478,18 +478,4 @@ func (c *RecordConn) releaseReadFrame() {
 		_ = pool.Put(c.readFrame)
 	}
 	c.readFrame, c.readPlain, c.readOff = nil, nil, 0
-}
-
-func writeFull(w io.Writer, b []byte) error {
-	for len(b) > 0 {
-		n, err := w.Write(b)
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
-		b = b[n:]
-	}
-	return nil
 }

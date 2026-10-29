@@ -198,7 +198,6 @@ func newSplitConn(info *sessionDialInfo, opts TunnelDialOptions, codec *splitCod
 
 	go c.pullLoop()
 	go c.pushLoop()
-	opts.EarlyHandshake = info.earlyHandshake
 	outConn := net.Conn(c)
 	if opts.EarlyHandshake != nil && opts.EarlyHandshake.WrapConn != nil && (opts.EarlyHandshake.Ready == nil || opts.EarlyHandshake.Ready()) {
 		upgraded, err := opts.EarlyHandshake.WrapConn(c)
@@ -339,9 +338,9 @@ func (c *splitConn) pullOnce() (outcome pullOutcome, readAny bool) {
 			return pullStop, readAny
 		}
 		return pullAgain, readAny
-	case !readAny && isRetryableHTTPTransportError(err):
+	case isRetryableHTTPTransportError(err):
 		closeIdleConnections(c.client)
-		return pullRetry, false
+		return pullRetry, readAny
 	default:
 		_ = c.closeWithError(fmt.Errorf("%s pull failed: %w", mode, err))
 		return pullStop, readAny

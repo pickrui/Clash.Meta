@@ -39,7 +39,7 @@ func writeSudokuPayload(w io.Writer, buf []byte, table *Table, rng *sudokuRand, 
 	for len(p) > 0 {
 		n := minInt(len(p), (cap(out)-len(out)-encodeSlack)/expansion)
 		if n == 0 {
-			if err := writeFull(w, out); err != nil {
+			if _, err := w.Write(out); err != nil {
 				return releaseWriteBuf(out), total, err
 			}
 			total += buffered
@@ -59,7 +59,7 @@ func writeSudokuPayload(w io.Writer, buf []byte, table *Table, rng *sudokuRand, 
 			out = append(out, pad[(draw>>32)*uint64(len(pad))>>32])
 		}
 	}
-	if err := writeFull(w, out); err != nil {
+	if _, err := w.Write(out); err != nil {
 		return releaseWriteBuf(out), total, err
 	}
 	return releaseWriteBuf(out), total + buffered, nil
@@ -84,19 +84,5 @@ func releaseWriteBuf(buf []byte) []byte {
 		return buf[:0]
 	}
 	pool.Put(buf)
-	return nil
-}
-
-func writeFull(w io.Writer, b []byte) error {
-	for len(b) > 0 {
-		n, err := w.Write(b)
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
-		b = b[n:]
-	}
 	return nil
 }

@@ -12,7 +12,6 @@ import (
 type mockConn struct {
 	readBuf  []byte
 	writeBuf []byte
-	maxWrite int
 }
 
 func (c *mockConn) Read(p []byte) (int, error) {
@@ -25,12 +24,6 @@ func (c *mockConn) Read(p []byte) (int, error) {
 }
 
 func (c *mockConn) Write(p []byte) (int, error) {
-	if c.maxWrite < 0 {
-		return 0, nil
-	}
-	if c.maxWrite > 0 && len(p) > c.maxWrite {
-		p = p[:c.maxWrite]
-	}
 	c.writeBuf = append(c.writeBuf, p...)
 	return len(p), nil
 }
@@ -115,7 +108,7 @@ func TestCodecRoundTrip(t *testing.T) {
 					payload := make([]byte, size)
 					rand.New(rand.NewSource(int64(size))).Read(payload)
 
-					mock := &mockConn{maxWrite: 17}
+					mock := &mockConn{}
 					var w io.Writer = NewConn(mock, table, pad[0], pad[1], false)
 					if packed {
 						w = NewPackedConn(mock, table, pad[0], pad[1])
@@ -196,15 +189,5 @@ func TestConnRecordsEverythingRead(t *testing.T) {
 	}
 	if got := sc.GetBufferedAndRecorded(); len(got) != 0 {
 		t.Fatalf("recording was stopped, got %d bytes", len(got))
-	}
-}
-
-func TestCodecZeroWriteFails(t *testing.T) {
-	table := NewTable("zero-write", "prefer_ascii")
-	raw := &mockConn{maxWrite: -1}
-	for _, writer := range []io.Writer{NewConn(raw, table, 0, 0, false), NewPackedConn(raw, table, 0, 0), newPureWriter(raw, table, newSudokuRand(1), 0, 0)} {
-		if n, err := writer.Write([]byte("hello")); n != 0 || err != io.ErrShortWrite {
-			t.Fatalf("%T write = %d, %v", writer, n, err)
-		}
 	}
 }

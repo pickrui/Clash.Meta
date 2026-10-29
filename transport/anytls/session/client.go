@@ -123,15 +123,7 @@ func (c *Client) getIdleSession() (idle *Session) {
 }
 
 func (c *Client) createSession(ctx context.Context) (*Session, error) {
-	// A Restls/TLS handshake can still be in flight when the proxy is removed.
-	// Cancel that work on client shutdown as well as caller cancellation.
-	dialCtx, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(c.die, cancel)
-	defer func() {
-		stop()
-		cancel()
-	}()
-	underlying, err := c.dialOut(dialCtx)
+	underlying, err := c.dialOut(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -151,13 +143,6 @@ func (c *Client) createSession(ctx context.Context) (*Session, error) {
 	}
 
 	c.sessionsLock.Lock()
-	// Serialize publication with Close's snapshot. A dialer may finish just
-	// after cancellation (or ignore it), but must not revive the client.
-	if c.die.Err() != nil || ctx.Err() != nil {
-		c.sessionsLock.Unlock()
-		underlying.Close()
-		return nil, io.ErrClosedPipe
-	}
 	c.sessions[session.seq] = session
 	c.sessionsLock.Unlock()
 
@@ -189,9 +174,10 @@ func (c *Client) idleCleanup() {
 
 func (c *Client) idleCleanupExpTime(expTime time.Time) {
 	activeCount := 0
+
 	c.idleSessionLock.Lock()
-	// The size belongs to the same protected pool as iteration and removal.
 	sessionToClose := make([]*Session, 0, c.idleSession.Len())
+
 	it := c.idleSession.Iterate()
 	for it.IsNotEnd() {
 		session := it.Value()

@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	atomic2 "github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/httputils"
 	"github.com/metacubex/mihomo/common/once"
 	"github.com/metacubex/mihomo/component/dialer"
@@ -144,32 +145,44 @@ func (c *Client) roundTrip(ctx context.Context, request *http.Request, conn *htt
 	c.startOnce.Do(c.start)
 	pipeReader, pipeWriter := io.Pipe()
 	request.Body = pipeReader
-	*conn = httpConn{writer: pipeWriter, created: make(chan struct{})}
+	*conn = httpConn{
+		writer:  pipeWriter,
+		created: make(chan struct{}),
+	}
 	c.count.Add(1)
-	conn.closeFn = once.OnceFunc(func() { c.count.Add(-1) })
-	// A successful stream outlives its caller's dial deadline.
-	requestCtx, cancel := context.WithCancel(c.ctx)
-	conn.cancelFn = cancel
-	gotConn := make(chan struct{}, 1)
-	completed := make(chan error, 1)
+	conn.closeFn = once.OnceFunc(func() {
+		c.count.Add(-1)
+	})
+	requestCtx, cancel := context.WithCancel(c.ctx) // requestCtx must alive during conn not closed
+	conn.cancelFn = cancel                          // cancel ctx when conn closed
+
+	// Use gotConn to detect when TCP connection is established, so we can
+	// return the conn immediately without waiting for the HTTP response.
+	gotConn := make(chan bool, 1)
 	addrCtx := httputils.NewAddrContext(&conn.NetAddr, requestCtx)
 	streamCtx := httptrace.WithClientTrace(addrCtx, &httptrace.ClientTrace{
-		GotConn: func(httptrace.GotConnInfo) {
+		GotConn: func(info httptrace.GotConnInfo) {
 			select {
-			case gotConn <- struct{}{}:
-			default:
+			case gotConn <- true:
+			default: // GotConn maybe called multiple times, ignore the second and later calls
 			}
 		},
 	})
+
+	var requestErr atomic2.TypedValue[error]
 	go func() {
-		timeout := time.AfterFunc(C.DefaultTCPTimeout, cancel)
-		defer timeout.Stop()
-		response, err := c.roundTripper.RoundTrip(request.WithContext(streamCtx))
-		if err == nil && response.StatusCode != http.StatusOK {
+		request = request.WithContext(streamCtx)
+		response, err := c.roundTripper.RoundTrip(request)
+		if err != nil {
+			requestErr.Store(err)
+			close(gotConn)
+			_ = pipeWriter.CloseWithError(err)
+			_ = pipeReader.CloseWithError(err)
+			conn.setup(nil, err)
+		} else if response.StatusCode != http.StatusOK {
 			_ = response.Body.Close()
 			err = fmt.Errorf("unexpected status code: %d", response.StatusCode)
-		}
-		if err != nil {
+			requestErr.Store(err)
 			_ = pipeWriter.CloseWithError(err)
 			_ = pipeReader.CloseWithError(err)
 			conn.setup(nil, err)
@@ -177,22 +190,13 @@ func (c *Client) roundTrip(ctx context.Context, request *http.Request, conn *htt
 			c.resetHealthCheckTimer()
 			conn.setup(response.Body, nil)
 		}
-		completed <- err
 	}()
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-requestCtx.Done():
-		return requestCtx.Err()
-	case err := <-completed:
-		return err
 	case <-gotConn:
-		select {
-		case err := <-completed:
-			return err
-		default:
-			return nil
-		}
+		return requestErr.Load()
 	}
 }
 

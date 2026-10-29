@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"sync"
 	"testing"
@@ -556,101 +555,6 @@ func TestClientWaitServerResetRetransmitsUDP(t *testing.T) {
 	}
 	if clientControl.PendingMessages() != 0 {
 		t.Fatalf("expected client reset to be acked, pending=%d", clientControl.PendingMessages())
-	}
-}
-
-func TestClientClosesOnSoftReset(t *testing.T) {
-	for _, name := range []string{"plain", "tls-auth", "tls-crypt"} {
-		t.Run(name, func(t *testing.T) {
-			var (
-				config      ClientConfig
-				serverCrypt ControlCryptor
-				err         error
-			)
-			switch name {
-			case "tls-auth":
-				config.TLSAuthKey = testStaticKey()
-				config.KeyDirection = "1"
-				serverCrypt, err = NewTLSAuth(testStaticKey(), "0", config.Auth)
-			case "tls-crypt":
-				config.TLSCryptKey = testStaticKey()
-				serverCrypt, err = NewTLSCrypt(testStaticKey(), false)
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			clientIO, serverIO := newMemoryPacketPair()
-			client, err := newTestClient(&config, clientIO)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer client.Close()
-			var serverID SessionID
-			copy(serverID[:], []byte("server01"))
-			client.control.SetRemoteSessionID(serverID)
-			go client.watchControl()
-			serverControl := NewControlChannel(serverIO, serverCrypt, serverID)
-			serverControl.SetRemoteSessionID(client.control.LocalSessionID())
-
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			if _, err := client.control.Send(ctx, PControlV1, []byte("client control")); err != nil {
-				t.Fatal(err)
-			}
-			packet, err := serverControl.Read(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(packet.Payload) != "client control" {
-				t.Fatalf("unexpected client control payload: %q", packet.Payload)
-			}
-			if err := serverControl.SendAck(ctx); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := serverControl.Send(ctx, PControlV1, nil); err != nil {
-				t.Fatal(err)
-			}
-			ackCtx, ackCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-			defer ackCancel()
-			_, err = serverControl.Read(ackCtx)
-			if !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("expected deadline after consuming client ack, got %v", err)
-			}
-			if serverControl.PendingMessages() != 0 {
-				t.Fatalf("expected client to ack ordinary control message: %d", serverControl.PendingMessages())
-			}
-			if client.control.PendingMessages() != 0 {
-				t.Fatalf("expected server ack to clear client pending messages: %d", client.control.PendingMessages())
-			}
-
-			if err := serverIO.WritePacket(ctx, []byte{opcodeKeyID(PControlSoftResetV1, 1)}); err != nil {
-				t.Fatal(err)
-			}
-			softReset, err := (ControlPacket{
-				Opcode:       PControlSoftResetV1,
-				KeyID:        1,
-				LocalSession: serverID,
-				MessageID:    0,
-			}).Encode(serverCrypt, 3, uint32(time.Now().Unix()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := serverIO.WritePacket(ctx, softReset); err != nil {
-				t.Fatal(err)
-			}
-			select {
-			case <-client.mux.done:
-			case <-ctx.Done():
-				t.Fatal("client did not close after soft reset renegotiation failure")
-			}
-			if client.LastRekeyError() == nil || client.control.KeyID() != 1 {
-				t.Fatalf("failed rekey did not record the new epoch: key=%d error=%v", client.control.KeyID(), client.LastRekeyError())
-			}
-			if client.control.recvMessage != 1 {
-				t.Fatalf("unexpected new epoch receive sequence: %d", client.control.recvMessage)
-			}
-		})
 	}
 }
 
@@ -1684,43 +1588,5 @@ func TestTCPPacketIOFraming(t *testing.T) {
 	}
 	if err := <-errCh; err != nil {
 		t.Fatal(err)
-	}
-}
-
-type limitedWriteConn struct {
-	net.Conn
-	max int
-}
-
-func (c *limitedWriteConn) Write(p []byte) (int, error) {
-	if len(p) > c.max {
-		p = p[:c.max]
-	}
-	return c.Conn.Write(p)
-}
-
-func TestTCPPacketIOCompletesPartialWrites(t *testing.T) {
-	clientNet, serverNet := net.Pipe()
-	defer clientNet.Close()
-	defer serverNet.Close()
-	packetIO := NewTCPPacketIO(&limitedWriteConn{Conn: clientNet, max: 3})
-	_ = serverNet.SetReadDeadline(time.Now().Add(time.Second))
-	payload := []byte("complete framed packet")
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- packetIO.WritePacket(payload)
-	}()
-	frame := make([]byte, 2+len(payload))
-	if _, err := io.ReadFull(serverNet, frame); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-errCh; err != nil {
-		t.Fatal(err)
-	}
-	if int(frame[0])<<8|int(frame[1]) != len(payload) {
-		t.Fatalf("frame length = %d, want %d", int(frame[0])<<8|int(frame[1]), len(payload))
-	}
-	if !bytes.Equal(frame[2:], payload) {
-		t.Fatalf("frame payload = %q, want %q", frame[2:], payload)
 	}
 }

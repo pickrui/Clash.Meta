@@ -38,7 +38,8 @@ func writeDatagram(w io.Writer, payload []byte, appendAddr func([]byte) ([]byte,
 	}
 	binary.BigEndian.PutUint16(frame, uint16(len(frame)-uotHeaderSize))
 	binary.BigEndian.PutUint16(frame[2:], uint16(len(payload)))
-	return writeFull(w, append(frame, payload...))
+	_, err = w.Write(append(frame, payload...))
+	return err
 }
 
 // UoTReader reads datagram frames from a UoT stream. The header and address are read into

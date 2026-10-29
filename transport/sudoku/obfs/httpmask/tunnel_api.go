@@ -55,9 +55,7 @@ type TunnelDialOptions struct {
 	// poll use the authenticated Sudoku session token and upload sequence.
 	AuthKey        string
 	EarlyHandshake *ClientEarlyHandshake
-	// Authorization retries must not reuse a nonce already consumed by the server.
-	NewEarlyHandshake func() (*ClientEarlyHandshake, error)
-	Upgrade           func(raw net.Conn) (net.Conn, error)
+	Upgrade        func(raw net.Conn) (net.Conn, error)
 	// DialContext is required so embedders can preserve their routing and proxy behavior.
 	DialContext func(context.Context, string, string) (net.Conn, error)
 }

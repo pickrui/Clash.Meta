@@ -15,7 +15,6 @@ import (
 // Option is options of websocket obfs
 type Option struct {
 	Host                     string
-	ServerName               string
 	Port                     string
 	Path                     string
 	Headers                  map[string]string
@@ -23,9 +22,7 @@ type Option struct {
 	ECHConfig                *ech.Config
 	SkipCertVerify           bool
 	NameCertVerify           string
-	CAFile                   string
 	Fingerprint              string
-	ClientFingerprint        string
 	Certificate              string
 	PrivateKey               string
 	Mux                      bool
@@ -35,9 +32,42 @@ type Option struct {
 
 // NewV2rayObfs return a HTTPObfs
 func NewV2rayObfs(ctx context.Context, conn net.Conn, option *Option) (net.Conn, error) {
-	config, err := newWebsocketConfig(option)
-	if err != nil {
-		return nil, err
+	header := http.Header{}
+	for k, v := range option.Headers {
+		header.Add(k, v)
+	}
+
+	config := &vmess.WebsocketConfig{
+		Host:                     option.Host,
+		Port:                     option.Port,
+		Path:                     option.Path,
+		V2rayHttpUpgrade:         option.V2rayHttpUpgrade,
+		V2rayHttpUpgradeFastOpen: option.V2rayHttpUpgradeFastOpen,
+		ECHConfig:                option.ECHConfig,
+		Headers:                  header,
+	}
+
+	var err error
+	if option.TLS {
+		config.TLS = true
+		config.TLSConfig, err = ca.GetTLSConfig(ca.Option{
+			TLSConfig: &tls.Config{
+				ServerName:         option.Host,
+				InsecureSkipVerify: option.SkipCertVerify,
+				NextProtos:         []string{"http/1.1"},
+			},
+			Fingerprint:    option.Fingerprint,
+			NameCertVerify: option.NameCertVerify,
+			Certificate:    option.Certificate,
+			PrivateKey:     option.PrivateKey,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		if host := config.Headers.Get("Host"); host != "" {
+			config.TLSConfig.ServerName = host
+		}
 	}
 
 	conn, err = vmess.StreamWebsocketConn(ctx, conn, config)
@@ -53,58 +83,4 @@ func NewV2rayObfs(ctx context.Context, conn net.Conn, option *Option) (net.Conn,
 		})
 	}
 	return conn, nil
-}
-
-func newWebsocketConfig(option *Option) (*vmess.WebsocketConfig, error) {
-	header := http.Header{}
-	for k, v := range option.Headers {
-		header.Add(k, v)
-	}
-
-	config := &vmess.WebsocketConfig{
-		Host:                     option.Host,
-		Port:                     option.Port,
-		Path:                     option.Path,
-		V2rayHttpUpgrade:         option.V2rayHttpUpgrade,
-		V2rayHttpUpgradeFastOpen: option.V2rayHttpUpgradeFastOpen,
-		ECHConfig:                option.ECHConfig,
-		Headers:                  header,
-		ClientFingerprint:        option.ClientFingerprint,
-	}
-
-	var err error
-	if option.TLS {
-		serverName := option.ServerName
-		if serverName == "" {
-			serverName = header.Get("Host")
-			if serverName == "" {
-				serverName = option.Host
-			}
-		}
-		config.TLS = true
-		config.TLSConfig, err = ca.GetTLSConfig(ca.Option{
-			TLSConfig: &tls.Config{
-				ServerName:         serverName,
-				InsecureSkipVerify: option.SkipCertVerify,
-				NextProtos:         []string{"http/1.1"},
-			},
-			Fingerprint:    option.Fingerprint,
-			NameCertVerify: option.NameCertVerify,
-			Certificate:    option.Certificate,
-			PrivateKey:     option.PrivateKey,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if option.CAFile != "" {
-			config.TLSConfig.RootCAs, err = ca.LoadCertificates(option.CAFile)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if option.CAFile != "" && option.NameCertVerify != "" && option.Fingerprint == "" {
-			ca.SetNameCertVerify(config.TLSConfig, option.NameCertVerify)
-		}
-	}
-	return config, nil
 }

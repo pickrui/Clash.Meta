@@ -289,8 +289,7 @@ func InstallScriptPeerInfo(cipher string, dataCiphers []string, compLZO string, 
 	// AUTH_PENDING keyword support (bit 4). The parser supports
 	// AUTH_PENDING,timeout N, so capability and behavior must agree.
 	const ivProto = (1 << 1) | (1 << 2) | (1 << 4) // 22
-	var info strings.Builder
-	fmt.Fprintf(&info, "IV_VER=%s\nIV_PROTO=%d\n%sIV_CIPHERS=%s\n", ivVer, ivProto, lzo, ivCiphers)
+	info := fmt.Sprintf("IV_VER=%s\nIV_PROTO=%d\n%sIV_CIPHERS=%s\n", ivVer, ivProto, lzo, ivCiphers)
 	// Append user-defined peer-info entries (e.g. IV_HWADDR, UV_*) after the
 	// built-in fields. Keys are sorted so the output is deterministic.
 	keys := make([]string, 0, len(peerInfo))
@@ -307,9 +306,9 @@ func InstallScriptPeerInfo(cipher string, dataCiphers []string, compLZO string, 
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		fmt.Fprintf(&info, "%s=%s\n", key, peerInfo[key])
+		info += fmt.Sprintf("%s=%s\n", key, peerInfo[key])
 	}
-	return info.String()
+	return info
 }
 
 func appendOpenVPNString(out []byte, s string) []byte {

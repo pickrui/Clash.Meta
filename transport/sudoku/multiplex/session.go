@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/common/pool"
-	C "github.com/metacubex/mihomo/constant"
 )
 
 const (
@@ -41,7 +40,6 @@ const (
 )
 
 var errMuxReceiveQueueFull = errors.New("mux receive queue full")
-var errMuxStreamCloseTimeout = errors.New("mux stream close timeout")
 
 type acceptEvent struct {
 	stream  *stream
@@ -241,26 +239,15 @@ func (s *Session) sendQueued(frameType byte, streamID uint32, payload []byte) er
 	var header [headerSize]byte
 	putHeader(header[:], frameType, streamID, len(payload))
 
-	for {
-		s.pendMu.Lock()
-		if s.IsClosed() {
-			s.pendMu.Unlock()
-			return s.closedErr()
-		}
-		if s.pending == nil || s.pending.Len()+headerSize+len(payload) <= coalesceMaxPending {
-			if s.pending == nil {
-				s.pending = pool.GetBuffer()
-			}
-			s.pending.Write(header[:])
-			s.pending.Write(payload)
-			s.pendMu.Unlock()
-			return s.flushPending(false)
-		}
-		s.pendMu.Unlock()
-		if err := s.flushPending(true); err != nil {
-			return err
-		}
+	s.pendMu.Lock()
+	if s.pending == nil {
+		s.pending = pool.GetBuffer()
 	}
+	s.pending.Write(header[:])
+	s.pending.Write(payload)
+	full := s.pending.Len() >= coalesceMaxPending
+	s.pendMu.Unlock()
+	return s.flushPending(full)
 }
 
 // flushPending writes the pending batch. Unless wait is set it gives up when another
@@ -302,10 +289,10 @@ func (s *Session) writeBatch(header []byte) error {
 	case batch == nil && header == nil:
 		return nil
 	case batch == nil:
-		err = writeAllChunks(s.conn, header)
+		_, err = s.conn.Write(header)
 	default:
 		batch.Write(header)
-		err = writeAllChunks(s.conn, batch.Bytes())
+		_, err = s.conn.Write(batch.Bytes())
 		pool.PutBuffer(batch)
 	}
 	if err != nil {
@@ -324,7 +311,7 @@ func (s *Session) sendDirect(frameType byte, streamID uint32, payload []byte) er
 	s.writeMu.Lock()
 	err := s.writeBatch(header[:])
 	if err == nil {
-		if err = writeAllChunks(s.conn, payload); err != nil {
+		if _, err = s.conn.Write(payload); err != nil {
 			s.closeWithError(err)
 		}
 	}
@@ -344,7 +331,7 @@ func (s *Session) requestPong() {
 		return
 	}
 	go func() {
-		defer s.pongPending.Store(false)
+		s.pongPending.Store(false)
 		_ = s.sendFrame(framePong, 0, nil)
 	}()
 }
@@ -550,9 +537,8 @@ func trimASCII(b []byte) string {
 }
 
 type stream struct {
-	closeOnce sync.Once
-	session   *Session
-	id        uint32
+	session *Session
+	id      uint32
 
 	writeMu sync.Mutex
 
@@ -679,21 +665,19 @@ func (c *stream) Write(p []byte) (int, error) {
 		return 0, c.session.closedErr()
 	}
 
+	c.mu.Lock()
+	closed := c.closed
+	writeClosed := c.localWriteClosed
+	c.mu.Unlock()
+	if closed {
+		return 0, c.closedErr()
+	}
+	if writeClosed {
+		return 0, io.ErrClosedPipe
+	}
+
 	written := 0
 	for len(p) > 0 {
-		// RESET can arrive while a previous DATA frame is being written.
-		// Recheck before every frame so unsent bytes are not reported as sent.
-		c.mu.Lock()
-		var err error
-		if c.closed {
-			err = c.closedErrLocked()
-		} else if c.localWriteClosed {
-			err = io.ErrClosedPipe
-		}
-		c.mu.Unlock()
-		if err != nil {
-			return written, err
-		}
 		chunk := p
 		if len(chunk) > maxDataPayload {
 			chunk = p[:maxDataPayload]
@@ -707,67 +691,40 @@ func (c *stream) Write(p []byte) (int, error) {
 	return written, nil
 }
 
-func (s *Session) startStreamCloseBudget() func() {
-	var finished sync.Once
-	timer := time.AfterFunc(C.DefaultTCPTimeout, func() {
-		finished.Do(func() { s.closeWithError(errMuxStreamCloseTimeout) })
-	})
-	return func() {
-		finished.Do(func() {})
-		timer.Stop()
-	}
-}
-
 func (c *stream) Close() error {
-	c.closeOnce.Do(func() {
-		c.mu.Lock()
-		// A reset preserves unread bytes until the caller reads or closes the stream.
-		sendClose := !c.closed && !c.localWriteClosed
-		c.closed = true
-		c.localReadClosed = true
-		c.localWriteClosed = true
-		if c.closeErr == nil {
-			c.closeErr = io.ErrClosedPipe
-		}
-		c.readBuf = nil
-		c.queue = nil
-		c.queuedBytes = 0
-		c.cond.Broadcast()
-		c.mu.Unlock()
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 
-		locked := c.writeMu.TryLock()
-		var finish func()
-		if c.session != nil && !c.session.IsClosed() && (sendClose || !locked) {
-			// A partially written frame cannot be canceled without closing its session.
-			finish = c.session.startStreamCloseBudget()
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	sendClose := !c.localWriteClosed
+	c.closed = true
+	c.localReadClosed = true
+	c.localWriteClosed = true
+	if c.closeErr == nil {
+		c.closeErr = io.ErrClosedPipe
+	}
+	c.readBuf = nil
+	c.queue = nil
+	c.queuedBytes = 0
+	c.cond.Broadcast()
+	c.mu.Unlock()
+
+	if c.session != nil {
+		if sendClose {
+			_ = c.session.sendFrame(frameClose, c.id, nil)
 		}
-		if !locked {
-			c.writeMu.Lock()
-		}
-		defer c.writeMu.Unlock()
-		if finish != nil {
-			defer finish()
-		}
-		if c.session != nil {
-			if sendClose {
-				_ = c.session.sendFrame(frameClose, c.id, nil)
-			}
-			c.session.removeStream(c.id)
-		}
-	})
+		c.session.removeStream(c.id)
+	}
 	return nil
 }
 
 func (c *stream) CloseWrite() error {
-	var finish func()
-	if c.session != nil && !c.session.IsClosed() {
-		finish = c.session.startStreamCloseBudget()
-	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	if finish != nil {
-		defer finish()
-	}
 
 	c.mu.Lock()
 	if c.closed || c.localWriteClosed {

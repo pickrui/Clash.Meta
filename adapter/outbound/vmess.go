@@ -536,20 +536,6 @@ func NewVmess(option VmessOption) (*Vmess, error) {
 	if err != nil {
 		return nil, err
 	}
-	if v.restlsConfig != nil {
-		if !option.TLS {
-			return nil, errors.New("Restls requires TLS")
-		}
-		if v.realityConfig != nil {
-			return nil, errors.New("Restls is incompatible with REALITY")
-		}
-		if option.ECHOpts.Enable {
-			return nil, errors.New("Restls does not support ECH")
-		}
-		if option.Certificate != "" || option.PrivateKey != "" {
-			return nil, errors.New("Restls does not support client certificates")
-		}
-	}
 	securityModes := make([]string, 0, 5)
 	if v.shadowTLSConfig != nil {
 		securityModes = append(securityModes, "ShadowTLS")

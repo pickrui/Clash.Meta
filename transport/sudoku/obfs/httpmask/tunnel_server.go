@@ -469,62 +469,43 @@ func (p *preBufferedConn) Read(b []byte) (int, error) {
 
 type bodyConn struct {
 	net.Conn
-	reader  io.Reader
-	writeMu sync.Mutex
-	writer  io.WriteCloser
-	tail    io.Writer
-	flush   func() error
+	reader io.Reader
+	writer io.WriteCloser
+	tail   io.Writer
+	flush  func() error
 }
 
 func (c *bodyConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
 func (c *bodyConn) Write(p []byte) (int, error) {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	if c.writer == nil {
-		return 0, io.ErrClosedPipe
-	}
 	n, err := c.writer.Write(p)
 	if c.flush != nil {
-		if flushErr := c.flush(); err == nil {
-			err = flushErr
-		}
+		_ = c.flush()
 	}
 	return n, err
-}
-
-func (c *bodyConn) closeWriterLocked() error {
-	writer := c.writer
-	if writer == nil {
-		return nil
-	}
-	c.writer = nil
-	firstErr := writer.Close()
-	// NewChunkedWriter does not write the final CRLF. Ensure a clean terminator.
-	tail := c.tail
-	if tail == nil {
-		tail = c.Conn
-	}
-	if tail != nil {
-		if _, err := tail.Write([]byte("\r\n")); firstErr == nil {
-			firstErr = err
-		}
-	}
-	if c.flush != nil {
-		if err := c.flush(); firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
 }
 
 func (c *bodyConn) CloseWrite() error {
 	if c == nil {
 		return nil
 	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
 
-	firstErr := c.closeWriterLocked()
+	var firstErr error
+	if c.writer != nil {
+		if err := c.writer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		// NewChunkedWriter does not write the final CRLF. Ensure a clean terminator.
+		if c.tail != nil {
+			_, _ = c.tail.Write([]byte("\r\n"))
+		} else if c.Conn != nil {
+			_, _ = c.Conn.Write([]byte("\r\n"))
+		}
+		if c.flush != nil {
+			_ = c.flush()
+		}
+		c.writer = nil
+	}
+
 	if c.Conn != nil {
 		if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
 			if err := cw.CloseWrite(); err != nil && firstErr == nil {
@@ -546,17 +527,21 @@ func (c *bodyConn) CloseRead() error {
 }
 
 func (c *bodyConn) Close() error {
-	if !c.writeMu.TryLock() {
-		_ = c.Conn.SetWriteDeadline(time.Now())
-		err := c.Conn.Close()
-		c.writeMu.Lock()
-		c.writer = nil
-		c.writeMu.Unlock()
-		return err
+	var firstErr error
+	if c.writer != nil {
+		if err := c.writer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		// NewChunkedWriter does not write the final CRLF. Ensure a clean terminator.
+		if c.tail != nil {
+			_, _ = c.tail.Write([]byte("\r\n"))
+		} else {
+			_, _ = c.Conn.Write([]byte("\r\n"))
+		}
+		if c.flush != nil {
+			_ = c.flush()
+		}
 	}
-	defer c.writeMu.Unlock()
-
-	firstErr := c.closeWriterLocked()
 	if err := c.Conn.Close(); err != nil && firstErr == nil {
 		firstErr = err
 	}
@@ -841,19 +826,28 @@ func (s *TunnelServer) reap(token string, sess *tunnelSession) {
 // reapIfIdle closes sess once it has been idle for the TTL with no active pull,
 // otherwise it returns how long to wait before checking again.
 func (s *TunnelServer) reapIfIdle(token string, sess *tunnelSession) (next time.Duration, done bool) {
-	sess.pullMu.Lock()
 	s.mu.Lock()
 	if s.sessions[token] != sess {
 		s.mu.Unlock()
-		sess.pullMu.Unlock()
 		return 0, true
 	}
 	idle := time.Since(sess.lastActive)
+	s.mu.Unlock()
+
+	// Pull ownership has its own lock. Do not take it while holding s.mu:
+	// pull takeover validates the session while holding pullMu.
+	sess.pullMu.Lock()
 	pulling := sess.pull != nil
+	sess.pullMu.Unlock()
+
+	s.mu.Lock()
+	if s.sessions[token] != sess {
+		s.mu.Unlock()
+		return 0, true
+	}
 	if idle >= s.sessionTTL && !pulling {
 		delete(s.sessions, token)
 		s.mu.Unlock()
-		sess.pullMu.Unlock()
 		sess.shutdown()
 		return 0, true
 	}
@@ -862,7 +856,6 @@ func (s *TunnelServer) reapIfIdle(token string, sess *tunnelSession) (next time.
 		next = s.sessionTTL
 	}
 	s.mu.Unlock()
-	sess.pullMu.Unlock()
 	return next, false
 }
 

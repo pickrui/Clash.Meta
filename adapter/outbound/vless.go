@@ -533,23 +533,6 @@ func NewVless(option VlessOption) (*Vless, error) {
 	if err != nil {
 		return nil, err
 	}
-	if v.restlsConfig != nil {
-		if addons != nil {
-			return nil, errors.New("Restls does not support XTLS Vision")
-		}
-		if !option.TLS {
-			return nil, errors.New("Restls requires TLS")
-		}
-		if v.realityConfig != nil {
-			return nil, errors.New("Restls is incompatible with REALITY")
-		}
-		if option.ECHOpts.Enable {
-			return nil, errors.New("Restls does not support ECH")
-		}
-		if option.Certificate != "" || option.PrivateKey != "" {
-			return nil, errors.New("Restls does not support client certificates")
-		}
-	}
 	securityModes := make([]string, 0, 4)
 	if v.shadowTLSConfig != nil {
 		securityModes = append(securityModes, "ShadowTLS")
@@ -764,10 +747,12 @@ func NewVless(option VlessOption) (*Vless, error) {
 					return nil, err
 				}
 			}
-			downloadRestlsOpts := lo.FromPtrOr(ds.RestlsOpts, v.option.RestlsOpts)
-			downloadRestlsConfig, err := downloadRestlsOpts.Parse(downloadServerName, downloadClientFingerprint)
-			if err != nil {
-				return nil, fmt.Errorf("xhttp download-settings: %w", err)
+			downloadRestlsConfig := v.restlsConfig
+			if ds.RestlsOpts != nil {
+				downloadRestlsConfig, err = ds.RestlsOpts.Parse(downloadServerName, downloadClientFingerprint)
+				if err != nil {
+					return nil, err
+				}
 			}
 			downloadJLSConfig := v.jlsConfig
 			if ds.JLSOpts != nil {
@@ -781,20 +766,6 @@ func NewVless(option VlessOption) (*Vless, error) {
 				downloadRealityCfg, err = ds.RealityOpts.Parse()
 				if err != nil {
 					return nil, err
-				}
-			}
-			if downloadRestlsConfig != nil {
-				if !downloadTLS {
-					return nil, errors.New("xhttp download-settings: Restls requires TLS")
-				}
-				if downloadRealityCfg != nil {
-					return nil, errors.New("xhttp download-settings: Restls is incompatible with REALITY")
-				}
-				if downloadEchConfig != nil {
-					return nil, errors.New("xhttp download-settings: Restls does not support ECH")
-				}
-				if downloadCertificate != "" || downloadPrivateKey != "" {
-					return nil, errors.New("xhttp download-settings: Restls does not support client certificates")
 				}
 			}
 			downloadSecurityModes := make([]string, 0, 4)

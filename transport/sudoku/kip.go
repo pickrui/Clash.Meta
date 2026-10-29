@@ -74,7 +74,8 @@ func WriteKIPMessage(w io.Writer, typ byte, payload []byte) error {
 	binary.BigEndian.PutUint16(buf[4:], uint16(len(payload)))
 	copy(buf[kipHeaderSize:], payload)
 
-	return writeFull(w, buf)
+	_, err := w.Write(buf)
+	return err
 }
 
 func ReadKIPMessage(r io.Reader) (*KIPMessage, error) {
@@ -253,18 +254,4 @@ func DecodeKIPServerHelloPayload(payload []byte) (*KIPServerHello, error) {
 	off += kipHelloPubSize
 	h.SelectedFeats = binary.BigEndian.Uint32(payload[off : off+4])
 	return &h, nil
-}
-
-func writeFull(w io.Writer, b []byte) error {
-	for len(b) > 0 {
-		n, err := w.Write(b)
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
-		b = b[n:]
-	}
-	return nil
 }

@@ -133,14 +133,13 @@ func parseEarlyDataQuery(query url.Values) ([]byte, error) {
 }
 
 type sessionDialInfo struct {
-	earlyHandshake *ClientEarlyHandshake
-	client         *http.Client
-	owner          *tunnelHTTPTransport
-	pushURL        string
-	pullURL        string
-	finURL         string
-	closeURL       string
-	headerHost     string
+	client     *http.Client
+	owner      *tunnelHTTPTransport
+	pushURL    string
+	pullURL    string
+	finURL     string
+	closeURL   string
+	headerHost string
 }
 
 // uploadURL puts the sequence ahead of pushURL's query, where encoding the sorted keys has always placed it.
@@ -272,46 +271,38 @@ func dialSessionWithClient(ctx context.Context, client *http.Client, dialer *pre
 	}
 	headerHost := target.headerHost
 	scheme, urlHost := target.scheme, target.urlHost
+	var err error
+
 	authorizeURL := (&url.URL{Scheme: scheme, Host: urlHost, Path: joinPathRoot(opts.PathRoot, "/session")}).String()
+	if opts.EarlyHandshake != nil && len(opts.EarlyHandshake.RequestPayload) > 0 {
+		authorizeURL, err = setEarlyDataQuery(authorizeURL, opts.EarlyHandshake.RequestPayload)
+		if err != nil {
+			return nil, err
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, authorizeURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Host = headerHost
+	applyTunnelHeaders(req.Header, headerHost, mode)
+
+	// Overlap authorization, initial pull, and initial push connection handshakes.
+	// Keeping this to three avoids adding an extra WAN RTT before mux can open
+	// its first logical stream.
 	if dialer != nil {
 		cancelPreconnect := dialer.preconnect(ctx, scheme == "https", preconnectCount)
 		defer cancelPreconnect()
 	}
 
-	var bodyBytes []byte
-	var earlyHandshake *ClientEarlyHandshake
+	var resp *http.Response
 	backoff := 50 * time.Millisecond
-	for attempt := 0; ; attempt++ {
-		var err error
-		earlyHandshake, err = opts.newEarlyHandshake()
-		if err != nil {
-			return nil, err
-		}
-		attemptURL := authorizeURL
-		if earlyHandshake != nil && len(earlyHandshake.RequestPayload) > 0 {
-			attemptURL, err = setEarlyDataQuery(attemptURL, earlyHandshake.RequestPayload)
-			if err != nil {
-				return nil, err
-			}
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, attemptURL, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Host = headerHost
-		applyTunnelHeaders(req.Header, headerHost, mode)
-		resp, err := client.Do(req)
-		if err == nil {
-			bodyBytes, err = io.ReadAll(io.LimitReader(resp.Body, 4*1024))
-			_ = resp.Body.Close()
-			if err == nil && resp.StatusCode != http.StatusOK {
-				err = fmt.Errorf("%s authorize bad status: %w", mode, statusError(resp))
-			}
-		}
+	for attempt := 0; attempt < 3; attempt++ {
+		resp, err = client.Do(req)
 		if err == nil {
 			break
 		}
-		if attempt == 2 || !(isDialError(err) || isRetryableHTTPTransportError(err)) {
+		if attempt == 2 || !isRetryableHTTPTransportError(err) {
 			return nil, err
 		}
 		closeIdleConnections(client)
@@ -319,6 +310,25 @@ func dialSessionWithClient(ctx context.Context, client *http.Client, dialer *pre
 			return nil, retryErr
 		}
 		backoff = nextBackoff(backoff, 50*time.Millisecond, 500*time.Millisecond)
+		// A request with a consumed transport connection must be rebuilt before
+		// retrying; GET authorization is idempotent.
+		req, err = http.NewRequestWithContext(ctx, http.MethodGet, authorizeURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Host = headerHost
+		applyTunnelHeaders(req.Header, headerHost, mode)
+	}
+	if resp == nil {
+		return nil, errors.New("httpmask: authorization returned no response")
+	}
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
+	_ = resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s authorize bad status: %s (%s)", mode, resp.Status, strings.TrimSpace(string(bodyBytes)))
 	}
 
 	authResp, err := parseAuthorizeResponse(bodyBytes)
@@ -329,8 +339,8 @@ func dialSessionWithClient(ctx context.Context, client *http.Client, dialer *pre
 	if token == "" {
 		return nil, fmt.Errorf("%s authorize empty token", mode)
 	}
-	if earlyHandshake != nil && len(authResp.earlyPayload) > 0 && earlyHandshake.HandleResponse != nil {
-		if err := earlyHandshake.HandleResponse(authResp.earlyPayload); err != nil {
+	if opts.EarlyHandshake != nil && len(authResp.earlyPayload) > 0 && opts.EarlyHandshake.HandleResponse != nil {
+		if err := opts.EarlyHandshake.HandleResponse(authResp.earlyPayload); err != nil {
 			return nil, err
 		}
 	}
@@ -340,13 +350,12 @@ func dialSessionWithClient(ctx context.Context, client *http.Client, dialer *pre
 	finURL := (&url.URL{Scheme: scheme, Host: urlHost, Path: joinPathRoot(opts.PathRoot, "/api/v1/upload"), RawQuery: "token=" + url.QueryEscape(token) + "&fin=1"}).String()
 	closeURL := (&url.URL{Scheme: scheme, Host: urlHost, Path: joinPathRoot(opts.PathRoot, "/api/v1/upload"), RawQuery: "token=" + url.QueryEscape(token) + "&close=1"}).String()
 	return &sessionDialInfo{
-		earlyHandshake: earlyHandshake,
-		client:         client,
-		pushURL:        pushURL,
-		pullURL:        pullURL,
-		finURL:         finURL,
-		closeURL:       closeURL,
-		headerHost:     headerHost,
+		client:     client,
+		pushURL:    pushURL,
+		pullURL:    pullURL,
+		finURL:     finURL,
+		closeURL:   closeURL,
+		headerHost: headerHost,
 	}, nil
 }
 

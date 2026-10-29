@@ -87,29 +87,18 @@ func StreamTLSConn(ctx context.Context, conn net.Conn, cfg *TLSConfig) (net.Conn
 		})
 	}
 	if cfg.Restls != nil {
-		if cfg.Reality != nil || cfg.ECH != nil || cfg.Certificate != "" || cfg.PrivateKey != "" {
-			return nil, errors.New("Restls does not support REALITY, ECH or client certificates")
-		}
-		config := cfg.Restls.Clone()
-		config.ServerName = cfg.Host
-		config.NextProtos = cfg.NextProtos
-		config.InsecureSkipVerify = cfg.SkipCertVerify
-		if cfg.CAFile != "" {
-			pool, err := ca.LoadCertificates(cfg.CAFile)
-			if err != nil {
-				return nil, err
-			}
-			config.RootCAs = pool
-		}
+		restlsConfig := cfg.Restls.Clone()
+		restlsConfig.ServerName = cfg.Host
+		restlsConfig.NextProtos = cfg.NextProtos
+		restlsConfig.InsecureSkipVerify = cfg.SkipCertVerify
 		if cfg.FingerPrint != "" {
-			if err := restls.SetFingerprint(config, cfg.FingerPrint, cfg.NameCertVerify); err != nil {
+			if err := restls.SetFingerprint(restlsConfig, cfg.FingerPrint, cfg.NameCertVerify); err != nil {
 				return nil, err
 			}
+		} else if cfg.NameCertVerify != "" {
+			restls.SetNameCertVerify(restlsConfig, cfg.NameCertVerify)
 		}
-		if cfg.FingerPrint == "" && cfg.NameCertVerify != "" {
-			restls.SetNameCertVerify(config, cfg.NameCertVerify)
-		}
-		return restls.NewRestls(ctx, conn, config)
+		return restls.NewRestls(ctx, conn, restlsConfig)
 	}
 	if cfg.JLS != nil {
 		return jls.NewClient(ctx, conn, &jls.ClientConfig{
@@ -177,7 +166,6 @@ func StreamTLSConn(ctx context.Context, conn net.Conn, cfg *TLSConfig) (net.Conn
 		return nil, err
 	}
 
-	tlsConfig.ClientSessionCache = sharedTLSSessions.forConfig(cfg, tlsConfig, conn.RemoteAddr())
 	tlsConn := tls.Client(conn, tlsConfig)
 
 	err = tlsConn.HandshakeContext(ctx)

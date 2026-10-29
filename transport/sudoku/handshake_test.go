@@ -323,20 +323,33 @@ func readTestDatagram(r io.Reader) (string, []byte, error) {
 	return addr.String(), payload, nil
 }
 
-func TestUoTDatagramRoundTripAndLimits(t *testing.T) {
+type countingWriter struct {
+	writes int
+	bytes.Buffer
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.writes++
+	return w.Buffer.Write(p)
+}
+
+func TestUoTDatagramIsOneWrite(t *testing.T) {
 	for _, target := range []string{"8.8.8.8:53", "[2001:db8::1]:443", "example.com:80"} {
-		var w bytes.Buffer
+		var w countingWriter
 		payload := bytes.Repeat([]byte{0x5a}, 1200)
 		if err := WriteDatagram(&w, target, payload); err != nil {
 			t.Fatalf("%s: write datagram: %v", target, err)
 		}
-		addr, got, err := readTestDatagram(&w)
+		if w.writes != 1 {
+			t.Fatalf("%s: datagram took %d writes, want 1", target, w.writes)
+		}
+		addr, got, err := readTestDatagram(&w.Buffer)
 		if err != nil || addr != target || !bytes.Equal(got, payload) {
 			t.Fatalf("%s: round trip got %q %d bytes, %v", target, addr, len(got), err)
 		}
 	}
 
-	var w bytes.Buffer
+	var w countingWriter
 	if err := WriteDatagram(&w, "8.8.8.8:53", make([]byte, 65535)); err != nil {
 		t.Fatalf("largest payload: %v", err)
 	}

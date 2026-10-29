@@ -1,7 +1,6 @@
 package inbound
 
 import (
-	"github.com/metacubex/mihomo/listener/restls"
 	"strings"
 
 	C "github.com/metacubex/mihomo/constant"
@@ -53,11 +52,6 @@ type Trojan struct {
 }
 
 func NewTrojan(options *TrojanOption) (*Trojan, error) {
-	if options.ResTLS.Enable {
-		if err := restls.Validate(options.ResTLS.Build()); err != nil {
-			return nil, err
-		}
-	}
 	base, err := NewBase(&options.BaseOption)
 	if err != nil {
 		return nil, err
@@ -119,7 +113,6 @@ func (v *Trojan) Listen(tunnel C.Tunnel) error {
 	var err error
 	v.l, err = trojan.New(v.vs, v.ListenConfig(), tunnel, v.Additions()...)
 	if err != nil {
-		v.l = nil
 		return err
 	}
 	log.Infoln("Trojan[%s] proxy listening at: %s", v.Name(), v.Address())
@@ -128,9 +121,6 @@ func (v *Trojan) Listen(tunnel C.Tunnel) error {
 
 // Close implements constant.InboundListener
 func (v *Trojan) Close() error {
-	if v.l == nil {
-		return nil
-	}
 	return v.l.Close()
 }
 

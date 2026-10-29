@@ -212,7 +212,7 @@ func (pc *PackedConn) Write(p []byte) (int, error) {
 		// Reserve room for the final two bytes, residual marker and trailing pad.
 		count := minInt((cap(out)-len(out)-8)/blockSize*3, end-i)
 		if count == 0 {
-			if err := writeFull(pc.Conn, out); err != nil {
+			if _, err := pc.Conn.Write(out); err != nil {
 				return written, err
 			}
 			written = i
@@ -238,7 +238,7 @@ func (pc *PackedConn) Write(p []byte) (int, error) {
 
 	out = maybeAppendPackedPadding(out, rng, paddingThreshold, padPool)
 
-	if err := writeFull(pc.Conn, out); err != nil {
+	if _, err := pc.Conn.Write(out); err != nil {
 		return written, err
 	}
 	return len(p), nil
@@ -266,7 +266,8 @@ func (pc *PackedConn) Flush() error {
 
 	if len(out) > 0 {
 		pc.writeBuf = out[:0]
-		return writeFull(pc.Conn, out)
+		_, err := pc.Conn.Write(out)
+		return err
 	}
 	return nil
 }
