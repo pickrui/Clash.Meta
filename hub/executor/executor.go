@@ -111,7 +111,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	//updateListeners(cfg.General, cfg.Listeners, force)
 	//updateTun(cfg.General) // tun should not care "force"
 	updateIPTables(cfg)
-	updateTunnels(cfg.Tunnels)
+	//updateTunnels(cfg.Tunnels) // inbounds start with the proxy, like listeners
 
 	tunnel.OnInnerLoading()
 
