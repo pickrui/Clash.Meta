@@ -138,13 +138,14 @@ func (f *Fallback) Set(name string) error {
 		return errors.New("proxy not exist")
 	}
 
-	f.selected.Store(name)
+	// Probe before storing: a lookup meanwhile would drop a still-dead selection.
 	if !p.AliveForTestUrl(f.testUrl) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*time.Duration(5000))
 		defer cancel()
 		expectedStatus, _ := utils.NewUnsignedRanges[uint16](f.expectedStatus)
 		_, _ = p.URLTest(ctx, f.testUrl, expectedStatus)
 	}
+	f.selected.Store(name)
 
 	return nil
 }
