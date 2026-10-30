@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/metacubex/mihomo/adapter/inbound"
 	"github.com/metacubex/mihomo/adapter/outbound"
 	"github.com/metacubex/mihomo/component/fakeip"
 	"github.com/metacubex/mihomo/component/resolver"
@@ -214,5 +215,52 @@ func TestDNSInstallWrapsProxyServerResolverBeforeProvidersLoad(t *testing.T) {
 	updateDNS(&config.DNS{Enable: true, NameServer: servers, ProxyServerNameserver: servers}, true)
 	if _, ok := resolver.ProxyServerHostResolver.Load().(*wrapped); !ok {
 		t.Fatalf("proxy-server resolver = %T, want the installed wrapper", resolver.ProxyServerHostResolver.Load())
+	}
+}
+
+func TestApplyKeepsTheAppsDNSListenerServing(t *testing.T) {
+	keepDNSGlobals(t)
+	probe, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := probe.LocalAddr().String()
+	probe.Close()
+	ask := func() (int, error) {
+		query := new(D.Msg)
+		query.SetQuestion("apply.test.", D.TypeA)
+		reply, _, err := (&D.Client{Net: "udp", Timeout: time.Second}).Exchange(query, addr)
+		if err != nil {
+			return 0, err
+		}
+		return reply.Rcode, nil
+	}
+	answering := func(rcode string) *config.DNS {
+		servers := []dns.NameServer{{Net: "rcode", Addr: rcode}}
+		return &config.DNS{Enable: true, Listen: addr, NameServer: servers, ProxyServerNameserver: servers, DirectNameServer: servers}
+	}
+
+	updateDNS(answering("refused"), true)
+	if _, err := ask(); err == nil {
+		t.Fatal("an apply opened the listener the app had not started")
+	}
+	// What the app does when the proxy starts.
+	dns.ReCreateServer(addr, inbound.NewListenConfig(), resolver.DefaultService.Load())
+	if rcode, err := ask(); err != nil || rcode != D.RcodeRefused {
+		t.Fatalf("started listener answered %d, %v", rcode, err)
+	}
+
+	updateDNS(answering("success"), true)
+	if rcode, err := ask(); err != nil || rcode != D.RcodeSuccess {
+		t.Fatalf("after an apply the listener answered %d, %v; want the new service", rcode, err)
+	}
+
+	moved := answering("success")
+	moved.Listen = "127.0.0.1:0"
+	updateDNS(moved, true)
+	if rebound, err := net.ListenPacket("udp", addr); err != nil {
+		t.Fatalf("an apply that moved the listener kept the old port: %v", err)
+	} else {
+		rebound.Close()
 	}
 }

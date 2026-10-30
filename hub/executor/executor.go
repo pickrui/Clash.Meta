@@ -339,7 +339,9 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 	lc.SetRouteMark(c.ListenRoutingMark)
 	// Rule matching and proxy dials may still be waiting on the replaced resolvers.
 	dnsRetireAfter(resolver.DefaultDNSTimeout, func() { resolver.CloseQueries(retired...) })
-	dns.ReCreateServer(c.Listen, lc, s)
+	// The embedding app opens the listener with its other inbounds; an apply
+	// only hands a running listener the new service.
+	dns.ReplaceServerService(c.Listen, s)
 }
 
 func updateHosts(tree *trie.DomainTrie[resolver.HostValue]) {
