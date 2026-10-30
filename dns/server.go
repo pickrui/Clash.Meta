@@ -3,7 +3,9 @@ package dns
 import (
 	"context"
 	"net"
+	"sync"
 
+	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/sockopt"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
@@ -13,14 +15,17 @@ import (
 )
 
 var (
-	address string
-	server  = &Server{}
+	// Guards address and server: the app and the external controller both
+	// replace the listener.
+	serverMux sync.Mutex
+	address   string
+	server    = &Server{}
 
 	dnsDefaultTTL uint32 = 600
 )
 
 type Server struct {
-	service   resolver.Service
+	service   atomic.TypedValue[resolver.Service]
 	tcpServer *D.Server
 	udpServer *D.Server
 }
@@ -32,7 +37,7 @@ type serverHandler struct {
 
 // ServeDNS implement D.Handler ServeDNS
 func (s serverHandler) ServeDNS(w D.ResponseWriter, r *D.Msg) {
-	msg, err := s.service.ServeMsg(context.Background(), r)
+	msg, err := s.service.Load().ServeMsg(context.Background(), r)
 	if err != nil {
 		m := new(D.Msg)
 		m.SetRcode(r, D.RcodeServerFailure)
@@ -58,27 +63,18 @@ func (s *Server) TCPHandler() D.Handler {
 }
 
 func (s *Server) SetService(service resolver.Service) {
-	s.service = service
+	s.service.Store(service)
 }
 
 func ReCreateServer(addr string, lc C.InboundListenConfig, service resolver.Service) {
+	serverMux.Lock()
+	defer serverMux.Unlock()
 	if addr == address && service != nil {
 		server.SetService(service)
 		return
 	}
 
-	if server.tcpServer != nil {
-		_ = server.tcpServer.Shutdown()
-		server.tcpServer = nil
-	}
-
-	if server.udpServer != nil {
-		_ = server.udpServer.Shutdown()
-		server.udpServer = nil
-	}
-
-	server.service = nil
-	address = ""
+	closeServerLocked()
 
 	if addr == "" || lc == nil || service == nil {
 		return
@@ -96,35 +92,68 @@ func ReCreateServer(addr string, lc C.InboundListenConfig, service resolver.Serv
 		return
 	}
 
-	address = addr
-	server = &Server{service: service}
+	next := &Server{}
+	next.SetService(service)
+	server = next
 
-	go func() {
-		p, err := lc.ListenPacket(context.Background(), "udp", addr)
-		if err != nil {
-			log.Errorln("Start DNS server(UDP) error: %s", err.Error())
-			return
-		}
-
+	// Bind before returning so a later call always finds the sockets to close.
+	p, udpErr := lc.ListenPacket(context.Background(), "udp", addr)
+	if udpErr != nil {
+		log.Errorln("Start DNS server(UDP) error: %s", udpErr.Error())
+	} else {
 		if err := sockopt.UDPReuseaddr(p); err != nil {
 			log.Warnln("Failed to Reuse UDP Address: %s", err)
 		}
 
 		log.Infoln("DNS server(UDP) listening at: %s", p.LocalAddr().String())
-		server.udpServer = &D.Server{Addr: addr, PacketConn: p, Handler: server.UDPHandler()}
-		_ = server.udpServer.ActivateAndServe()
-	}()
+		next.udpServer = &D.Server{Addr: addr, PacketConn: p, Handler: next.UDPHandler()}
+		go func(udpServer *D.Server) { _ = udpServer.ActivateAndServe() }(next.udpServer)
+	}
 
-	go func() {
-		l, err := lc.Listen(context.Background(), "tcp", addr)
-		if err != nil {
-			log.Errorln("Start DNS server(TCP) error: %s", err.Error())
-			return
-		}
-
+	l, tcpErr := lc.Listen(context.Background(), "tcp", addr)
+	if tcpErr != nil {
+		log.Errorln("Start DNS server(TCP) error: %s", tcpErr.Error())
+	} else {
 		log.Infoln("DNS server(TCP) listening at: %s", l.Addr().String())
-		server.tcpServer = &D.Server{Addr: addr, Listener: l, Handler: server.TCPHandler()}
-		_ = server.tcpServer.ActivateAndServe()
-	}()
+		next.tcpServer = &D.Server{Addr: addr, Listener: l, Handler: next.TCPHandler()}
+		go func(tcpServer *D.Server) { _ = tcpServer.ActivateAndServe() }(next.tcpServer)
+	}
 
+	// An address nothing serves would make the next call skip the retry.
+	if next.udpServer != nil || next.tcpServer != nil {
+		address = addr
+	}
+}
+
+// ReplaceServerService hands a listener already serving addr the new service
+// and closes one serving another address; it never opens a listener.
+func ReplaceServerService(addr string, service resolver.Service) {
+	serverMux.Lock()
+	defer serverMux.Unlock()
+	if address != "" && addr == address && service != nil {
+		server.SetService(service)
+		return
+	}
+	closeServerLocked()
+}
+
+// closeServerLocked frees the ports at once; queries in flight finish on the
+// old service in the background instead of holding the caller.
+func closeServerLocked() {
+	for _, old := range []*D.Server{server.udpServer, server.tcpServer} {
+		if old == nil {
+			continue
+		}
+		if old.PacketConn != nil {
+			_ = old.PacketConn.Close()
+		}
+		if old.Listener != nil {
+			_ = old.Listener.Close()
+		}
+		// Shutdown also ends open TCP connections. It refuses a server whose
+		// loop has not started, which the closed sockets end on their own.
+		go func() { _ = old.Shutdown() }()
+	}
+	server = &Server{}
+	address = ""
 }
