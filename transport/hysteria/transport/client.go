@@ -20,22 +20,18 @@ type ClientTransport struct{}
 func (ct *ClientTransport) quicPacketConn(proto string, rAddr net.Addr, serverPorts string, obfs obfsPkg.Obfuscator, hopInterval time.Duration, dialer utils.PacketDialer) (net.PacketConn, error) {
 	server := rAddr.String()
 	if len(proto) == 0 || proto == "udp" {
+		// Port hopping opens its own sockets.
+		if serverPorts != "" {
+			return udp.NewObfsUDPHopClientPacketConn(server, serverPorts, hopInterval, obfs, dialer)
+		}
 		conn, err := dialer.ListenPacket(rAddr)
 		if err != nil {
 			return nil, err
 		}
 		if obfs != nil {
-			if serverPorts != "" {
-				return udp.NewObfsUDPHopClientPacketConn(server, serverPorts, hopInterval, obfs, dialer)
-			}
-			oc := udp.NewObfsUDPConn(conn, obfs)
-			return oc, nil
-		} else {
-			if serverPorts != "" {
-				return udp.NewObfsUDPHopClientPacketConn(server, serverPorts, hopInterval, nil, dialer)
-			}
-			return conn, nil
+			return udp.NewObfsUDPConn(conn, obfs), nil
 		}
+		return conn, nil
 	} else if proto == "wechat-video" {
 		conn, err := dialer.ListenPacket(rAddr)
 		if err != nil {
