@@ -95,8 +95,14 @@ func (c *Client) connectToServer(dialer utils.PacketDialer) error {
 		return fmt.Errorf("auth error: %s", msg)
 	}
 	// All good
-	c.udpSessionMap = make(map[uint32]chan *udpMessage)
-	go c.handleMessage(qs)
+	if c.quicSession != nil {
+		_ = c.quicSession.CloseWithError(closeErrorCodeGeneric, "")
+	}
+	sessionMap := make(map[uint32]chan *udpMessage)
+	c.udpSessionMutex.Lock()
+	c.udpSessionMap = sessionMap
+	c.udpSessionMutex.Unlock()
+	go c.handleMessage(qs, sessionMap)
 	c.quicSession = qs
 	return nil
 }
@@ -123,7 +129,9 @@ func (c *Client) handleControlStream(qs *quic.Conn, stream *quic.Stream) (bool, 
 	return sh.OK, sh.Message, nil
 }
 
-func (c *Client) handleMessage(qs *quic.Conn) {
+// Each session delivers into its own map: the server numbers UDP sessions per
+// connection, so another session's IDs would collide.
+func (c *Client) handleMessage(qs *quic.Conn, sessionMap map[uint32]chan *udpMessage) {
 	for {
 		msg, err := qs.ReceiveDatagram(context.Background())
 		if err != nil {
@@ -139,7 +147,7 @@ func (c *Client) handleMessage(qs *quic.Conn) {
 			continue
 		}
 		c.udpSessionMutex.RLock()
-		ch, ok := c.udpSessionMap[dfMsg.SessionID]
+		ch, ok := sessionMap[dfMsg.SessionID]
 		if ok {
 			select {
 			case ch <- dfMsg:
@@ -152,40 +160,44 @@ func (c *Client) handleMessage(qs *quic.Conn) {
 	}
 }
 
-func (c *Client) openStreamWithReconnect(dialer utils.PacketDialer) (*quic.Conn, *wrappedQUICStream, error) {
+func (c *Client) openStreamWithReconnect(dialer utils.PacketDialer) (*quic.Conn, map[uint32]chan *udpMessage, *wrappedQUICStream, error) {
 	c.reconnectMutex.Lock()
 	defer c.reconnectMutex.Unlock()
 	if c.closed {
-		return nil, nil, ErrClosed
+		return nil, nil, nil, ErrClosed
 	}
 	if c.quicSession == nil {
 		if err := c.connectToServer(dialer); err != nil {
 			// Still error, oops
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 	stream, err := c.quicSession.OpenStream()
 	if err == nil {
 		// All good
-		return c.quicSession, &wrappedQUICStream{stream}, nil
+		return c.quicSession, c.udpSessionMap, &wrappedQUICStream{stream}, nil
 	}
 	// Something is wrong
 	if nErr, ok := err.(net.Error); ok && nErr.Temporary() {
 		// Temporary error, just return
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	// A full session is still alive; replacing it would strand its streams.
+	if errors.As(err, new(*quic.StreamLimitReachedError)) {
+		return nil, nil, nil, err
 	}
 	// Permanent error, need to reconnect
 	if err := c.connectToServer(dialer); err != nil {
 		// Still error, oops
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// We are not going to try again even if it still fails the second time
 	stream, err = c.quicSession.OpenStream()
-	return c.quicSession, &wrappedQUICStream{stream}, err
+	return c.quicSession, c.udpSessionMap, &wrappedQUICStream{stream}, err
 }
 
 func (c *Client) DialTCP(host string, port uint16, dialer utils.PacketDialer) (net.Conn, error) {
-	session, stream, err := c.openStreamWithReconnect(dialer)
+	session, _, stream, err := c.openStreamWithReconnect(dialer)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +236,7 @@ func (c *Client) DialTCP(host string, port uint16, dialer utils.PacketDialer) (n
 }
 
 func (c *Client) DialUDP(dialer utils.PacketDialer) (UDPConn, error) {
-	session, stream, err := c.openStreamWithReconnect(dialer)
+	session, sessionMap, stream, err := c.openStreamWithReconnect(dialer)
 	if err != nil {
 		return nil, err
 	}
@@ -248,13 +260,10 @@ func (c *Client) DialUDP(dialer utils.PacketDialer) (UDPConn, error) {
 		return nil, fmt.Errorf("connection rejected: %s", sr.Message)
 	}
 
-	// Create a session in the map
+	// Register on the map of the session that carries this stream; a reconnect
+	// meanwhile assigns a new one.
 	c.udpSessionMutex.Lock()
 	nCh := make(chan *udpMessage, 1024)
-	// Store the current session map for CloseFunc below
-	// to ensures that we are adding and removing sessions on the same map,
-	// as reconnecting will reassign the map
-	sessionMap := c.udpSessionMap
 	sessionMap[sr.UDPSessionID] = nCh
 	c.udpSessionMutex.Unlock()
 
