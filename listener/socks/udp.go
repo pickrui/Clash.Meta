@@ -8,6 +8,7 @@ import (
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/sockopt"
 	C "github.com/metacubex/mihomo/constant"
+	authStore "github.com/metacubex/mihomo/listener/auth"
 	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/transport/socks5"
@@ -40,6 +41,8 @@ func NewUDP(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPLi
 }
 
 func NewUDPWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPListener, error) {
+	// The TCP listener applies the LAN address policy in the same cases.
+	filterRemote := len(additions) == 0 || config.AuthStore == authStore.Default
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-SOCKS"),
@@ -69,6 +72,12 @@ func NewUDPWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.T
 				}
 				if sl.closed {
 					break
+				}
+				continue
+			}
+			if filterRemote && !inbound.IsRemoteAddrDisAllowed(remoteAddr) {
+				if put != nil {
+					put()
 				}
 				continue
 			}
