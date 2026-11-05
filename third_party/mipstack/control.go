@@ -1,0 +1,795 @@
+package mipstack
+
+import (
+	"encoding/binary"
+	"errors"
+	"net/netip"
+)
+
+const (
+	// linuxControlHeaderSize is the fixed Linux 64-bit ancillary header size
+	// used on every host so control data remains portable between MIPS instances.
+	linuxControlHeaderSize = 16
+	// linuxControlAlignment is the fixed Linux 64-bit ancillary alignment.
+	linuxControlAlignment = 8
+	// linuxLevelIP is Linux IPPROTO_IP.
+	linuxLevelIP = 0
+	// linuxIPTypeOfService is Linux IP_TOS.
+	linuxIPTypeOfService = 1
+	// linuxIPTimeToLive is Linux IP_TTL.
+	linuxIPTimeToLive = 2
+	// linuxIPPacketInfo is Linux IP_PKTINFO.
+	linuxIPPacketInfo = 8
+	// linuxIPReceiveError is Linux IP_RECVERR.
+	linuxIPReceiveError = 11
+	// linuxLevelIPv6 is Linux IPPROTO_IPV6.
+	linuxLevelIPv6 = 41
+	// linuxIPv6FlowInfo is Linux IPV6_FLOWINFO.
+	linuxIPv6FlowInfo = 11
+	// linuxIPv6FlowInfoMask is Linux IPV6_FLOWINFO_MASK.
+	linuxIPv6FlowInfoMask = 0x0fffffff
+	// linuxIPv6ReceiveError is Linux IPV6_RECVERR.
+	linuxIPv6ReceiveError = 25
+	// linuxIPv6PacketInfo is Linux IPV6_PKTINFO.
+	linuxIPv6PacketInfo = 50
+	// linuxIPv6HopLimit is Linux IPV6_HOPLIMIT.
+	linuxIPv6HopLimit = 52
+	// linuxIPv6TrafficClass is Linux IPV6_TCLASS.
+	linuxIPv6TrafficClass = 67
+)
+
+// SocketErrorOrigin identifies the Linux sock_extended_err producer encoded
+// in a SocketErrorControlMessage.
+type SocketErrorOrigin uint8
+
+const (
+	// SocketErrorOriginNone is Linux SO_EE_ORIGIN_NONE.
+	SocketErrorOriginNone SocketErrorOrigin = iota
+	// SocketErrorOriginLocal is Linux SO_EE_ORIGIN_LOCAL.
+	SocketErrorOriginLocal
+	// SocketErrorOriginICMP is Linux SO_EE_ORIGIN_ICMP.
+	SocketErrorOriginICMP
+	// SocketErrorOriginICMP6 is Linux SO_EE_ORIGIN_ICMP6.
+	SocketErrorOriginICMP6
+	// SocketErrorOriginTXStatus is Linux SO_EE_ORIGIN_TXSTATUS.
+	SocketErrorOriginTXStatus
+	// SocketErrorOriginZeroCopy is Linux SO_EE_ORIGIN_ZEROCOPY.
+	SocketErrorOriginZeroCopy
+	// SocketErrorOriginTXTime is Linux SO_EE_ORIGIN_TXTIME.
+	SocketErrorOriginTXTime
+)
+
+// SocketErrorControlMessage represents the structured fields of one Linux
+// sock_extended_err ancillary record used by MessageFlagErrorQueue reads.
+type SocketErrorControlMessage struct {
+	// Errno is the Linux errno number associated with the failed operation.
+	Errno uint32
+	// Origin identifies the subsystem that generated the error.
+	Origin SocketErrorOrigin
+	// Type is the ICMP or ICMPv6 classification.
+	Type uint8
+	// Code is the ICMP or ICMPv6 subtype associated with Type.
+	Code uint8
+	// Info contains the discovered MTU or parameter-problem pointer when the
+	// ICMP type defines one.
+	Info uint32
+	// Data is the protocol-specific sock_extended_err data field.
+	Data uint32
+	// Offender is the router or destination that reported the failure. It must
+	// be a valid, unzoned IPv4 or IPv6 address when marshaling. An IPv4-mapped
+	// IPv6 address retains its IPv6 representation.
+	Offender netip.Addr
+}
+
+// MarshalBinary returns one complete, aligned Linux 64-bit little-endian
+// ancillary record. It is semantically identical to AppendBinary(nil).
+func (message SocketErrorControlMessage) MarshalBinary() ([]byte, error) {
+	return message.AppendBinary(nil)
+}
+
+// AppendBinary appends one complete, aligned Linux 64-bit little-endian
+// ancillary record to dst. Offender selects IP_RECVERR or IPV6_RECVERR;
+// IPv4-mapped addresses retain their IPv6 sockaddr representation. Reserved
+// fields and sockaddr fields not represented by SocketErrorControlMessage are
+// encoded as zero.
+// Numeric fields, including unrecognized Origin, Type, and Code values, are
+// encoded unchanged without applying ICMP policy.
+// On validation failure it returns the original dst unchanged.
+func (message SocketErrorControlMessage) AppendBinary(dst []byte) ([]byte, error) {
+	if !message.Offender.IsValid() || message.Offender.Zone() != "" {
+		return dst, errors.New("mipstack: invalid socket-error control-message offender")
+	}
+	offender := message.Offender
+	var data [44]byte
+	binary.LittleEndian.PutUint32(data[:4], message.Errno)
+	data[4], data[5], data[6] = byte(message.Origin), message.Type, message.Code
+	binary.LittleEndian.PutUint32(data[8:12], message.Info)
+	binary.LittleEndian.PutUint32(data[12:16], message.Data)
+	level, kind, size := uint32(linuxLevelIP), uint32(linuxIPReceiveError), 32
+	if offender.Is4() {
+		binary.LittleEndian.PutUint16(data[16:18], 2)
+		address := offender.As4()
+		copy(data[20:24], address[:])
+	} else {
+		level, kind, size = linuxLevelIPv6, linuxIPv6ReceiveError, 44
+		binary.LittleEndian.PutUint16(data[16:18], 10)
+		address := offender.As16()
+		copy(data[24:40], address[:])
+	}
+	return appendLinuxControl(dst, level, kind, data[:size]), nil
+}
+
+// Parse replaces message with the one error record found in control. Other
+// well-formed ancillary records are ignored so packet metadata may coexist in
+// the same OOB buffer. Records with an AF_UNSPEC offender are rejected because
+// SocketErrorControlMessage does not carry the cmsg address family separately.
+func (message *SocketErrorControlMessage) Parse(control []byte) error {
+	if message == nil {
+		return errors.New("mipstack: nil socket-error control-message receiver")
+	}
+	var parsed SocketErrorControlMessage
+	found := false
+	// Linux CMSG_FIRSTHDR and CMSG_NXTHDR stop when the remaining bytes
+	// cannot hold a complete header, including after alignment padding.
+	for len(control) >= linuxControlHeaderSize {
+		length64 := binary.LittleEndian.Uint64(control[:8])
+		if length64 < linuxControlHeaderSize || length64 > uint64(len(control)) {
+			return errors.New("mipstack: invalid Linux control length")
+		}
+		length := int(length64)
+		level := binary.LittleEndian.Uint32(control[8:12])
+		kind := binary.LittleEndian.Uint32(control[12:16])
+		if level == linuxLevelIP && kind == linuxIPReceiveError || level == linuxLevelIPv6 && kind == linuxIPv6ReceiveError {
+			if found {
+				return errors.New("mipstack: duplicate socket-error control message")
+			}
+			value, err := parseSocketErrorControl(level == linuxLevelIPv6, control[linuxControlHeaderSize:length])
+			if err != nil {
+				return err
+			}
+			parsed, found = value, true
+		}
+		aligned := (length + linuxControlAlignment - 1) &^ (linuxControlAlignment - 1)
+		if aligned > len(control) {
+			// The payload is complete when cmsg_len fits. Linux may return
+			// only part of the final alignment padding; padding is not part
+			// of the parsed socket-error value.
+			break
+		}
+		control = control[aligned:]
+	}
+	if !found {
+		return errors.New("mipstack: socket-error control message not found")
+	}
+	*message = parsed
+	return nil
+}
+
+// parseSocketErrorControl decodes sock_extended_err followed by its offender
+// sockaddr using MIPS's fixed Linux 64-bit little-endian ancillary layout.
+func parseSocketErrorControl(v6 bool, data []byte) (SocketErrorControlMessage, error) {
+	want := 32
+	if v6 {
+		want = 44
+	}
+	if len(data) != want {
+		return SocketErrorControlMessage{}, errors.New("mipstack: invalid socket-error control message")
+	}
+	message := SocketErrorControlMessage{
+		Errno: binary.LittleEndian.Uint32(data[:4]), Origin: SocketErrorOrigin(data[4]),
+		Type: data[5], Code: data[6], Info: binary.LittleEndian.Uint32(data[8:12]), Data: binary.LittleEndian.Uint32(data[12:16]),
+	}
+	family := binary.LittleEndian.Uint16(data[16:18])
+	if v6 {
+		if family != 10 {
+			return SocketErrorControlMessage{}, errors.New("mipstack: invalid IPv6 socket-error offender")
+		}
+		message.Offender = netip.AddrFrom16([16]byte(data[24:40]))
+	} else {
+		if family != 2 {
+			return SocketErrorControlMessage{}, errors.New("mipstack: invalid IPv4 socket-error offender")
+		}
+		message.Offender = netip.AddrFrom4([4]byte(data[20:24]))
+	}
+	return message, nil
+}
+
+// IPv4ControlMessage represents per-packet IPv4 metadata carried by
+// UDPConn.ReadMsgUDP, UDPConn.WriteMsgUDP, IPConn.ReadMsgIP, and
+// IPConn.WriteMsgIP. Src is used when sending and Dst is populated from the
+// received IP header destination. MIPS has one embedding link, so IfIndex is
+// always zero and a nonzero value cannot be marshaled.
+type IPv4ControlMessage struct {
+	// TTL is the received or requested time to live. A received value may be
+	// zero; zero selects the output default when marshaling.
+	TTL int
+	// TOS is the received or requested type-of-service byte. Zero selects the
+	// output default when marshaling.
+	TOS int
+	// Src selects a managed source address when marshaling.
+	Src netip.Addr
+	// Dst is the IP header destination populated by Parse and is not marshaled.
+	Dst netip.Addr
+	// IfIndex is the embedding-link index. MIPS supports only zero.
+	IfIndex int
+}
+
+// Marshal returns the fixed Linux 64-bit little-endian ancillary encoding used
+// by MIPS on every host. Zero-valued fields are omitted and select stack
+// defaults.
+func (message *IPv4ControlMessage) Marshal() ([]byte, error) {
+	if message == nil {
+		return nil, nil
+	}
+	return message.marshal(message.Src, netip.Addr{}, false)
+}
+
+// marshalForRead encodes receive metadata with specDst as ipi_spec_dst and
+// Dst as the IP header destination in ipi_addr.
+func (message *IPv4ControlMessage) marshalForRead(specDst netip.Addr) ([]byte, error) {
+	return message.marshal(specDst, message.Dst, true)
+}
+
+// marshal encodes the IPv4 packet-info fields and header values. For a send,
+// specDst is the source-selection field and destination is ignored. For a
+// receive, the two packet-info addresses remain independent: specDst is the
+// local address selected for the embedding link and destination is the IP
+// header destination.
+func (message *IPv4ControlMessage) marshal(specDst, destination netip.Addr, receiving bool) ([]byte, error) {
+	if message.IfIndex != 0 {
+		return nil, errors.New("mipstack: nonzero IPv4 control-message interface index is not supported")
+	}
+	specDst, destination = specDst.Unmap(), destination.Unmap()
+	if receiving {
+		if specDst.IsValid() && (!specDst.Is4() || specDst.Zone() != "" || specDst.IsMulticast()) {
+			return nil, errors.New("mipstack: invalid IPv4 control-message source")
+		}
+		if destination.IsValid() && (!destination.Is4() || destination.Zone() != "") {
+			return nil, errors.New("mipstack: invalid IPv4 control-message destination")
+		}
+	} else if specDst.IsValid() && (!specDst.Is4() || specDst.Zone() != "" || specDst.IsMulticast()) {
+		return nil, errors.New("mipstack: invalid IPv4 control-message source")
+	}
+	capacity := 0
+	if specDst.IsValid() || receiving && destination.IsValid() {
+		capacity += 32
+	}
+	if message.TTL < 0 || message.TTL > 255 {
+		return nil, errors.New("mipstack: IPv4 control-message TTL must be between 0 and 255")
+	}
+	if message.TOS < 0 || message.TOS > 255 {
+		return nil, errors.New("mipstack: IPv4 control-message TOS must be between 0 and 255")
+	}
+	if receiving || message.TTL != 0 {
+		capacity += 24
+	}
+	if receiving || message.TOS != 0 {
+		capacity += 24
+	}
+	control := make([]byte, 0, capacity)
+	if specDst.IsValid() || receiving && destination.IsValid() {
+		if receiving {
+			control = appendLinuxIPv4PacketInfoControl(control, specDst, destination)
+		} else {
+			control = appendLinuxIPv4PacketInfoControl(control, specDst, netip.Addr{})
+		}
+	}
+	if receiving || message.TTL != 0 {
+		control = appendLinuxControlInt32(control, linuxLevelIP, linuxIPTimeToLive, int32(message.TTL))
+	}
+	if receiving {
+		control = appendLinuxControl(control, linuxLevelIP, linuxIPTypeOfService, []byte{byte(message.TOS)})
+	} else if message.TOS != 0 {
+		control = appendLinuxControlInt32(control, linuxLevelIP, linuxIPTypeOfService, int32(message.TOS))
+	}
+	return control, nil
+}
+
+// Parse replaces message with metadata decoded from the fixed ancillary
+// encoding returned by MIPS message reads.
+func (message *IPv4ControlMessage) Parse(control []byte) error {
+	if message == nil {
+		return errors.New("mipstack: nil IPv4 control-message receiver")
+	}
+	address, options, err := parseLinuxIPControlValues(control, false, true)
+	if err != nil {
+		return err
+	}
+	*message = IPv4ControlMessage{
+		TTL: int(options.hopLimit), TOS: int(options.trafficClass), Dst: address,
+	}
+	return nil
+}
+
+// parseForWrite decodes send metadata into Src and the header fields while
+// retaining whether a zero-valued field was explicitly present.
+func (message *IPv4ControlMessage) parseForWrite(control []byte) (ipPacketOptions, error) {
+	address, options, err := parseLinuxIPControlValues(control, false, false)
+	if err != nil {
+		return ipPacketOptions{}, err
+	}
+	*message = IPv4ControlMessage{
+		TTL: int(options.hopLimit), TOS: int(options.trafficClass), Src: address,
+	}
+	return options, nil
+}
+
+// IPv6ControlMessage represents per-packet IPv6 metadata carried by
+// UDPConn.ReadMsgUDP, UDPConn.WriteMsgUDP, IPConn.ReadMsgIP, and
+// IPConn.WriteMsgIP. Src is used when sending and Dst is populated when
+// parsing received control data. MIPS has one embedding link, so IfIndex is
+// always zero and a nonzero value cannot be marshaled.
+type IPv6ControlMessage struct {
+	// TrafficClass is the received or requested traffic-class byte. Zero
+	// selects the output default when marshaling. -1 requests the RFC 3542
+	// kernel-default sentinel in an outbound ancillary message.
+	TrafficClass int
+	// HopLimit is the received or requested hop limit. A received value may be
+	// zero; zero selects the output default when marshaling. -1 requests the
+	// RFC 3542 kernel-default sentinel in an outbound ancillary message.
+	HopLimit int
+	// FlowLabel is the received or requested 20-bit IPv6 Flow Label. Zero
+	// selects automatic labeling when marshaling through this structured API.
+	FlowLabel uint32
+	// Src selects a managed source address when marshaling.
+	Src netip.Addr
+	// Dst is the IP header destination populated by Parse and is not marshaled.
+	Dst netip.Addr
+	// IfIndex is the embedding-link index. MIPS supports only zero.
+	IfIndex int
+}
+
+// Marshal returns the fixed Linux 64-bit little-endian ancillary encoding used
+// by MIPS on every host. Zero-valued fields are omitted and select stack
+// defaults.
+func (message *IPv6ControlMessage) Marshal() ([]byte, error) {
+	if message == nil {
+		return nil, nil
+	}
+	return message.marshal(message.Src, false)
+}
+
+// marshalForRead encodes the receive-only Dst field and required header
+// values. Keeping this operation on the public type makes it share Marshal's
+// validation and wire encoding while leaving Marshal's send semantics intact.
+func (message *IPv6ControlMessage) marshalForRead() ([]byte, error) {
+	return message.marshal(message.Dst, true)
+}
+
+// marshal encodes the selected packet-info address and header values.
+func (message *IPv6ControlMessage) marshal(address netip.Addr, receiving bool) ([]byte, error) {
+	if message.IfIndex != 0 {
+		return nil, errors.New("mipstack: nonzero IPv6 control-message interface index is not supported")
+	}
+	address = address.Unmap()
+	capacity := 0
+	if address.IsValid() {
+		if !address.Is6() || address.Zone() != "" || !receiving && address.IsMulticast() {
+			field := "source"
+			if receiving {
+				field = "destination"
+			}
+			return nil, errors.New("mipstack: invalid IPv6 control-message " + field)
+		}
+		capacity += 40
+	}
+	if message.HopLimit < -1 || message.HopLimit > 255 {
+		return nil, errors.New("mipstack: IPv6 control-message hop limit must be -1 or between 0 and 255")
+	}
+	if message.TrafficClass < -1 || message.TrafficClass > 255 {
+		return nil, errors.New("mipstack: IPv6 control-message traffic class must be -1 or between 0 and 255")
+	}
+	if message.FlowLabel > ipv6MaximumFlowLabel {
+		return nil, errors.New("mipstack: IPv6 control-message flow label exceeds 20 bits")
+	}
+	if receiving || message.HopLimit != 0 {
+		capacity += 24
+	}
+	if receiving || message.TrafficClass != 0 {
+		capacity += 24
+	}
+	if message.FlowLabel != 0 || receiving && message.TrafficClass != 0 {
+		capacity += 24
+	}
+	control := make([]byte, 0, capacity)
+	if address.IsValid() {
+		control = appendLinuxIPv6PacketInfoControl(control, address)
+	}
+	if receiving || message.HopLimit != 0 {
+		control = appendLinuxControlInt32(control, linuxLevelIPv6, linuxIPv6HopLimit, int32(message.HopLimit))
+	}
+	if receiving || message.TrafficClass != 0 {
+		control = appendLinuxControlInt32(control, linuxLevelIPv6, linuxIPv6TrafficClass, int32(message.TrafficClass))
+	}
+	// Linux emits IPV6_FLOWINFO on receive only when the combined traffic
+	// class and flow label are nonzero. Structured sends omit a zero label so
+	// it retains the public API's automatic-labeling meaning; raw OOB can still
+	// carry an explicit all-zero flowinfo value.
+	if message.FlowLabel != 0 || receiving && message.TrafficClass != 0 {
+		var flowInfo [4]byte
+		// RFC 3542 defines the separate IPV6_TCLASS cmsg as the wire
+		// Traffic Class control; Linux's IPV6_FLOWINFO extension must not
+		// override it. A -1 sentinel contributes no class bits.
+		trafficClass := uint32(0)
+		if message.TrafficClass >= 0 {
+			trafficClass = uint32(message.TrafficClass)
+		}
+		binary.BigEndian.PutUint32(flowInfo[:], trafficClass<<20|message.FlowLabel)
+		control = appendLinuxControl(control, linuxLevelIPv6, linuxIPv6FlowInfo, flowInfo[:])
+	}
+	return control, nil
+}
+
+// Parse replaces message with metadata decoded from the fixed ancillary
+// encoding returned by MIPS message reads.
+func (message *IPv6ControlMessage) Parse(control []byte) error {
+	if message == nil {
+		return errors.New("mipstack: nil IPv6 control-message receiver")
+	}
+	address, options, err := parseLinuxIPControlValues(control, true, true)
+	if err != nil {
+		return err
+	}
+	*message = IPv6ControlMessage{
+		TrafficClass: int(options.trafficClass), HopLimit: int(options.hopLimit), FlowLabel: options.flowLabel, Dst: address,
+	}
+	return nil
+}
+
+// parseForWrite decodes send metadata into Src and the header fields while
+// retaining whether a zero-valued field was explicitly present.
+func (message *IPv6ControlMessage) parseForWrite(control []byte) (ipPacketOptions, error) {
+	address, options, err := parseLinuxIPControlValues(control, true, false)
+	if err != nil {
+		return ipPacketOptions{}, err
+	}
+	*message = IPv6ControlMessage{
+		TrafficClass: int(options.trafficClass), HopLimit: int(options.hopLimit), FlowLabel: options.flowLabel, Src: address,
+	}
+	return options, nil
+}
+
+// appendLinuxIPv6PacketInfoControl encodes one Linux IPv6 packet-info address.
+func appendLinuxIPv6PacketInfoControl(control []byte, address netip.Addr) []byte {
+	address = address.Unmap()
+	var data [20]byte
+	addressBytes := address.As16()
+	copy(data[0:16], addressBytes[:])
+	return appendLinuxControl(control, linuxLevelIPv6, linuxIPv6PacketInfo, data[:])
+}
+
+// appendLinuxIPv4PacketInfoControl encodes the independent Linux IPv4
+// ipi_spec_dst and ipi_addr fields. Interface index zero selects MIPS's single
+// embedding link.
+func appendLinuxIPv4PacketInfoControl(control []byte, specDst, destination netip.Addr) []byte {
+	var data [12]byte
+	if specDst = specDst.Unmap(); specDst.Is4() {
+		address := specDst.As4()
+		copy(data[4:8], address[:])
+	}
+	if destination = destination.Unmap(); destination.Is4() {
+		address := destination.As4()
+		copy(data[8:12], address[:])
+	}
+	return appendLinuxControl(control, linuxLevelIP, linuxIPPacketInfo, data[:])
+}
+
+// controlMessageForRead encodes receive metadata through the public control
+// message types so their field semantics remain authoritative. specDst is the
+// IPv4 receive-side ipi_spec_dst; destination is the IP header destination.
+func controlMessageForRead(specDst, destination netip.Addr, options ipPacketOptions) ([]byte, error) {
+	destination = destination.Unmap()
+	if destination.Is4() {
+		specDst = specDst.Unmap()
+		message := IPv4ControlMessage{TTL: int(options.hopLimit), TOS: int(options.trafficClass), Dst: destination}
+		return message.marshalForRead(specDst)
+	}
+	message := IPv6ControlMessage{TrafficClass: int(options.trafficClass), HopLimit: int(options.hopLimit), FlowLabel: options.flowLabel, Dst: destination}
+	return message.marshalForRead()
+}
+
+// appendLinuxControl appends one aligned cmsghdr and payload.
+func appendLinuxControl(control []byte, level, kind uint32, data []byte) []byte {
+	length := linuxControlHeaderSize + len(data)
+	space := (length + linuxControlAlignment - 1) &^ (linuxControlAlignment - 1)
+	offset := len(control)
+	control = append(control, make([]byte, space)...)
+	binary.LittleEndian.PutUint64(control[offset:offset+8], uint64(length))
+	binary.LittleEndian.PutUint32(control[offset+8:offset+12], level)
+	binary.LittleEndian.PutUint32(control[offset+12:offset+16], kind)
+	copy(control[offset+linuxControlHeaderSize:offset+length], data)
+	return control
+}
+
+// appendLinuxControlInt32 appends one native-int ancillary value.
+func appendLinuxControlInt32(control []byte, level, kind uint32, value int32) []byte {
+	var data [4]byte
+	binary.LittleEndian.PutUint32(data[:], uint32(value))
+	return appendLinuxControl(control, level, kind, data[:])
+}
+
+// socketErrorControlForRead encodes one queued ICMP error as Linux
+// sock_extended_err followed by the reporting address.
+func socketErrorControlForRead(err error) ([]byte, error) {
+	var networkError ICMPError
+	if !errors.As(err, &networkError) || !networkError.Reporter.IsValid() {
+		return nil, errors.New("mipstack: asynchronous error has no ICMP metadata")
+	}
+	reporter := networkError.Reporter
+	networkError.Reporter = reporter.Unmap()
+	origin := SocketErrorOriginICMP
+	if networkError.Reporter.Is6() {
+		origin = SocketErrorOriginICMP6
+	}
+	info := networkError.MTU
+	if info == 0 {
+		info = networkError.Pointer
+	}
+	return (SocketErrorControlMessage{
+		Errno: linuxICMPErrno(networkError), Origin: origin,
+		Type: networkError.Type, Code: networkError.Code, Info: info,
+		Offender: reporter,
+	}).MarshalBinary()
+}
+
+// icmpErrorConversion keeps Linux's wire errno and hard-error classification
+// together.
+type icmpErrorConversion struct {
+	linuxErrno uint32
+	hard       bool
+}
+
+// linuxICMPErrorConversion follows Linux icmp_err_convert and
+// icmpv6_err_convert. RFC 1122 section 3.2.2.1 treats network unreachable,
+// host unreachable, and source-route failure as hints rather than proof of
+// failure. The hard-error classification itself comes from Linux's tables.
+func linuxICMPErrorConversion(networkError ICMPError) icmpErrorConversion {
+	if networkError.Reporter.Is4() {
+		switch networkError.Type {
+		case ICMPv4TypeDestinationUnreachable:
+			values := [...]icmpErrorConversion{
+				{101, false}, {113, false}, {92, true}, {111, true},
+				{90, false}, {95, false}, {101, true}, {112, true},
+				{64, true}, {101, true}, {113, true}, {101, false},
+				{113, false}, {113, true}, {113, true}, {113, true},
+			}
+			if int(networkError.Code) < len(values) {
+				return values[networkError.Code]
+			}
+			return icmpErrorConversion{113, false}
+		case ICMPv4TypeTimeExceeded:
+			return icmpErrorConversion{113, false}
+		case ICMPv4TypeParameterProblem:
+			return icmpErrorConversion{71, true}
+		}
+		return icmpErrorConversion{71, false}
+	}
+	switch networkError.Type {
+	case ICMPv6TypeDestinationUnreachable:
+		values := [...]icmpErrorConversion{
+			{101, false}, {13, true}, {113, false}, {113, false},
+			{111, true}, {13, true}, {13, true},
+		}
+		if int(networkError.Code) < len(values) {
+			return values[networkError.Code]
+		}
+		return icmpErrorConversion{71, true}
+	case ICMPv6TypePacketTooBig:
+		return icmpErrorConversion{90, false}
+	case ICMPv6TypeTimeExceeded:
+		return icmpErrorConversion{113, false}
+	case ICMPv6TypeParameterProblem:
+		return icmpErrorConversion{71, true}
+	}
+	return icmpErrorConversion{71, false}
+}
+
+// linuxICMPErrno encodes Linux errno numbers in the portable MSG_ERRQUEUE
+// ancillary format, even when the stack itself runs on another OS.
+func linuxICMPErrno(networkError ICMPError) uint32 {
+	return linuxICMPErrorConversion(networkError).linuxErrno
+}
+
+// linuxDatagramICMPReport applies Linux UDP/raw IPv4 and IPv6 reporting policy
+// to errors admitted by the common ICMP socket-delivery path.
+// The hard-error classification comes from Linux's ICMP conversion tables;
+// the PMTU mode exceptions mirror Linux udp_err, raw_err, udp6_err, and
+// rawv6_err rather than changing RFC PMTU processing.
+// Linux's default UDP socket policy narrows RFC 1122 section 4.1.3.3's ICMP
+// reporting rule: without RECVERR, only connected hard errors are exposed.
+// Extended-error mode also sets the ordinary pending error. PMTU processing
+// is independent of this reporting decision.
+func linuxDatagramICMPReport(networkError ICMPError, connected, receiveErrors, raw bool, mode PathMTUDiscovery) (pending, queued bool) {
+	if !connected && !receiveErrors {
+		return false, false
+	}
+	if networkError.Reporter.Is4() && networkError.Type == ICMPv4TypeDestinationUnreachable && networkError.Code == ICMPv4DestinationUnreachableCodeFragmentationNeeded {
+		// Linux udp_err discards IPv4 Frag Needed with PMTUDISC_DONT even
+		// when RECVERR is enabled; raw_err still queues it in that mode.
+		if !raw && mode == PathMTUDiscoveryDont {
+			return false, false
+		}
+		return receiveErrors || mode != PathMTUDiscoveryDont, receiveErrors
+	}
+	if networkError.Reporter.Is6() && networkError.Type == ICMPv6TypePacketTooBig {
+		if !raw && !mode.acceptsPathMTU() {
+			return false, false
+		}
+		// Linux rawv6_err treats only PMTUDISC_DO as a hard PTB;
+		// udp6_err treats all modes except DONT as hard.
+		hard := mode != PathMTUDiscoveryDont
+		if raw {
+			hard = mode == PathMTUDiscoveryDo
+		}
+		return receiveErrors || hard, receiveErrors
+	}
+	if receiveErrors {
+		return true, true
+	}
+	return linuxICMPErrorConversion(networkError).hard, false
+}
+
+// parseControlMessageForWrite decodes send metadata through the public control
+// message types so Src and header-field semantics cannot diverge.
+func parseControlMessageForWrite(control []byte, v6 bool) (netip.Addr, ipPacketOptions, error) {
+	if v6 {
+		var message IPv6ControlMessage
+		options, err := message.parseForWrite(control)
+		if err != nil {
+			return netip.Addr{}, ipPacketOptions{}, err
+		}
+		return message.Src, options, nil
+	}
+	var message IPv4ControlMessage
+	options, err := message.parseForWrite(control)
+	if err != nil {
+		return netip.Addr{}, ipPacketOptions{}, err
+	}
+	return message.Src, options, nil
+}
+
+// parseLinuxIPControlValues validates cmsghdr framing and extracts raw values.
+// Empty control data selects routing and default header values. Receiving
+// permits the zero hop value that can be observed at a local destination.
+func parseLinuxIPControlValues(oob []byte, v6, receiving bool) (netip.Addr, ipPacketOptions, error) {
+	// Linux processes repeated scalar ancillary values in order, so each later
+	// control message replaces the value decoded from an earlier one. FLOWINFO
+	// additionally rejects reserved-bit changes after a nonzero value.
+	var address netip.Addr
+	var options ipPacketOptions
+	var flowInfo uint32
+	// Linux CMSG_FIRSTHDR and CMSG_NXTHDR stop when the remaining bytes
+	// cannot hold a complete header, including after alignment padding.
+	for len(oob) >= linuxControlHeaderSize {
+		length64 := binary.LittleEndian.Uint64(oob[0:8])
+		if length64 < linuxControlHeaderSize || length64 > uint64(len(oob)) {
+			return netip.Addr{}, ipPacketOptions{}, errors.New("mipstack: invalid Linux IP control length")
+		}
+		length := int(length64)
+		level := binary.LittleEndian.Uint32(oob[8:12])
+		kind := binary.LittleEndian.Uint32(oob[12:16])
+		data := oob[linuxControlHeaderSize:length]
+		switch {
+		case level == linuxLevelIP && kind == linuxIPPacketInfo:
+			if v6 || len(data) != 12 {
+				return netip.Addr{}, ipPacketOptions{}, errors.New("mipstack: invalid IPv4 packet-info control message")
+			}
+			if binary.LittleEndian.Uint32(data[0:4]) != 0 {
+				return netip.Addr{}, ipPacketOptions{}, errors.New("mipstack: nonzero packet-info interface index is not supported")
+			}
+			candidate := netip.AddrFrom4([4]byte(data[4:8]))
+			if receiving {
+				candidate = netip.AddrFrom4([4]byte(data[8:12]))
+			}
+			// Linux uses the last IP_PKTINFO source in a compound send
+			// control buffer; an unspecified IPv4 source clears an earlier
+			// per-packet choice. An unspecified receive destination remains
+			// a valid decoded ipi_addr value.
+			if !receiving && candidate.IsUnspecified() {
+				address = netip.Addr{}
+			} else {
+				address = candidate
+			}
+		case level == linuxLevelIPv6 && kind == linuxIPv6PacketInfo:
+			// Linux ip6_datagram_send_ctl accepts the in6_pktinfo prefix and
+			// ignores any additional payload within the same control record.
+			if !v6 || len(data) < 20 {
+				return netip.Addr{}, ipPacketOptions{}, errors.New("mipstack: invalid IPv6 packet-info control message")
+			}
+			if binary.LittleEndian.Uint32(data[16:20]) != 0 {
+				return netip.Addr{}, ipPacketOptions{}, errors.New("mipstack: nonzero packet-info interface index is not supported")
+			}
+			candidate := netip.AddrFrom16([16]byte(data[0:16]))
+			// RFC 3542 permits an unspecified IPv6 packet-info address to
+			// request normal source selection. Like Linux, it does not erase
+			// an earlier concrete source in the same send operation.
+			if receiving || !candidate.IsUnspecified() {
+				address = candidate
+			}
+		case level == linuxLevelIP && kind == linuxIPTimeToLive:
+			value, err := linuxControlInt32(data)
+			if v6 || err != nil || value < 0 || !receiving && value == 0 || value > 255 {
+				return netip.Addr{}, ipPacketOptions{}, errors.New("mipstack: invalid IPv4 TTL control message")
+			}
+			options.hopLimit, options.hopLimitSet = byte(value), true
+		case level == linuxLevelIP && kind == linuxIPTypeOfService:
+			value, err := linuxControlByteOrInt32(data)
+			if v6 || err != nil || value < 0 || value > 255 {
+				return netip.Addr{}, ipPacketOptions{}, errors.New("mipstack: invalid IPv4 TOS control message")
+			}
+			options.trafficClass, options.trafficClassSet = byte(value), true
+		case level == linuxLevelIPv6 && kind == linuxIPv6HopLimit:
+			value, err := linuxControlInt32(data)
+			if !v6 || err != nil || value < -1 || value > 255 || receiving && value == -1 {
+				return netip.Addr{}, ipPacketOptions{}, errors.New("mipstack: invalid IPv6 hop-limit control message")
+			}
+			if value == -1 {
+				// RFC 3542 defines -1 as the kernel-default sentinel. Keep
+				// it out of the byte-valued packet options; normal output
+				// default selection then supplies the socket (or multicast)
+				// default instead of accidentally emitting 255.
+				options.hopLimit, options.hopLimitSet = 0, false
+			} else {
+				options.hopLimit, options.hopLimitSet = byte(value), true
+			}
+		case level == linuxLevelIPv6 && kind == linuxIPv6TrafficClass:
+			value, err := linuxControlInt32(data)
+			if !v6 || err != nil || value < -1 || value > 255 || receiving && value == -1 {
+				return netip.Addr{}, ipPacketOptions{}, errors.New("mipstack: invalid IPv6 traffic-class control message")
+			}
+			if value == -1 {
+				// The sentinel has the same default-selection treatment as
+				// IPV6_HOPLIMIT; it is never converted to an on-wire 255.
+				options.trafficClass, options.trafficClassSet = 0, false
+			} else {
+				options.trafficClass, options.trafficClassSet = byte(value), true
+			}
+		case level == linuxLevelIPv6 && kind == linuxIPv6FlowInfo:
+			// Linux IPV6_FLOWINFO requires at least one 32-bit value, rather
+			// than an exact payload length, and ignores the remaining bytes.
+			if !v6 || len(data) < 4 {
+				return netip.Addr{}, ipPacketOptions{}, errors.New("mipstack: invalid IPv6 flow-info control message")
+			}
+			// Linux masks FLOWINFO to its low 28 bits for flow selection,
+			// while IPV6_TCLASS independently controls the wire Traffic
+			// Class. Keep only the low 20-bit label for packet construction;
+			// this matches IPV6_FLOWINFO_MASK. Once a nonzero masked value
+			// was supplied, Linux rejects a later value with reserved bits
+			// set rather than silently accepting a conflicting control.
+			rawFlowInfo := binary.BigEndian.Uint32(data)
+			if flowInfo != 0 && (flowInfo^rawFlowInfo)&^linuxIPv6FlowInfoMask != 0 {
+				return netip.Addr{}, ipPacketOptions{}, errors.New("mipstack: conflicting IPv6 flow-info reserved bits")
+			}
+			flowInfo = rawFlowInfo & linuxIPv6FlowInfoMask
+			options.flowLabel, options.flowLabelSet = flowInfo&ipv6MaximumFlowLabel, true
+		default:
+			return netip.Addr{}, ipPacketOptions{}, errors.New("mipstack: unsupported Linux IP control message")
+		}
+		aligned := (length + linuxControlAlignment - 1) &^ (linuxControlAlignment - 1)
+		if aligned > len(oob) {
+			// RFC 3542 sections 5.2 and 5.3 exclude trailing alignment padding
+			// from cmsg_len. Like Linux CMSG_NXTHDR, accept a complete final
+			// record without requiring all padding bytes on reads or writes.
+			break
+		}
+		oob = oob[aligned:]
+	}
+	return address, options, nil
+}
+
+// linuxControlInt32 decodes one Linux ancillary integer.
+func linuxControlInt32(data []byte) (int32, error) {
+	if len(data) != 4 {
+		return 0, errors.New("invalid Linux ancillary integer")
+	}
+	return int32(binary.LittleEndian.Uint32(data)), nil
+}
+
+// linuxControlByteOrInt32 accepts the one-byte receive and int send forms used
+// by Linux IP_TOS ancillary data.
+func linuxControlByteOrInt32(data []byte) (int32, error) {
+	if len(data) == 1 {
+		return int32(data[0]), nil
+	}
+	return linuxControlInt32(data)
+}

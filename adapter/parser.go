@@ -1,0 +1,314 @@
+package adapter
+
+import (
+	"fmt"
+	"maps"
+	"math"
+
+	"github.com/metacubex/mihomo/adapter/outbound"
+	"github.com/metacubex/mihomo/common/structure"
+	C "github.com/metacubex/mihomo/constant"
+)
+
+func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error) {
+	decoder := structure.NewDecoder(structure.Option{TagName: "proxy", WeaklyTypedInput: true, KeyReplacer: structure.DefaultKeyReplacer})
+	proxyType, existType := mapping["type"].(string)
+	if !existType {
+		return nil, fmt.Errorf("missing type")
+	}
+
+	opt := applyProxyOptions(options...)
+	basicOption := outbound.BasicOption{
+		DialerForAPI: opt.DialerForAPI,
+		TunnelForAPI: opt.TunnelForAPI,
+		ProviderName: opt.ProviderName,
+	}
+
+	var (
+		proxy outbound.ProxyAdapter
+		err   error
+	)
+	switch proxyType {
+	case "ss":
+		ssOption := &outbound.ShadowSocksOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, ssOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewShadowSocks(*ssOption)
+	case "ssr":
+		ssrOption := &outbound.ShadowSocksROption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, ssrOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewShadowSocksR(*ssrOption)
+	case "socks5":
+		socksOption := &outbound.Socks5Option{BasicOption: basicOption}
+		err = decoder.Decode(mapping, socksOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewSocks5(*socksOption)
+	case "http":
+		httpOption := &outbound.HttpOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, httpOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewHttp(*httpOption)
+	case "vmess":
+		vmessOption := &outbound.VmessOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, vmessOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewVmess(*vmessOption)
+	case "vless":
+		vlessOption := &outbound.VlessOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, vlessOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewVless(*vlessOption)
+	case "snell":
+		snellOption := &outbound.SnellOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, snellOption)
+		if err != nil {
+			break
+		}
+		_, snellOption.IdentityConfigured = mapping["identity"]
+		proxy, err = outbound.NewSnell(*snellOption)
+	case "trojan":
+		trojanOption := &outbound.TrojanOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, trojanOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewTrojan(*trojanOption)
+	case "hysteria":
+		hyOption := &outbound.HysteriaOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, hyOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewHysteria(*hyOption)
+	case "hysteria2":
+		hyOption := &outbound.Hysteria2Option{BasicOption: basicOption}
+		err = decoder.Decode(mapping, hyOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewHysteria2(*hyOption)
+	case "wireguard":
+		wgOption := &outbound.WireGuardOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, wgOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewWireGuard(*wgOption)
+	case "tuic":
+		tuicOption := &outbound.TuicOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, tuicOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewTuic(*tuicOption)
+	case "shadowquic":
+		shadowQuicOption := &outbound.ShadowQuicOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, shadowQuicOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewShadowQuic(*shadowQuicOption)
+	case "gost-relay":
+		relayOption := &outbound.GostRelayOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, relayOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewGostRelay(*relayOption)
+	case "direct":
+		directOption := &outbound.DirectOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, directOption)
+		if err != nil {
+			break
+		}
+		proxy = outbound.NewDirectWithOption(*directOption)
+	case "dns":
+		dnsOptions := &outbound.DnsOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, dnsOptions)
+		if err != nil {
+			break
+		}
+		proxy = outbound.NewDnsWithOption(*dnsOptions)
+	case "reject":
+		rejectOption := &outbound.RejectOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, rejectOption)
+		if err != nil {
+			break
+		}
+		proxy = outbound.NewRejectWithOption(*rejectOption)
+	case "rematch":
+		rematchOption := &outbound.RematchOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, rematchOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewRematch(*rematchOption)
+	case "ssh":
+		sshOption := &outbound.SshOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, sshOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewSsh(*sshOption)
+	case "mieru":
+		mieruOption := &outbound.MieruOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, mieruOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewMieru(*mieruOption)
+	case "anytls":
+		anytlsOption := &outbound.AnyTLSOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, anytlsOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewAnyTLS(*anytlsOption)
+	case "sudoku":
+		sudokuOption := &outbound.SudokuOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, sudokuOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewSudoku(*sudokuOption)
+	case "masque":
+		masqueOption := &outbound.MasqueOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, masqueOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewMasque(*masqueOption)
+	case "trusttunnel":
+		trustTunnelOption := &outbound.TrustTunnelOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, trustTunnelOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewTrustTunnel(*trustTunnelOption)
+	case "openvpn":
+		openVPNOption := &outbound.OpenVPNOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, openVPNOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewOpenVPN(*openVPNOption)
+	case "tailscale":
+		tailscaleOption := &outbound.TailscaleOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, tailscaleOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewTailscale(*tailscaleOption)
+	case "zerotier":
+		zeroTierOption := &outbound.ZeroTierOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, zeroTierOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewZeroTier(*zeroTierOption)
+	case "easytier":
+		easyTierOption := &outbound.EasyTierOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, easyTierOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewEasyTier(*easyTierOption)
+	default:
+		return nil, fmt.Errorf("unsupport proxy type: %s", proxyType)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	if dialer, _ := mapping["dialer-proxy"].(string); dialer != "" && proxy.ProxyInfo().DialerProxy != dialer {
+		_ = proxy.Close()
+		return nil, fmt.Errorf("proxy [%s] type [%s] does not support dialer-proxy", proxy.Name(), proxyType)
+	}
+
+	if muxMapping, muxExist := mapping["smux"].(map[string]any); muxExist {
+		muxOption := &outbound.SingMuxOption{}
+		err = decoder.Decode(muxMapping, muxOption)
+		if err != nil {
+			return nil, err
+		}
+		if muxOption.Enabled {
+			proxy, err = outbound.NewSingMux(*muxOption, proxy)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	proxy = outbound.NewAutoCloseProxyAdapter(proxy)
+	result := NewProxy(proxy)
+	if metadata, ok := mapping["oixcloud"].(map[string]any); ok {
+		var info NodeDisplayInfo
+		if decoder.Decode(metadata, &info) == nil {
+			if rate := info.TrafficRate; rate != nil && (math.IsNaN(*rate) || math.IsInf(*rate, 0) || *rate < 0) {
+				info.TrafficRate = nil
+			}
+			result.displayInfo = info
+		}
+	}
+	if obfs, ok := mapping["obfs-opts"].(map[string]any); proxyType == "snell" && ok && obfs["mode"] == "ech-tls" {
+		result.displayInfo.SnellECH = true
+		result.displayInfo.HTTP3 = obfs["transport"] == "auto" || obfs["transport"] == "h3"
+	}
+	original := maps.Clone(mapping)
+	result.cloneWithDialer = func(name string) (C.Proxy, error) {
+		if opt.DialerForAPI != nil || proxyType == "tailscale" || proxyType == "zerotier" || proxyType == "easytier" {
+			return nil, fmt.Errorf("proxy [%s] cannot be a landing group member", result.Name())
+		}
+		derived := maps.Clone(original)
+		derived["dialer-proxy"] = name
+		return ParseProxy(derived, options...)
+	}
+	return result, nil
+}
+
+type proxyOption struct {
+	DialerForAPI C.Dialer
+	TunnelForAPI C.Tunnel
+	ProviderName string
+}
+
+func applyProxyOptions(options ...ProxyOption) proxyOption {
+	opt := proxyOption{}
+	for _, o := range options {
+		o(&opt)
+	}
+	return opt
+}
+
+type ProxyOption func(opt *proxyOption)
+
+func WithDialerForAPI(dialer C.Dialer) ProxyOption {
+	return func(opt *proxyOption) {
+		opt.DialerForAPI = dialer
+	}
+}
+
+func WithTunnelForAPI(tunnel C.Tunnel) ProxyOption {
+	return func(opt *proxyOption) {
+		opt.TunnelForAPI = tunnel
+	}
+}
+
+func WithProviderName(name string) ProxyOption {
+	return func(opt *proxyOption) {
+		opt.ProviderName = name
+	}
+}
