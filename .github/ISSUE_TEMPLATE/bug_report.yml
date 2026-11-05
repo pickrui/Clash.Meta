@@ -1,0 +1,76 @@
+name: Bug Report
+description: "Report  Mihomo bug"
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: checkboxes
+    id: ensure
+    attributes:
+      label: Verify steps
+      description: "Before submitting, please check all the following options to demonstrate that you have read and understood the requirements below, otherwise this issue will be closed."
+      options:
+        - label: "I have read the [documentation](https://wiki.metacubex.one/) and understand the meaning of all configuration items I have written, avoiding a large number of seemingly useful options or default values."
+          required: true
+        - label: "I have not reviewed the [documentation](https://wiki.metacubex.one/) and resolve this issue."
+          required: false
+        - label: "I have not searched the [Issue Tracker](……/)  for the problem I am going to raise."
+          required: false
+        - label: "I have tested with the latest Alpha branch version, and the issue still persists."
+          required: true
+        - label: "I have provided server and client configuration files and processes that can reproduce the issue locally, rather than a desensitized complex client configuration file."
+          required: true
+        - label: "I have provided the simplest configuration that can reproduce the error I reported, rather than relying on remote servers, TUN, graphical client interfaces, or other closed-source software."
+          required: true
+        - label:  "I have provided complete configuration files and logs, rather than providing only parts that I believe are useful due to confidence in my own intelligence."
+          required: true
+
+  - type: dropdown
+    attributes:
+      label: Operating System
+      description: "Please provide the type of operating system."
+      multiple: true
+      options:
+        - MacOS
+        - Windows
+        - Linux
+        - OpenBSD/FreeBSD
+        - Android
+  - type: input
+    attributes:
+      label: System Version
+      description: "Please provide the version of the operating system where the issue occurred."
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Mihomo Version
+      description: "Provide the output of the `mihomo -v` command."
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      render: yaml
+      label: Configuration File
+      description: |-
+        Please attach the Mihomo configuration file below.
+        Make sure there is no sensitive information in the configuration file (such as server addresses, passwords, ports, etc.)
+        Also, ensure that the configuration file can reproduce the error using the Mihomo command-line program locally (if it's a proxy protocol issue, make sure the local server can be used for reproduction).
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Description
+      description: "Please provide a detailed description of the error."
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Reproduction Steps
+      description: "Please provide the steps to reproduce the error."
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Logs
+      description: "Attach the running logs of Mihomo Core below, with `log-level` set to `DEBUG`."
+      render: shell
