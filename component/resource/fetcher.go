@@ -1,0 +1,457 @@
+package resource
+
+import (
+	"context"
+	"errors"
+	"io"
+	"io/fs"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/metacubex/mihomo/common/atomic"
+	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/slowdown"
+	P "github.com/metacubex/mihomo/constant/provider"
+	"github.com/metacubex/mihomo/log"
+
+	"github.com/metacubex/fswatch"
+	"github.com/samber/lo"
+)
+
+type Parser[V any] func([]byte) (V, error)
+type BundleFile func() (fs.File, error)
+
+type Fetcher[V any] struct {
+	ctx          context.Context
+	ctxCancel    context.CancelFunc
+	resourceType string
+	name         string
+	vehicle      P.Vehicle
+	bundleFile   BundleFile
+	updatedAt    atomic.TypedValue[time.Time]
+	hash         utils.HashType
+	parser       Parser[V]
+	interval     time.Duration
+	onUpdate     func(V)
+	discard      func(V)
+	watcherMutex sync.Mutex
+	watcher      *fswatch.Watcher
+	updateMutex  sync.Mutex // serializes vehicle reads; loadBufMutex only guards publishing
+	loadBufMutex sync.Mutex
+	backoff      slowdown.Backoff
+}
+
+func (f *Fetcher[V]) Name() string {
+	return f.name
+}
+
+func (f *Fetcher[V]) Vehicle() P.Vehicle {
+	return f.vehicle
+}
+
+func (f *Fetcher[V]) VehicleType() P.VehicleType {
+	return f.vehicle.Type()
+}
+
+func (f *Fetcher[V]) UpdatedAt() time.Time {
+	return f.updatedAt.Load()
+}
+
+func (f *Fetcher[V]) Initial() (V, error) {
+	if stat, fErr := os.Stat(f.vehicle.Path()); fErr == nil {
+		// local file exists, use it first
+		buf, err := os.ReadFile(f.vehicle.Path())
+		modTime := stat.ModTime()
+		var contents V
+		if err == nil {
+			contents, _, err = f.loadBuf(buf, utils.MakeHash(buf), false)
+			f.updatedAt.Store(modTime) // reset updatedAt to file's modTime
+		}
+
+		if err == nil {
+			err = f.startPullLoop(time.Since(modTime) > f.interval)
+			if err != nil {
+				return lo.Empty[V](), err
+			}
+			return contents, nil
+		}
+	}
+
+	// parse local file error, fallback to bundle file
+	if f.bundleFile != nil {
+		// bundle file exists, use it first
+		if file, fErr := f.bundleFile(); fErr == nil {
+			defer file.Close()
+			buf, err := io.ReadAll(file)
+			var modTime time.Time
+			if stat, sErr := file.Stat(); sErr == nil {
+				modTime = stat.ModTime()
+			}
+			var contents V
+			if err == nil {
+				contents, _, err = f.loadBuf(buf, utils.MakeHash(buf), true)
+				f.updatedAt.Store(modTime) // reset updatedAt to file's modTime
+			}
+
+			if err == nil {
+				log.Infoln("[Provider] %s extract successful from bundle file", f.Name())
+				err = f.startPullLoop(time.Since(modTime) > f.interval)
+				if err != nil {
+					return lo.Empty[V](), err
+				}
+				return contents, nil
+			}
+			log.Warnln("[Provider] %s read bundle file error: %s", f.Name(), err.Error())
+		} else {
+			log.Warnln("[Provider] %s read bundle file error: %s", f.Name(), fErr.Error())
+		}
+	}
+
+	// parse local file error, fallback to remote
+	contents, _, updateErr := f.Update()
+
+	// start the pull loop even if f.Update() failed
+	err := f.startPullLoop(false)
+	if err != nil {
+		return lo.Empty[V](), err
+	}
+
+	if updateErr != nil {
+		return lo.Empty[V](), updateErr
+	}
+
+	return contents, nil
+}
+
+// SetDiscard releases parsed candidates that never become the published resource.
+func (f *Fetcher[V]) SetDiscard(discard func(V)) { f.discard = discard }
+
+func (f *Fetcher[V]) Update() (V, bool, error) {
+	f.updateMutex.Lock()
+	defer f.updateMutex.Unlock()
+	if err := f.ctx.Err(); err != nil {
+		return lo.Empty[V](), false, err
+	}
+	f.loadBufMutex.Lock()
+	oldHash := f.hash
+	f.loadBufMutex.Unlock()
+	var buf []byte
+	var hash utils.HashType
+	var contents V
+	var parsed bool
+	var err error
+	if vehicle, ok := f.vehicle.(*HTTPVehicle); ok {
+		buf, hash, err = vehicle.ReadValidated(f.ctx, oldHash, func(data []byte) error {
+			if oldHash.Equal(utils.MakeHash(data)) {
+				return nil
+			}
+			var parseErr error
+			contents, parseErr = f.parser(data)
+			parsed = parseErr == nil
+			return parseErr
+		}, true)
+	} else {
+		buf, hash, err = f.vehicle.Read(f.ctx, oldHash)
+	}
+	if err != nil {
+		if parsed && f.discard != nil {
+			f.discard(contents)
+		}
+		f.backoff.AddAttempt()
+		return lo.Empty[V](), false, err
+	}
+	f.loadBufMutex.Lock()
+	defer f.loadBufMutex.Unlock()
+	if !f.hash.Equal(oldHash) && !f.hash.Equal(hash) {
+		buf = nil // a side load published during the read supersedes it
+	}
+	return f.loadBufLocked(buf, hash, f.vehicle.Type() != P.File, contents, parsed)
+}
+
+func (f *Fetcher[V]) SideUpdate(buf []byte) (V, bool, error) {
+	return f.loadBuf(buf, utils.MakeHash(buf), true)
+}
+
+func (f *Fetcher[V]) loadBuf(buf []byte, hash utils.HashType, updateFile bool) (V, bool, error) {
+	f.loadBufMutex.Lock()
+	defer f.loadBufMutex.Unlock()
+
+	return f.loadBufLocked(buf, hash, updateFile, lo.Empty[V](), false)
+}
+
+func (f *Fetcher[V]) loadBufLocked(buf []byte, hash utils.HashType, updateFile bool, contents V, parsed bool) (V, bool, error) {
+	published := false
+	defer func() {
+		if parsed && !published && f.discard != nil {
+			f.discard(contents)
+		}
+	}()
+
+	if err := f.ctx.Err(); err != nil {
+		return lo.Empty[V](), false, err
+	}
+	now := time.Now()
+	if f.hash.Equal(hash) {
+		if updateFile {
+			_ = os.Chtimes(f.vehicle.Path(), now, now)
+		}
+		f.updatedAt.Store(now)
+		f.backoff.Reset() // no error, reset backoff
+		return lo.Empty[V](), true, nil
+	}
+
+	if buf == nil { // f.hash has been changed between f.vehicle.Read but should not happen (cause by concurrent)
+		return lo.Empty[V](), true, nil
+	}
+
+	var err error
+	if !parsed {
+		contents, err = f.parser(buf)
+		parsed = err == nil
+	}
+	if err != nil {
+		f.backoff.AddAttempt() // add a failed attempt to backoff
+		return lo.Empty[V](), false, err
+	}
+	if err := f.ctx.Err(); err != nil {
+		return lo.Empty[V](), false, err
+	}
+	f.backoff.Reset() // no error, reset backoff
+
+	if updateFile {
+		if writer, ok := f.vehicle.(interface {
+			WriteContext(context.Context, []byte) error
+		}); ok {
+			err = writer.WriteContext(f.ctx, buf)
+		} else {
+			err = f.vehicle.Write(buf)
+		}
+		if err != nil {
+			return lo.Empty[V](), false, err
+		}
+	}
+	if err := f.ctx.Err(); err != nil {
+		return lo.Empty[V](), false, err
+	}
+	f.updatedAt.Store(now)
+	f.hash = hash
+
+	if f.onUpdate != nil {
+		f.onUpdate(contents)
+	}
+
+	published = true
+	return contents, false, nil
+}
+
+// ReadSnapshot only returns bytes that produced the currently published value.
+func (f *Fetcher[V]) ReadSnapshot(maxBytes int64) ([]byte, error) {
+	f.loadBufMutex.Lock()
+	defer f.loadBufMutex.Unlock()
+	if err := f.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !f.hash.IsValid() {
+		return nil, nil
+	}
+	file, err := os.Open(f.vehicle.Path())
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || maxBytes <= 0 || info.Size() > maxBytes {
+		return nil, errors.New("provider snapshot exceeds read limit")
+	}
+	buf, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(buf)) > maxBytes || !utils.MakeHash(buf).Equal(f.hash) {
+		return nil, errors.New("provider snapshot changed")
+	}
+	return buf, nil
+}
+
+func (f *Fetcher[V]) Close() error {
+	f.ctxCancel()
+	f.watcherMutex.Lock()
+	defer f.watcherMutex.Unlock()
+	if f.watcher != nil {
+		_ = f.watcher.Close()
+	}
+	return nil
+}
+
+// WaitForUpdates drains in-flight writes after Close; parsers may call Close themselves.
+func (f *Fetcher[V]) WaitForUpdates() {
+	f.updateMutex.Lock()
+	f.updateMutex.Unlock()
+	f.loadBufMutex.Lock()
+	f.loadBufMutex.Unlock()
+}
+
+func (f *Fetcher[V]) pullLoop(forceUpdate bool) {
+	if forceUpdate {
+		log.Warnln("[Provider] %s not updated for a long time, force refresh", f.Name())
+		f.updateWithLog()
+	}
+
+	initialInterval := f.interval - time.Since(f.UpdatedAt())
+	if initialInterval > f.interval {
+		initialInterval = f.interval
+	}
+	if attempt := f.backoff.Attempt(); attempt > 0 { // f.Update() was failed, decrease the interval from backoff to achieve fast retry
+		if duration := f.backoff.ForAttempt(attempt); initialInterval <= 0 || duration < initialInterval {
+			initialInterval = duration
+		}
+	}
+
+	timer := time.NewTimer(initialInterval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-timer.C:
+			f.updateWithLog()
+			interval := f.interval
+			if attempt := f.backoff.Attempt(); attempt > 0 { // f.Update() was failed, decrease the interval from backoff to achieve fast retry
+				if duration := f.backoff.ForAttempt(attempt); duration < interval {
+					interval = duration
+				}
+			}
+			timer.Reset(interval)
+		case <-f.ctx.Done():
+			return
+		}
+	}
+}
+
+func (f *Fetcher[V]) startPullLoop(forceUpdate bool) (err error) {
+	// pull contents automatically
+	if f.vehicle.Type() == P.File {
+		watcher, watchErr := f.fileWatcher(f.vehicle.Path())
+		if watchErr != nil {
+			return watchErr
+		}
+		f.watcherMutex.Lock()
+		defer f.watcherMutex.Unlock()
+		if err := f.ctx.Err(); err != nil {
+			_ = watcher.Close()
+			return err
+		}
+		f.watcher = watcher
+	} else if f.interval > 0 {
+		go f.pullLoop(forceUpdate)
+	}
+	return
+}
+
+func (f *Fetcher[V]) fileWatcher(path string) (*fswatch.Watcher, error) {
+	watcher, err := fswatch.NewWatcher(fswatch.Options{Path: []string{path}, Callback: f.updateCallback})
+	if err != nil {
+		return nil, err
+	}
+	if err = watcher.Start(); err != nil {
+		_ = watcher.Close()
+		return nil, err
+	}
+	return watcher, nil
+}
+
+// ReplaceFile publishes a parsed immutable revision without overwriting its predecessor.
+func (f *Fetcher[V]) ReplaceFile(expectedPath, path string, expected, data []byte) error {
+	f.updateMutex.Lock()
+	defer f.updateMutex.Unlock()
+	f.loadBufMutex.Lock()
+	defer f.loadBufMutex.Unlock()
+	vehicle, ok := f.vehicle.(*FileVehicle)
+	if !ok || vehicle.Path() != expectedPath || !f.hash.Equal(utils.MakeHash(expected)) {
+		return errors.New("provider file revision changed")
+	}
+	if err := f.ctx.Err(); err != nil {
+		return err
+	}
+	contents, err := f.parser(data)
+	if err != nil {
+		return err
+	}
+	published := false
+	defer func() {
+		if !published && f.discard != nil {
+			f.discard(contents)
+		}
+	}()
+	watcher, err := f.fileWatcher(path)
+	if err != nil {
+		return err
+	}
+	f.watcherMutex.Lock()
+	if err := f.ctx.Err(); err != nil {
+		f.watcherMutex.Unlock()
+		_ = watcher.Close()
+		return err
+	}
+	previous := f.watcher
+	f.watcher = watcher
+	vehicle.path.Store(path)
+	f.watcherMutex.Unlock()
+	if previous != nil {
+		_ = previous.Close()
+	}
+	f.hash = utils.MakeHash(data)
+	f.updatedAt.Store(time.Now())
+	f.backoff.Reset()
+	if f.onUpdate != nil {
+		f.onUpdate(contents)
+	}
+	published = true
+	return nil
+}
+
+func (f *Fetcher[V]) updateCallback(path string) {
+	f.updateWithLog()
+}
+
+func (f *Fetcher[V]) updateWithLog() {
+	_, same, err := f.Update()
+	if err != nil {
+		log.Warnln("[Provider] %s pull error: %s", f.Name(), err.Error())
+		return
+	}
+
+	if same {
+		log.Debugln("[Provider] %s's content doesn't change", f.Name())
+		return
+	}
+
+	log.Infoln("[Provider] %s's content update", f.Name())
+	return
+}
+
+func NewFetcher[V any](name string, interval time.Duration, vehicle P.Vehicle, bundleFile BundleFile, parser Parser[V], onUpdate func(V)) *Fetcher[V] {
+	ctx, cancel := context.WithCancel(context.Background())
+	minBackoff := 10 * time.Second
+	if interval < minBackoff {
+		minBackoff = interval
+	}
+	return &Fetcher[V]{
+		ctx:        ctx,
+		ctxCancel:  cancel,
+		name:       name,
+		bundleFile: bundleFile,
+		vehicle:    vehicle,
+		parser:     parser,
+		onUpdate:   onUpdate,
+		interval:   interval,
+		backoff: slowdown.Backoff{
+			Factor: 2,
+			Jitter: false,
+			Min:    minBackoff,
+			Max:    interval,
+		},
+	}
+}
