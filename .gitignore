@@ -1,0 +1,71 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/*
+
+# Test binary, build with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# go mod vendor
+vendor
+
+# GoLand
+.idea/*
+
+# macOS file
+.DS_Store
+
+# test suite
+test/config/cache*
+/output
+.vscode/
+.fleet/
+# Private implementation is restored only in authorized builds.
+/.private-build/
+/adapter/outbound/snell.go
+/adapter/outbound/snell_cleanup_test.go
+/adapter/outbound/snell_happy_eyeballs.go
+/adapter/outbound/snell_happy_eyeballs_test.go
+/adapter/outbound/snell_http3_test.go
+/adapter/outbound/snell_test.go
+/adapter/outbound/snell_v6_test.go
+/adapters/outbound/snell.go
+/component/snell/cipher.go
+/component/snell/pool.go
+/component/snell/snell.go
+/listener/config/snell.go
+/listener/inbound/snell.go
+/listener/inbound/snell_test.go
+/listener/snell/server.go
+/listener/snell/server_lifecycle_test.go
+/test/config/snell-http.conf
+/test/config/snell-tls.conf
+/test/config/snell.conf
+/test/snell_test.go
+/transport/snell/cipher.go
+/transport/snell/http3.go
+/transport/snell/http3_test.go
+/transport/snell/identity.go
+/transport/snell/identity_test.go
+/transport/snell/internal/v6shape/api.go
+/transport/snell/internal/v6shape/mixing.go
+/transport/snell/internal/v6shape/profile.go
+/transport/snell/internal/v6shape/salt.go
+/transport/snell/pool.go
+/transport/snell/pool_test.go
+/transport/snell/retry.go
+/transport/snell/retry_test.go
+/transport/snell/snell.go
+/transport/snell/snell_test.go
+/transport/snell/stream_v4.go
+/transport/snell/testdata/v6-default-vectors.json
+/transport/snell/v4.go
+/transport/snell/v4_test.go
+/transport/snell/v6.go
+/transport/snell/v6_test.go
