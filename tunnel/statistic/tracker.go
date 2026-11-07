@@ -16,6 +16,18 @@ import (
 
 var MetadataProcessor func(*C.Metadata)
 
+// RulePayloadObfuscated names rule payloads the API reports as ***.
+var RulePayloadObfuscated func(payload string) bool
+
+// RulePayload is a rule's payload as the API may report it.
+func RulePayload(rule C.Rule) string {
+	payload := rule.Payload()
+	if RulePayloadObfuscated != nil && RulePayloadObfuscated(payload) {
+		return "***"
+	}
+	return payload
+}
+
 func trackerMetadata(metadata *C.Metadata, remoteDestination string) *C.Metadata {
 	if metadata == nil {
 		return nil
@@ -162,7 +174,7 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 
 	if rule != nil {
 		tt.TrackerInfo.Rule = rule.RuleType().String()
-		tt.TrackerInfo.RulePayload = rule.Payload()
+		tt.TrackerInfo.RulePayload = RulePayload(rule)
 	}
 
 	manager.Join(tt)
@@ -254,7 +266,7 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 
 	if rule != nil {
 		ut.TrackerInfo.Rule = rule.RuleType().String()
-		ut.TrackerInfo.RulePayload = rule.Payload()
+		ut.TrackerInfo.RulePayload = RulePayload(rule)
 	}
 
 	manager.Join(ut)

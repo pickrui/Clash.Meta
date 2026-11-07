@@ -5,6 +5,7 @@ import (
 
 	"github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/tunnel"
+	"github.com/metacubex/mihomo/tunnel/statistic"
 
 	"github.com/metacubex/chi"
 	"github.com/metacubex/chi/render"
@@ -46,7 +47,7 @@ func getRules(w http.ResponseWriter, r *http.Request) {
 		r := Rule{
 			Index:   index,
 			Type:    rule.RuleType().String(),
-			Payload: rule.Payload(),
+			Payload: statistic.RulePayload(rule),
 			Proxy:   rule.Adapter(),
 			Size:    -1,
 		}

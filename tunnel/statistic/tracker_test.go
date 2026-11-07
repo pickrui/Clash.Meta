@@ -59,3 +59,45 @@ func TestTrackerCachesDirectClassification(t *testing.T) {
 		t.Fatalf("total traffic=%d/%d", up, down)
 	}
 }
+
+type payloadTestRule struct {
+	C.Rule
+	payload string
+}
+
+func (r payloadTestRule) RuleType() C.RuleType { return C.DomainSuffix }
+func (r payloadTestRule) Payload() string      { return r.payload }
+
+type packetTestConn struct {
+	C.PacketConn
+}
+
+func (packetTestConn) Chains() C.Chain           { return C.Chain{"DIRECT"} }
+func (packetTestConn) ProviderChains() C.Chain   { return nil }
+func (packetTestConn) RemoteDestination() string { return "" }
+
+func TestTrackersReportFilteredRulePayloads(t *testing.T) {
+	previous := RulePayloadObfuscated
+	t.Cleanup(func() { RulePayloadObfuscated = previous })
+	RulePayloadObfuscated = func(payload string) bool { return payload == "hidden.example" }
+	manager := &Manager{}
+	rule := func(payload string) C.Rule { return payloadTestRule{payload: payload} }
+	tcp := func(payload string) string {
+		return NewTCPTracker(trafficTestConn{name: "DIRECT"}, manager, &C.Metadata{}, rule(payload), 0, 0, false).Info().RulePayload
+	}
+	udp := func(payload string) string {
+		return NewUDPTracker(packetTestConn{}, manager, &C.Metadata{}, rule(payload), 0, 0, false).Info().RulePayload
+	}
+	for name, report := range map[string]func(string) string{"tcp": tcp, "udp": udp} {
+		if got := report("hidden.example"); got != "***" {
+			t.Fatalf("%s: hidden payload = %q", name, got)
+		}
+		if got := report("public.example"); got != "public.example" {
+			t.Fatalf("%s: public payload = %q", name, got)
+		}
+	}
+	RulePayloadObfuscated = nil
+	if got := tcp("hidden.example"); got != "hidden.example" {
+		t.Fatalf("without a filter = %q", got)
+	}
+}
