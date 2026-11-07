@@ -49,6 +49,9 @@ type Session struct {
 	pktCounter     atomic.Uint32
 	clientMetadata string
 	keepalive      time.Duration
+	started        time.Time
+	lastFrame      atomic.Int64 // time since started when a frame last arrived
+	delivering     atomic.Bool  // the receive loop is waiting for a stream's reader
 
 	// server
 	onNewStream func(stream *Stream)
@@ -94,28 +97,62 @@ func (s *Session) Run() {
 	s.buffering = true
 	s.writeControlFrame(f)
 
+	s.started = time.Now()
 	go s.recvLoop()
 	if s.keepalive > 0 {
 		go s.keepaliveLoop()
 	}
 }
 
-// keepaliveLoop writes without a deadline: the write deadline of a control frame
-// also cuts short a data write in progress, which only means a busy uplink here.
+// keepaliveLoop ends a session two intervals after its last frame, so that the
+// next stream dials a new one. Time spent waiting for a stream's reader says
+// nothing about the peer and does not count.
+//
+// Heartbeats are written without a deadline, because the write deadline of a
+// control frame also cuts short a data write in progress, and on their own
+// goroutine, because a stalled uplink must not hold up the check.
 func (s *Session) keepaliveLoop() {
-	ticker := time.NewTicker(s.keepalive)
-	defer ticker.Stop()
+	limit := 2 * s.keepalive
+	nextHeart := s.keepalive
+	timer := time.NewTimer(nextHeart)
+	defer timer.Stop()
 	heart := [headerOverHeadSize]byte{cmdHeartRequest}
+	var writing atomic.Bool
 	for {
 		select {
 		case <-s.die:
 			return
-		case <-ticker.C:
-			if _, err := s.writeConn(heart[:]); err != nil {
+		case <-timer.C:
+		}
+		now := time.Since(s.started)
+		remaining := limit
+		if !s.delivering.Load() {
+			remaining -= now - time.Duration(s.lastFrame.Load())
+			if remaining <= 0 {
 				s.Close()
 				return
 			}
 		}
+		if now >= nextHeart {
+			for nextHeart <= now {
+				nextHeart += s.keepalive
+			}
+			if writing.CompareAndSwap(false, true) {
+				go func() {
+					defer writing.Store(false)
+					if _, err := s.writeConn(heart[:]); err != nil {
+						s.Close()
+					}
+				}()
+			}
+		}
+		timer.Reset(min(nextHeart-now, remaining))
+	}
+}
+
+func (s *Session) frameArrived() {
+	if s.keepalive > 0 {
+		s.lastFrame.Store(int64(time.Since(s.started)))
 	}
 }
 
@@ -210,6 +247,7 @@ func (s *Session) recvLoop() error {
 		}
 		// read header first
 		if _, err := io.ReadFull(s.conn, hdr[:]); err == nil {
+			s.frameArrived()
 			sid := hdr.StreamID()
 			switch hdr.Cmd() {
 			case cmdPSH:
@@ -220,7 +258,10 @@ func (s *Session) recvLoop() error {
 						stream, ok := s.streams[sid]
 						s.streamLock.RUnlock()
 						if ok {
+							s.delivering.Store(true)
 							stream.pipeW.Write(buffer)
+							s.frameArrived()
+							s.delivering.Store(false)
 						}
 						pool.Put(buffer)
 					} else {
@@ -357,7 +398,7 @@ func (s *Session) recvLoop() error {
 					return err
 				}
 			case cmdHeartResponse:
-				// Active keepalive checking is not implemented yet
+				// any frame counts as a sign of life, see keepaliveLoop
 				break
 			case cmdServerSettings:
 				if hdr.Length() > 0 {

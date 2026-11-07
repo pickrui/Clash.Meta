@@ -20,7 +20,7 @@ import (
 
 // A CDN closes a WebSocket left idle for about 100 seconds, and every stream of
 // the session goes with it.
-const webSocketKeepalive = 30 * time.Second
+const webSocketKeepalive = 45 * time.Second
 
 type ClientConfig struct {
 	Password                 string
