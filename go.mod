@@ -162,3 +162,6 @@ replace github.com/metacubex/fswatch => ./third_party/fswatch
 
 // Match Windows TFO socket layouts to the pinned Go toolchain.
 replace github.com/metacubex/tfo-go => ./third_party/tfo-go
+
+// Close failed netcheck DERP probes (see tailscale README.oix.md).
+replace github.com/metacubex/tailscale => ./third_party/tailscale

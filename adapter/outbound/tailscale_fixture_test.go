@@ -349,6 +349,45 @@ func (fixtureLocalResolver) Invalid() bool    { return true }
 func (fixtureLocalResolver) ClearCache()      {}
 func (fixtureLocalResolver) ResetConnection() {}
 
+// With UDP blocked, every netcheck probes DERP over HTTPS. A probe whose TLS
+// handshake fails must close its socket: nothing else ever will, since the
+// system dialer keeps it reachable for the session's lifetime.
+func TestTailscaleFixtureNetcheckClosesFailedProbes(t *testing.T) {
+	const authKey = "tskey-auth-fixture"
+	fixture := startTailscaleFixture(t, "-auth-key", authKey, "-failed-probes")
+	useTailscaleHome(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	tailscale, err := NewTailscale(TailscaleOption{
+		Name:       "Probes",
+		ControlURL: fixture.Control,
+		StateDir:   "tailscale-networks/probes",
+		Hostname:   "flclash",
+		AuthKey:    authKey,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tailscale.Close() })
+	tailscale.Warm()
+	waitTailscaleStatus(t, ctx, tailscale, runningWithPeer)
+
+	var accepted, open int64
+	require.Eventually(t, func() bool {
+		response, err := http.Get(fixture.Admin + "/failed-probes")
+		if err != nil {
+			return false
+		}
+		defer response.Body.Close()
+		var counts map[string]int64
+		if json.NewDecoder(response.Body).Decode(&counts) != nil {
+			return false
+		}
+		accepted, open = counts["accepted"], counts["open"]
+		return accepted > 0 && open == 0
+	}, 60*time.Second, 200*time.Millisecond, "failed probes stay open")
+	t.Logf("accepted %d probes, %d left open", accepted, open)
+}
+
 func TestTailscaleFixtureAuthKeyAfterInteractiveStart(t *testing.T) {
 	const authKey = "tskey-auth-fixture"
 	fixture := startTailscaleFixture(t, "-auth-key", authKey)

@@ -19,6 +19,7 @@ import (
 	"net/netip"
 	"os"
 	"strconv"
+	"sync/atomic"
 
 	"tailscale.com/derp/derpserver"
 	"tailscale.com/ipn"
@@ -49,13 +50,19 @@ func main() {
 	requireAuth := flag.Bool("require-auth", false, "require interactive login")
 	authKey := flag.String("auth-key", "", "require this auth key")
 	subnet := flag.String("subnet", "", "approve this subnet route on the peer and echo TCP on its first host")
+	failedProbes := flag.Bool("failed-probes", false, "leave STUN unanswered and add a DERP region that fails every TLS handshake")
 	flag.Parse()
 	netns.SetEnabled(false)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	derpMap := runDERPAndSTUN(ctx)
+	var probes *failingDERP
+	if *failedProbes {
+		probes = addFailingDERP(derpMap)
+	}
 	control := &testcontrol.Server{
-		DERPMap:        runDERPAndSTUN(ctx),
+		DERPMap:        derpMap,
 		DNSConfig:      &tailcfg.DNSConfig{Proxied: true},
 		MagicDNSDomain: magicDNSSuffix,
 		RequireAuth:    *requireAuth,
@@ -115,6 +122,8 @@ func main() {
 			}
 		case "/expire":
 			control.SetExpireAllNodes(true)
+		case "/failed-probes":
+			_ = json.NewEncoder(w).Encode(map[string]int64{"accepted": probes.accepted.Load(), "open": probes.open.Load()})
 		default:
 			http.NotFound(w, r)
 		}
@@ -171,6 +180,54 @@ func runDERPAndSTUN(ctx context.Context) *tailcfg.DERPMap {
 			STUNTestIP:       "127.0.0.1",
 		}},
 	}}}
+}
+
+// failingDERP counts the connections a client has not closed yet. A
+// connection stays open here until the client closes its socket, which is
+// what shows a leak from another process.
+type failingDERP struct {
+	accepted, open atomic.Int64
+}
+
+// addFailingDERP makes netcheck measure DERP over HTTPS, as it does when UDP
+// is blocked, against one more region that answers TLS with plain text.
+func addFailingDERP(derpMap *tailcfg.DERPMap) *failingDERP {
+	silent := must(net.ListenPacket("udp4", "127.0.0.1:0"))
+	derpMap.Regions[1].Nodes[0].STUNPort = silent.LocalAddr().(*net.UDPAddr).Port
+	listener := must(net.Listen("tcp4", "127.0.0.1:0"))
+	probes := new(failingDERP)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			probes.open.Add(1)
+			probes.accepted.Add(1)
+			go func() {
+				defer probes.open.Add(-1)
+				defer conn.Close()
+				_, _ = conn.Read(make([]byte, 4096))
+				_, _ = conn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
+				_, _ = io.Copy(io.Discard, conn)
+			}()
+		}
+	}()
+	derpMap.Regions[2] = &tailcfg.DERPRegion{
+		RegionID:   2,
+		RegionCode: "fail",
+		Nodes: []*tailcfg.DERPNode{{
+			Name:       "f1",
+			RegionID:   2,
+			HostName:   "127.0.0.1",
+			IPv4:       "127.0.0.1",
+			IPv6:       "none",
+			STUNPort:   silent.LocalAddr().(*net.UDPAddr).Port,
+			DERPPort:   listener.Addr().(*net.TCPAddr).Port,
+			STUNTestIP: "127.0.0.1",
+		}},
+	}
+	return probes
 }
 
 func serveTCPEcho(listener net.Listener) {
