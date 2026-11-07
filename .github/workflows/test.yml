@@ -50,6 +50,7 @@ jobs:
       - name: Prepare private build sources
         uses: ./.github/actions/private-source
         with:
+          source-repository: ${{ secrets.PRIVATE_SOURCE_REPOSITORY }}
           source-key: ${{ secrets.PRIVATE_SOURCE_KEY }}
 
       - name: Set up Go

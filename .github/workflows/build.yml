@@ -162,6 +162,7 @@ jobs:
     - name: Prepare private build sources
       uses: ./.github/actions/private-source
       with:
+        source-repository: ${{ secrets.PRIVATE_SOURCE_REPOSITORY }}
         source-key: ${{ secrets.PRIVATE_SOURCE_KEY }}
 
     - name: Set up Go
@@ -406,6 +407,7 @@ jobs:
       - name: Prepare private build sources
         uses: ./.github/actions/private-source
         with:
+          source-repository: ${{ secrets.PRIVATE_SOURCE_REPOSITORY }}
           source-key: ${{ secrets.PRIVATE_SOURCE_KEY }}
 
       - name: Get tags
@@ -468,6 +470,7 @@ jobs:
       - name: Prepare private build sources
         uses: ./.github/actions/private-source
         with:
+          source-repository: ${{ secrets.PRIVATE_SOURCE_REPOSITORY }}
           source-key: ${{ secrets.PRIVATE_SOURCE_KEY }}
 
       - uses: actions/download-artifact@v8
