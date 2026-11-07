@@ -17,7 +17,11 @@ import (
 	utls "github.com/metacubex/utls"
 )
 
+// PinnedServer names servers that only the built-in roots vouch for.
+var PinnedServer func(server string) bool
+
 type TLSConfig struct {
+	Server               string
 	Restls               *restls.Config
 	Host                 string
 	SkipCertVerify       bool
@@ -39,6 +43,10 @@ type TLSConfig struct {
 	TLSMirrorDialer      tlsmirror.EnrollmentDialer
 }
 
+func (cfg *TLSConfig) pinned() bool {
+	return PinnedServer != nil && PinnedServer(cfg.Server)
+}
+
 func (cfg *TLSConfig) ToStdConfig() (*tls.Config, error) {
 	tlsConfig, err := ca.GetTLSConfig(ca.Option{
 		TLSConfig: &tls.Config{
@@ -51,6 +59,7 @@ func (cfg *TLSConfig) ToStdConfig() (*tls.Config, error) {
 		NameCertVerify: cfg.NameCertVerify,
 		Certificate:    cfg.Certificate,
 		PrivateKey:     cfg.PrivateKey,
+		EmbeddedOnly:   cfg.pinned(),
 	})
 	if err != nil {
 		return nil, err

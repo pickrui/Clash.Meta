@@ -179,6 +179,7 @@ func NewAnyTLS(option AnyTLSOption) (*AnyTLS, error) {
 		return nil, errors.New("security modes are mutually exclusive: " + strings.Join(securityModes, ", "))
 	}
 	tlsConfig := &vmess.TLSConfig{
+		Server:            option.Server,
 		Host:              option.SNI,
 		SkipCertVerify:    option.SkipCertVerify,
 		NameCertVerify:    option.NameCertVerify,

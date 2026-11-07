@@ -81,8 +81,10 @@ type Option struct {
 	Fingerprint    string
 	NameCertVerify string
 	ZeroTrust      bool
-	Certificate    string
-	PrivateKey     string
+	// EmbeddedOnly fails verification when the build carries no bundle.
+	EmbeddedOnly bool
+	Certificate  string
+	PrivateKey   string
 }
 
 func GetTLSConfig(opt Option) (tlsConfig *tls.Config, err error) {
@@ -92,7 +94,11 @@ func GetTLSConfig(opt Option) (tlsConfig *tls.Config, err error) {
 	}
 	tlsConfig.Time = ntp.Now
 
-	if opt.ZeroTrust {
+	if opt.EmbeddedOnly {
+		if tlsConfig.RootCAs = zeroTrustCertPool(); tlsConfig.RootCAs == nil {
+			tlsConfig.RootCAs = x509.NewCertPool()
+		}
+	} else if opt.ZeroTrust {
 		tlsConfig.RootCAs = zeroTrustCertPool()
 	} else {
 		tlsConfig.RootCAs = GetCertPool()
@@ -128,6 +134,11 @@ func GetTLSConfig(opt Option) (tlsConfig *tls.Config, err error) {
 		}
 	}
 	return tlsConfig, nil
+}
+
+// HasEmbeddedRoots reports whether the build carries usable root certificates.
+func HasEmbeddedRoots() bool {
+	return zeroTrustCertPool() != nil
 }
 
 var zeroTrustCertPool = once.OnceValue(func() *x509.CertPool {
