@@ -34,10 +34,11 @@ type Client struct {
 	clientMetadata     string
 	idleSessionTimeout time.Duration
 	minIdleSession     int
+	keepalive          time.Duration
 	disableReuse       bool
 }
 
-func NewClient(ctx context.Context, dialOut util.DialOutFunc, _padding *atomic.Pointer[padding.PaddingFactory], clientMetadata string, idleSessionCheckInterval, idleSessionTimeout time.Duration, minIdleSession int, disableReuse bool) *Client {
+func NewClient(ctx context.Context, dialOut util.DialOutFunc, _padding *atomic.Pointer[padding.PaddingFactory], clientMetadata string, idleSessionCheckInterval, idleSessionTimeout time.Duration, minIdleSession int, disableReuse bool, keepalive time.Duration) *Client {
 	c := &Client{
 		sessions:           make(map[uint64]*Session),
 		dialOut:            dialOut,
@@ -45,6 +46,7 @@ func NewClient(ctx context.Context, dialOut util.DialOutFunc, _padding *atomic.P
 		clientMetadata:     clientMetadata,
 		idleSessionTimeout: idleSessionTimeout,
 		minIdleSession:     minIdleSession,
+		keepalive:          keepalive,
 		disableReuse:       disableReuse,
 	}
 	if idleSessionCheckInterval <= time.Second*5 {
@@ -130,6 +132,7 @@ func (c *Client) createSession(ctx context.Context) (*Session, error) {
 
 	session := NewClientSession(underlying, c.padding, c.clientMetadata)
 	session.seq = c.sessionCounter.Add(1)
+	session.keepalive = c.keepalive
 	session.dieHook = func() {
 		if !c.disableReuse {
 			c.idleSessionLock.Lock()

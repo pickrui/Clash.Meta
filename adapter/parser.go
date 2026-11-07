@@ -260,6 +260,7 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 			if rate := info.TrafficRate; rate != nil && (math.IsNaN(*rate) || math.IsInf(*rate, 0) || *rate < 0) {
 				info.TrafficRate = nil
 			}
+			info.CDN = proxyType == "anytls" && mapping["network"] == "ws" && metadata["cdn"] == true
 			result.displayInfo = info
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/common/buf"
+	"github.com/metacubex/mihomo/component/ca"
 	"github.com/metacubex/mihomo/transport/anytls/padding"
 	"github.com/metacubex/mihomo/transport/anytls/session"
 	"github.com/metacubex/mihomo/transport/vmess"
@@ -16,6 +17,10 @@ import (
 	M "github.com/metacubex/sing/common/metadata"
 	N "github.com/metacubex/sing/common/network"
 )
+
+// A CDN closes a WebSocket left idle for about 100 seconds, and every stream of
+// the session goes with it.
+const webSocketKeepalive = 30 * time.Second
 
 type ClientConfig struct {
 	Password                 string
@@ -27,11 +32,13 @@ type ClientConfig struct {
 	Server                   M.Socksaddr
 	Dialer                   N.Dialer
 	TLSConfig                *vmess.TLSConfig
+	WebSocket                *vmess.WebsocketConfig
 }
 
 type Client struct {
 	passwordSha256 []byte
 	tlsConfig      *vmess.TLSConfig
+	webSocket      *vmess.WebsocketConfig
 	dialer         N.Dialer
 	server         M.Socksaddr
 	sessionClient  *session.Client
@@ -43,12 +50,17 @@ func NewClient(ctx context.Context, config ClientConfig) *Client {
 	c := &Client{
 		passwordSha256: pw[:],
 		tlsConfig:      config.TLSConfig,
+		webSocket:      config.WebSocket,
 		dialer:         config.Dialer,
 		server:         config.Server,
 	}
 	// Initialize the padding state of this client
 	padding.UpdatePaddingScheme(padding.DefaultPaddingScheme, &c.padding)
-	c.sessionClient = session.NewClient(ctx, c.createOutboundTLSConnection, &c.padding, config.ClientMetadata, config.IdleSessionCheckInterval, config.IdleSessionTimeout, config.MinIdleSession, config.DisableReuse)
+	var keepalive time.Duration
+	if config.WebSocket != nil {
+		keepalive = webSocketKeepalive
+	}
+	c.sessionClient = session.NewClient(ctx, c.createOutboundTLSConnection, &c.padding, config.ClientMetadata, config.IdleSessionCheckInterval, config.IdleSessionTimeout, config.MinIdleSession, config.DisableReuse, keepalive)
 	return c
 }
 
@@ -82,6 +94,21 @@ func (c *Client) createOutboundTLSConnection(ctx context.Context) (net.Conn, err
 	binary.BigEndian.PutUint16(b.Extend(2), uint16(paddingLen))
 	if paddingLen > 0 {
 		b.WriteZeroN(paddingLen)
+	}
+
+	if c.webSocket != nil {
+		wsConfig := *c.webSocket
+		wsConfig.TLSConfig, err = ca.GetTLSConfig(ca.Option{TLSConfig: wsConfig.TLSConfig.Clone()})
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		upgraded, err := vmess.StreamWebsocketConn(ctx, conn, &wsConfig)
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		conn = upgraded
 	}
 
 	tlsConn, err := vmess.StreamTLSConn(ctx, conn, c.tlsConfig)

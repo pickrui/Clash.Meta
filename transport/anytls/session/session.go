@@ -48,6 +48,7 @@ type Session struct {
 	buffer         []byte
 	pktCounter     atomic.Uint32
 	clientMetadata string
+	keepalive      time.Duration
 
 	// server
 	onNewStream func(stream *Stream)
@@ -94,6 +95,28 @@ func (s *Session) Run() {
 	s.writeControlFrame(f)
 
 	go s.recvLoop()
+	if s.keepalive > 0 {
+		go s.keepaliveLoop()
+	}
+}
+
+// keepaliveLoop writes without a deadline: the write deadline of a control frame
+// also cuts short a data write in progress, which only means a busy uplink here.
+func (s *Session) keepaliveLoop() {
+	ticker := time.NewTicker(s.keepalive)
+	defer ticker.Stop()
+	heart := [headerOverHeadSize]byte{cmdHeartRequest}
+	for {
+		select {
+		case <-s.die:
+			return
+		case <-ticker.C:
+			if _, err := s.writeConn(heart[:]); err != nil {
+				s.Close()
+				return
+			}
+		}
+	}
 }
 
 // IsClosed does a safe check to see if we have shutdown
@@ -155,7 +178,9 @@ func (s *Session) OpenStream() (*Stream, error) {
 		return nil, err
 	}
 
+	s.connLock.Lock()
 	s.buffering = false // proxy Write it's SocksAddr to flush the buffer
+	s.connLock.Unlock()
 
 	s.streamLock.Lock()
 	defer s.streamLock.Unlock()

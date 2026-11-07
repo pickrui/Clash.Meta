@@ -38,6 +38,7 @@ type NodeDisplayInfo struct {
 	SnellECH    bool     `proxy:"-" json:"snellEch,omitempty"`
 	HTTP3       bool     `proxy:"-" json:"http3,omitempty"`
 	WARP        bool     `proxy:"warp,omitempty" json:"warp,omitempty"`
+	CDN         bool     `proxy:"-" json:"cdn,omitempty"`
 }
 
 type Proxy struct {

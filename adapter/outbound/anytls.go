@@ -14,8 +14,10 @@ import (
 	"github.com/metacubex/mihomo/transport/anytls"
 	"github.com/metacubex/mihomo/transport/vmess"
 
+	"github.com/metacubex/http"
 	M "github.com/metacubex/sing/common/metadata"
 	"github.com/metacubex/sing/common/uot"
+	"github.com/metacubex/tls"
 )
 
 type AnyTLS struct {
@@ -30,6 +32,8 @@ type AnyTLSOption struct {
 	Server                   string           `proxy:"server"`
 	Port                     int              `proxy:"port"`
 	Password                 string           `proxy:"password"`
+	Network                  string           `proxy:"network,omitempty"`
+	WSOpts                   AnyTLSWSOptions  `proxy:"ws-opts,omitempty"`
 	ALPN                     []string         `proxy:"alpn,omitempty"`
 	SNI                      string           `proxy:"sni,omitempty"`
 	ECHOpts                  ECHOptions       `proxy:"ech-opts,omitempty"`
@@ -48,6 +52,10 @@ type AnyTLSOption struct {
 	IdleSessionTimeout       int              `proxy:"idle-session-timeout,omitempty"`
 	MinIdleSession           int              `proxy:"min-idle-session,omitempty"`
 	DisableReuse             bool             `proxy:"disable-reuse,omitempty"`
+}
+
+type AnyTLSWSOptions struct {
+	Path string `proxy:"path"`
 }
 
 func (t *AnyTLS) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
@@ -120,6 +128,26 @@ func NewAnyTLS(option AnyTLSOption) (*AnyTLS, error) {
 		IdleSessionTimeout:       time.Duration(option.IdleSessionTimeout) * time.Second,
 		MinIdleSession:           option.MinIdleSession,
 		DisableReuse:             option.DisableReuse,
+	}
+	switch option.Network {
+	case "", "tcp":
+		if option.WSOpts.Path != "" {
+			return nil, errors.New("AnyTLS ws-opts requires network: ws")
+		}
+	case "ws":
+		path := option.WSOpts.Path
+		if !strings.HasPrefix(path, "/") || len(path) > 1024 || strings.ContainsFunc(path, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("/._~-", r))
+		}) {
+			return nil, errors.New("AnyTLS requires an absolute WebSocket path")
+		}
+		tOption.WebSocket = &vmess.WebsocketConfig{
+			Host: option.Server, Port: strconv.Itoa(option.Port), Path: path,
+			TLS: true, TLSConfig: &tls.Config{ServerName: option.Server, NextProtos: []string{"http/1.1"}},
+			Headers: make(http.Header), ClientFingerprint: option.ClientFingerprint,
+		}
+	default:
+		return nil, errors.New("unsupported AnyTLS network")
 	}
 	echConfig, err := option.ECHOpts.Parse()
 	if err != nil {
