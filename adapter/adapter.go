@@ -35,7 +35,7 @@ type internalProxyState struct {
 
 type NodeDisplayInfo struct {
 	TrafficRate *float64 `proxy:"traffic-rate,omitempty" json:"trafficRate,omitempty"`
-	SnellECH    bool     `proxy:"-" json:"snellEch,omitempty"`
+	Hollow      bool     `proxy:"-" json:"hollow,omitempty"`
 	HTTP3       bool     `proxy:"-" json:"http3,omitempty"`
 	WARP        bool     `proxy:"warp,omitempty" json:"warp,omitempty"`
 	CDN         bool     `proxy:"-" json:"cdn,omitempty"`

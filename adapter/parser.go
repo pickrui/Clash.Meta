@@ -265,7 +265,7 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 		}
 	}
 	if obfs, ok := mapping["obfs-opts"].(map[string]any); proxyType == "snell" && ok && obfs["mode"] == "ech-tls" {
-		result.displayInfo.SnellECH = true
+		result.displayInfo.Hollow = true
 		result.displayInfo.HTTP3 = obfs["transport"] == "auto" || obfs["transport"] == "h3"
 	}
 	original := maps.Clone(mapping)
