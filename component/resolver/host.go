@@ -29,8 +29,14 @@ func NewHosts(hosts *trie.DomainTrie[HostValue]) Hosts {
 	}
 }
 
+// HostsBypass names hosts that Search leaves to the resolver.
+var HostsBypass func(host string) bool
+
 // Return the search result and whether to match the parameter `isDomain`
 func (h Hosts) Search(domain string, isDomain bool) (*HostValue, bool) {
+	if HostsBypass != nil && HostsBypass(domain) {
+		return nil, false
+	}
 	if value := h.DomainTrie.Search(domain); value != nil {
 		hostValue := value.Data()
 		for {

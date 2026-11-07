@@ -219,6 +219,29 @@ func withResolver(resolver resolver.Resolver, ipv6 bool) handler {
 	}
 }
 
+// withNamesRefused answers REFUSED when a question or an answer names a host the
+// resolver package turns away.
+func withNamesRefused(next handler) handler {
+	return func(ctx *icontext.DNSContext, r *D.Msg) (*D.Msg, error) {
+		refuse := func() (*D.Msg, error) {
+			ctx.SetType(icontext.DNSTypeRaw)
+			msg := new(D.Msg)
+			msg.SetRcode(r, D.RcodeRefused)
+			return msg, nil
+		}
+		for _, q := range r.Question {
+			if resolver.CheckName(q.Name) != nil {
+				return refuse()
+			}
+		}
+		msg, err := next(ctx, r)
+		if err == nil && msg != nil && resolver.MessageRefused(msg) {
+			return refuse()
+		}
+		return msg, err
+	}
+}
+
 func compose(middlewares []middleware, endpoint handler) handler {
 	length := len(middlewares)
 	h := endpoint
@@ -231,7 +254,7 @@ func compose(middlewares []middleware, endpoint handler) handler {
 }
 
 func newHandler(resolver resolver.Resolver, mapper *ResolverEnhancer) handler {
-	var middlewares []middleware
+	middlewares := []middleware{withNamesRefused}
 
 	if mapper.useHosts {
 		middlewares = append(middlewares, withHosts(mapper.mapping))
@@ -244,6 +267,9 @@ func newHandler(resolver resolver.Resolver, mapper *ResolverEnhancer) handler {
 	if mapper.mode != C.DNSNormal {
 		middlewares = append(middlewares, withMapping(mapper.mapping))
 	}
+
+	// hosts can rename the question on its way to the resolver
+	middlewares = append(middlewares, withNamesRefused)
 
 	return compose(middlewares, withResolver(resolver, mapper.ipv6))
 }

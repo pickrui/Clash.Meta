@@ -397,6 +397,9 @@ func Dial(network, address string) (*TCPConn, error) {
 	// init gopacket.layers
 	layers.Init()
 	// remote address resolve
+	if err := checkDialName(address); err != nil {
+		return nil, err
+	}
 	raddr, err := net.ResolveTCPAddr(network, address)
 	if err != nil {
 		return nil, err

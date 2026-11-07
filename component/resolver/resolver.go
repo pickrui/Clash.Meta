@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
@@ -38,6 +39,52 @@ var (
 	// DefaultDNSTimeout defined the default dns request timeout
 	DefaultDNSTimeout = time.Second * 5
 )
+
+// LookupGuard may refuse a lookup before any resolver sees the host. r is the
+// resolver about to be asked, nil when the name goes out in a raw message.
+var LookupGuard func(host string, r Resolver) error
+
+func checkLookupGuard(host string, r Resolver) error {
+	if LookupGuard == nil {
+		return nil
+	}
+	return LookupGuard(host, r)
+}
+
+// CheckName reports why a raw DNS message may not ask about host, if it may not.
+func CheckName(host string) error {
+	return checkLookupGuard(host, nil)
+}
+
+// MessageRefused reports whether a message names a host CheckName turns away,
+// in a question, as the owner of a record or in a record's data.
+func MessageRefused(msg *dns.Msg) bool {
+	if LookupGuard == nil {
+		return false
+	}
+	for _, question := range msg.Question {
+		if CheckName(question.Name) != nil {
+			return true
+		}
+	}
+	for _, records := range [][]dns.RR{msg.Answer, msg.Ns, msg.Extra} {
+		for _, record := range records {
+			if CheckName(record.Header().Name) != nil {
+				return true
+			}
+			switch record.(type) {
+			case *dns.A, *dns.AAAA, *dns.OPT:
+				continue
+			}
+			for _, field := range strings.Fields(strings.TrimPrefix(record.String(), record.Header().String())) {
+				if CheckName(field) != nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
 
 var (
 	ErrIPNotFound   = errors.New("couldn't find ip")
@@ -73,6 +120,10 @@ func LookupIPv4WithResolver(ctx context.Context, host string, r Resolver) ([]net
 			return []netip.Addr{ip}, nil
 		}
 		return []netip.Addr{}, ErrIPVersion
+	}
+
+	if err := checkLookupGuard(host, r); err != nil {
+		return nil, err
 	}
 
 	if r != nil && r.Invalid() {
@@ -125,6 +176,10 @@ func LookupIPv6WithResolver(ctx context.Context, host string, r Resolver) ([]net
 		return nil, ErrIPVersion
 	}
 
+	if err := checkLookupGuard(host, r); err != nil {
+		return nil, err
+	}
+
 	if r != nil && r.Invalid() {
 		return r.LookupIPv6(ctx, host)
 	}
@@ -156,6 +211,10 @@ func ResolveIPv6(ctx context.Context, host string) (netip.Addr, error) {
 func LookupIPWithResolver(ctx context.Context, host string, r Resolver) ([]netip.Addr, error) {
 	if node, ok := DefaultHosts.Load().Search(host, false); ok {
 		return node.IPs, nil
+	}
+
+	if err := checkLookupGuard(host, r); err != nil {
+		return nil, err
 	}
 
 	if r != nil && r.Invalid() {
@@ -221,6 +280,10 @@ func ResolveIPPrefer6(ctx context.Context, host string) (netip.Addr, error) {
 }
 
 func ResolveECHWithResolver(ctx context.Context, host string, r Resolver) ([]byte, error) {
+	if err := checkLookupGuard(host, r); err != nil {
+		return nil, err
+	}
+
 	if r != nil && r.Invalid() {
 		return r.ResolveECH(ctx, host)
 	}

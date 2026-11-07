@@ -142,6 +142,9 @@ func (DNSResolver) LookupIP(ctx context.Context, query platform.DNSQuery) ([]net
 }
 
 func exchangeDNS(ctx context.Context, host string, qtype uint16) (*D.Msg, error) {
+	if err := resolver.CheckName(host); err != nil {
+		return nil, err
+	}
 	r := resolver.ProxyServerHostResolver.Load()
 	if r == nil || !r.Invalid() {
 		r = resolver.SystemResolver

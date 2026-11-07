@@ -96,3 +96,45 @@ func TestListenTCPInternalAllowedThroughProxyDialer(t *testing.T) {
 		t.Fatal("external listener through proxy must fail")
 	}
 }
+
+func TestRawDNSQueriesAskTheGuardFirst(t *testing.T) {
+	oldProxy, oldGuard := resolver.ProxyServerHostResolver.Load(), resolver.LookupGuard
+	t.Cleanup(func() {
+		resolver.ProxyServerHostResolver.Store(oldProxy)
+		resolver.LookupGuard = oldGuard
+	})
+	var asked []string
+	resolver.ProxyServerHostResolver.Store(&testDNSResolver{exchange: func(_ context.Context, m *D.Msg) (*D.Msg, error) {
+		asked = append(asked, m.Question[0].Name)
+		reply := new(D.Msg).SetReply(m)
+		reply.Answer = []D.RR{&D.TXT{
+			Hdr: D.RR_Header{Name: m.Question[0].Name, Rrtype: D.TypeTXT, Class: D.ClassINET, Ttl: 60},
+			Txt: []string{"value"},
+		}}
+		return reply, nil
+	}})
+	refusal := errors.New("refused")
+	resolver.LookupGuard = func(host string, _ resolver.Resolver) error {
+		if host == "a.refused.example" || host == "a.refused.example." {
+			return refusal
+		}
+		return nil
+	}
+	ctx := context.Background()
+	if _, err := (DNSResolver{}).LookupTXT(ctx, platform.DNSQuery{Host: "a.refused.example"}); !errors.Is(err, refusal) {
+		t.Fatalf("TXT = %v, want the refusal", err)
+	}
+	if _, err := (DNSResolver{}).LookupSRV(ctx, platform.DNSQuery{Host: "a.refused.example"}); !errors.Is(err, refusal) {
+		t.Fatalf("SRV = %v, want the refusal", err)
+	}
+	if len(asked) != 0 {
+		t.Fatalf("refused names went out: %v", asked)
+	}
+	if got, err := (DNSResolver{}).LookupTXT(ctx, platform.DNSQuery{Host: "public.example"}); err != nil || got != "value" {
+		t.Fatalf("a public name = %q, %v", got, err)
+	}
+	resolver.LookupGuard = nil
+	if _, err := (DNSResolver{}).LookupTXT(ctx, platform.DNSQuery{Host: "a.refused.example"}); err != nil {
+		t.Fatalf("no guard refused a name: %v", err)
+	}
+}
