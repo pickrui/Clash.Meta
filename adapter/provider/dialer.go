@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"slices"
 	"sync"
 
 	"github.com/metacubex/mihomo/adapter"
@@ -18,6 +19,7 @@ type DialerProvider struct{ *dialerProvider }
 type dialerProvider struct {
 	P.ProxyProvider
 	dialer  string
+	refused []string
 	hc      *HealthCheck
 	mu      sync.Mutex
 	version uint32
@@ -26,13 +28,13 @@ type dialerProvider struct {
 	once    sync.Once
 }
 
-func NewDialerProvider(source P.ProxyProvider, dialer, url, filter string, timeout, interval uint, lazy bool, expected utils.IntRanges[uint16]) (*DialerProvider, error) {
+func NewDialerProvider(source P.ProxyProvider, dialer string, refused []string, url, filter string, timeout, interval uint, lazy bool, expected utils.IntRanges[uint16]) (*DialerProvider, error) {
 	hc := NewHealthCheck(nil, "", timeout, interval, lazy, expected)
 	hc.registerHealthCheckTask(url, expected, filter, interval)
-	inner := &dialerProvider{ProxyProvider: source, dialer: dialer, hc: hc, cache: make(map[C.Proxy]C.Proxy)}
+	inner := &dialerProvider{ProxyProvider: source, dialer: dialer, refused: refused, hc: hc, cache: make(map[C.Proxy]C.Proxy)}
 	inner.version = source.Version()
 	for _, member := range source.Proxies() {
-		derived, err := cloneDialerMember(member, dialer)
+		derived, err := cloneDialerMember(member, dialer, refused)
 		if err != nil {
 			hc.close()
 			for original, proxy := range inner.cache {
@@ -51,7 +53,12 @@ func NewDialerProvider(source P.ProxyProvider, dialer, url, filter string, timeo
 	return result, nil
 }
 
-func cloneDialerMember(proxy C.Proxy, dialer string) (C.Proxy, error) {
+// A refused member stays under its name and refuses every connection, so that a
+// selection naming it stops rather than moves.
+func cloneDialerMember(proxy C.Proxy, dialer string, refused []string) (C.Proxy, error) {
+	if slices.Contains(refused, proxy.Name()) {
+		return adapter.NewProxy(outbound.NewRejectWithOption(outbound.RejectOption{Name: proxy.Name()})), nil
+	}
 	switch proxy.Type() {
 	case C.Direct, C.Reject, C.RejectDrop, C.Relay, C.Selector, C.Fallback, C.URLTest, C.LoadBalance:
 		return proxy, nil
@@ -75,7 +82,7 @@ func (p *dialerProvider) Proxies() []C.Proxy {
 		derived := p.cache[original]
 		if derived == nil {
 			var err error
-			derived, err = cloneDialerMember(original, p.dialer)
+			derived, err = cloneDialerMember(original, p.dialer, p.refused)
 			if err != nil {
 				derived = adapter.NewProxy(&failedDialerMember{Base: outbound.NewBase(outbound.BaseOption{Name: original.Name(), Type: original.Type()}), err: err})
 			}

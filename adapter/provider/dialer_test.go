@@ -53,7 +53,7 @@ func TestNewDialerProviderClosesOnlyOwnedMembersOnFailure(t *testing.T) {
 	unsupported := &dialerTestProxy{name: "unsupported", typ: C.Dns}
 	source := &dialerTestProvider{proxies: []C.Proxy{original, shared, unsupported}}
 
-	if _, err := NewDialerProvider(source, "entry", "", "", 0, 0, false, nil); err == nil {
+	if _, err := NewDialerProvider(source, "entry", nil, "", "", 0, 0, false, nil); err == nil {
 		t.Fatal("expected unsupported member error")
 	}
 	if owned.closed.Load() != 1 {
@@ -95,7 +95,7 @@ func TestDialerProviderRetainsActiveStreams(t *testing.T) {
 			}
 			shared := &dialerTestProxy{name: "nested group", typ: C.Selector}
 			source := &dialerTestProvider{proxies: []C.Proxy{original, shared}, version: 1}
-			provider, err := NewDialerProvider(source, "entry", "", "", 0, 0, false, nil)
+			provider, err := NewDialerProvider(source, "entry", nil, "", "", 0, 0, false, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -125,4 +125,35 @@ func TestDialerProviderRetainsActiveStreams(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDialerProviderRefusesNamedMembersOnly(t *testing.T) {
+	derived := func(name string) *cloneableDialerTestProxy {
+		return &cloneableDialerTestProxy{
+			dialerTestProxy: &dialerTestProxy{name: name, typ: C.Http},
+			derived:         &dialerTestProxy{name: name, typ: C.Http},
+		}
+	}
+	refused, kept := derived("refused"), derived("kept")
+	source := &dialerTestProvider{proxies: []C.Proxy{refused, kept}, version: 1}
+	provider, err := NewDialerProvider(source, "entry", []string{"refused"}, "", "", 0, 0, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close()
+	check := func() {
+		t.Helper()
+		members := provider.Proxies()
+		if members[0].Name() != "refused" || members[0].Type() != C.Reject {
+			t.Fatalf("refused member = %s %s", members[0].Name(), members[0].Type())
+		}
+		if members[len(members)-1] != kept.derived {
+			t.Fatalf("kept member = %v", members[len(members)-1])
+		}
+	}
+	check()
+	// A refresh that brings new instances under the same names keeps the refusal.
+	refused, kept = derived("refused"), derived("kept")
+	source.proxies, source.version = []C.Proxy{refused, kept}, 2
+	check()
 }

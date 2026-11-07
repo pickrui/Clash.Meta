@@ -3,6 +3,7 @@ package outboundgroup
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/dlclark/regexp2"
@@ -46,6 +47,8 @@ type GroupCommonOption struct {
 	Icon                string   `group:"icon,omitempty"`
 
 	UsePosition map[string]int `group:"use-position,omitempty"`
+	// Members that refuse every connection under this group's dialer-proxy.
+	RejectMembers []string `group:"reject-members,omitempty"`
 	// Names the include-all-proxies sweep leaves out; listed proxies still join.
 	IncludeAllSkip []string `group:"include-all-skip,omitempty"`
 }
@@ -228,6 +231,9 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		if groupOption.Type != "select" && groupOption.Interval == 0 {
 			groupOption.Interval = 300
 		}
+		if slices.Contains(groupOption.RejectMembers, emptyFallback.Name()) {
+			emptyFallback = proxyMap["REJECT"]
+		}
 		if emptyFallback.Type() != C.Direct && emptyFallback.Type() != C.Reject && emptyFallback.Type() != C.RejectDrop {
 			clone, ok := emptyFallback.(interface{ WithDialerProxy(string) (C.Proxy, error) })
 			if !ok {
@@ -244,7 +250,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 			if source.VehicleType() == P.Compatible {
 				healthFilter = ""
 			}
-			pd, err := provider.NewDialerProvider(source, groupOption.DialerProxy, groupOption.URL, healthFilter, uint(groupOption.TestTimeout), uint(groupOption.Interval), groupOption.Lazy, expectedStatus)
+			pd, err := provider.NewDialerProvider(source, groupOption.DialerProxy, groupOption.RejectMembers, groupOption.URL, healthFilter, uint(groupOption.TestTimeout), uint(groupOption.Interval), groupOption.Lazy, expectedStatus)
 			if err != nil {
 				for _, owned := range derived {
 					_ = owned.Close()

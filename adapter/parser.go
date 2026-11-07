@@ -10,6 +10,10 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 )
 
+// ProviderNodeRefused may stop a provider's node from being used; it then stays
+// listed under its own name and refuses every connection.
+var ProviderNodeRefused func(proxy C.ProxyAdapter) bool
+
 func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error) {
 	decoder := structure.NewDecoder(structure.Option{TagName: "proxy", WeaklyTypedInput: true, KeyReplacer: structure.DefaultKeyReplacer})
 	proxyType, existType := mapping["type"].(string)
@@ -236,6 +240,14 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 	if dialer, _ := mapping["dialer-proxy"].(string); dialer != "" && proxy.ProxyInfo().DialerProxy != dialer {
 		_ = proxy.Close()
 		return nil, fmt.Errorf("proxy [%s] type [%s] does not support dialer-proxy", proxy.Name(), proxyType)
+	}
+
+	if opt.ProviderName != "" && ProviderNodeRefused != nil && ProviderNodeRefused(proxy) {
+		name := proxy.Name()
+		_ = proxy.Close()
+		refused := NewProxy(outbound.NewRejectWithOption(outbound.RejectOption{BasicOption: basicOption, Name: name}))
+		refused.cloneWithDialer = func(string) (C.Proxy, error) { return refused, nil }
+		return refused, nil
 	}
 
 	if muxMapping, muxExist := mapping["smux"].(map[string]any); muxExist {
