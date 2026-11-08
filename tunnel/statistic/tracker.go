@@ -18,12 +18,16 @@ var MetadataProcessor func(*C.Metadata)
 
 // RulePayloadObfuscated names rule payloads the API reports as ***.
 var RulePayloadObfuscated func(payload string) bool
+var RulePayloadProcessor func(string) string
 
 // RulePayload is a rule's payload as the API may report it.
 func RulePayload(rule C.Rule) string {
 	payload := rule.Payload()
 	if RulePayloadObfuscated != nil && RulePayloadObfuscated(payload) {
 		return "***"
+	}
+	if RulePayloadProcessor != nil {
+		payload = RulePayloadProcessor(payload)
 	}
 	return payload
 }

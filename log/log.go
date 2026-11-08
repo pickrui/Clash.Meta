@@ -18,6 +18,7 @@ var (
 )
 
 var EventFilter func(Event) bool
+var EventProcessor func(*Event)
 
 func init() {
 	level.Store(int32(INFO))
@@ -70,6 +71,9 @@ func Debugln(format string, v ...any) {
 }
 
 func emit(event Event) {
+	if EventProcessor != nil {
+		EventProcessor(&event)
+	}
 	if EventFilter != nil && !EventFilter(event) {
 		return
 	}
@@ -79,10 +83,14 @@ func emit(event Event) {
 }
 
 func Fatalln(format string, v ...any) {
-	if EventFilter != nil && !EventFilter(newLog(ERROR, format, v...)) {
+	event := newLog(ERROR, format, v...)
+	if EventProcessor != nil {
+		EventProcessor(&event)
+	}
+	if EventFilter != nil && !EventFilter(event) {
 		os.Exit(1)
 	}
-	log.Fatalf(format, v...)
+	log.Fatal(event.Bounded().Payload)
 }
 
 func Subscribe() observable.Subscription[Event] {

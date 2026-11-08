@@ -48,3 +48,21 @@ func TestLogPayloadLimitPreservesUTF8AndFiltersOriginal(t *testing.T) {
 		t.Fatal("output filtering ran after truncation")
 	}
 }
+
+func TestLogProcessorRunsBeforeFilterAndBounds(t *testing.T) {
+	previousFilter, previousProcessor := EventFilter, EventProcessor
+	t.Cleanup(func() { EventFilter, EventProcessor = previousFilter, previousProcessor })
+	EventProcessor = func(event *Event) { event.Payload = "safe endpoint" }
+	called := false
+	EventFilter = func(event Event) bool {
+		called = true
+		if event.Payload != "safe endpoint" {
+			t.Errorf("filter received %q", event.Payload)
+		}
+		return false
+	}
+	emit(Event{Payload: strings.Repeat("x", MaxPayloadBytes)})
+	if !called {
+		t.Fatal("the filter was not called")
+	}
+}
