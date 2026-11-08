@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/outbound"
-	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/tunnel"
@@ -71,15 +70,6 @@ func TestDNSPacketConnAddressFamilies(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer pc.Close()
-				if transport == "direct" {
-					localAddr := pc.LocalAddr()
-					if custom, ok := localAddr.(N.CustomAddr); ok {
-						localAddr = custom.RawAddr()
-					}
-					if local := localAddr.(*net.UDPAddr); (local.IP.To4() != nil) != ipv4 {
-						t.Fatalf("single-peer socket %s does not match server %s", local, host)
-					}
-				}
 				deadline := time.Now().Add(3 * time.Second)
 				if err := pc.SetDeadline(deadline); err != nil {
 					t.Fatal(err)

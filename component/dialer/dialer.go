@@ -83,7 +83,11 @@ func ListenPacket(ctx context.Context, network, address string, rAddrPort netip.
 	if err != nil {
 		return nil, err
 	}
-	return lc.ListenPacket(ctx, network, address)
+	if opt.addrReuse {
+		// A port bound with SO_REUSEPORT may be shared with another socket.
+		return lc.ListenPacket(ctx, network, address)
+	}
+	return listenPacket(ctx, lc, network, address)
 }
 
 // Listen creates a TCP listener with the same socket policy as ListenPacket.
