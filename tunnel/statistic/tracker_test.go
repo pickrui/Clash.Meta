@@ -101,3 +101,34 @@ func TestTrackersReportFilteredRulePayloads(t *testing.T) {
 		t.Fatalf("without a filter = %q", got)
 	}
 }
+
+func TestTrackersLabelRulePayloads(t *testing.T) {
+	previousObfuscated, previousProcessor := RulePayloadObfuscated, RulePayloadProcessor
+	t.Cleanup(func() { RulePayloadObfuscated, RulePayloadProcessor = previousObfuscated, previousProcessor })
+	RulePayloadObfuscated = func(payload string) bool { return payload == "hidden.example" }
+	RulePayloadProcessor = func(payload string) string {
+		if payload == "named.example" {
+			return "label"
+		}
+		return payload
+	}
+	manager := &Manager{}
+	rule := func(payload string) C.Rule { return payloadTestRule{payload: payload} }
+	tcp := func(payload string) string {
+		return NewTCPTracker(trafficTestConn{name: "DIRECT"}, manager, &C.Metadata{}, rule(payload), 0, 0, false).Info().RulePayload
+	}
+	udp := func(payload string) string {
+		return NewUDPTracker(packetTestConn{}, manager, &C.Metadata{}, rule(payload), 0, 0, false).Info().RulePayload
+	}
+	for name, report := range map[string]func(string) string{"tcp": tcp, "udp": udp, "api": func(payload string) string { return RulePayload(rule(payload)) }} {
+		if got := report("named.example"); got != "label" {
+			t.Fatalf("%s: labeled payload = %q", name, got)
+		}
+		if got := report("hidden.example"); got != "***" {
+			t.Fatalf("%s: hidden payload = %q", name, got)
+		}
+		if got := report("public.example"); got != "public.example" {
+			t.Fatalf("%s: public payload = %q", name, got)
+		}
+	}
+}
