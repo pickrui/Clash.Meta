@@ -21,6 +21,8 @@ import (
 	"golang.org/x/exp/maps"
 )
 
+const maxStaleDNSAge = 72 * time.Hour
+
 type dnsClient interface {
 	ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, err error)
 	Address() string
@@ -168,6 +170,9 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 	q := m.Question[0]
 	domain := msgToDomain(m)
 	msg, expireTime, hit := getMsgFromCache(r.cache, q)
+	if hit && time.Since(expireTime) > maxStaleDNSAge {
+		hit = false
+	}
 	if hit {
 		r.traceCacheHit(ctx, q, msg)
 		log.Debugln("[DNS] cache hit %s --> %s, expire at %s", domain, msgToLogString(msg), expireTime.Format("2006-01-02 15:04:05"))
