@@ -352,10 +352,6 @@ func resolveMetadata(metadata *C.Metadata) (C.Proxy, C.Rule, error) {
 }
 
 func resolveMetadataWithProcess(metadata *C.Metadata, findProcess func(*C.Metadata) string, goos string) (proxy C.Proxy, rule C.Rule, err error) {
-	if directRule := bittorrentProtocolRules[metadata.SniffProtocol]; directRule != nil {
-		return proxies["DIRECT"], directRule, nil
-	}
-
 	var (
 		resolved             bool
 		processClient        string
@@ -474,17 +470,12 @@ func handleUDPConn(packet C.PacketAdapter) {
 		return
 	}
 
-	key := bittorrentPacketKey(packet)
-	if key != packet.Key() {
-		if keyed, ok := packet.(interface{ SetNATKey(string) }); ok {
-			keyed.SetNATKey(key)
-		}
-	}
+	key := packet.Key()
 	var diagnostic *udpSessionDiagnostic
 	sender, loaded := natTable.GetOrCreate(key, func() C.PacketSender {
 		diagnostic = udpDiagnostics.begin(key)
 		sender := newPacketSender(diagnostic)
-		if metadata.SniffProtocol != sniffer.UDPTrackerProtocol && sniffingEnable && snifferDispatcher.Enable() {
+		if sniffingEnable && snifferDispatcher.Enable() {
 			return snifferDispatcher.UDPSniff(packet, sender)
 		}
 		return sender
@@ -581,10 +572,6 @@ func handleTCPConn(connCtx C.ConnContext) {
 			// we now have a domain name
 			preHandleFailed = false
 		}
-	}
-
-	if sniffer.SniffBitTorrentTCP(conn) {
-		metadata.SniffProtocol = sniffer.BitTorrentProtocol
 	}
 
 	// If both trials have failed, we can do nothing but give up

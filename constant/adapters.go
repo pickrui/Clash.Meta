@@ -305,13 +305,6 @@ func (s *packetAdapter) Key() string {
 	return s.key
 }
 
-func (s *packetAdapter) SetNATKey(key string) {
-	s.key = key
-	if packet, ok := s.UDPPacket.(interface{ SetNATKey(string) }); ok {
-		packet.SetNATKey(key)
-	}
-}
-
 func NewPacketAdapter(packet UDPPacket, metadata *Metadata) PacketAdapter {
 	return &packetAdapter{
 		packet,
