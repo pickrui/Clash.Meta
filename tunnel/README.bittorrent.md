@@ -1,11 +1,30 @@
-# BT 客户端强制直连
+# BT 流量强制直连
 
 Windows、macOS 和 Linux 的 FlClash 内核在选择全局代理、匹配订阅规则或采用入站指定策略之前，查询本机连接所属的进程
 命中内置识别条件后直接使用 `DIRECT`，TCP 和 UDP 均适用
 
 这是始终启用的内核策略，没有关闭开关，订阅配置、覆写脚本、`find-process-mode: off` 和模式切换均不能关闭
 “查找进程”开关仍控制其他应用的进程规则和显示，BT 客户端的识别独立执行
-Android 和其他平台不启用此策略
+Android 和其他平台不启用进程识别策略，但启用下方的协议识别策略
+
+## 协议识别与强制直连
+
+协议识别位于共用 Go Core，不按操作系统开关；当前 FlClash 发布的 Android、Windows、macOS 和 Linux 均在路由前执行内置协议识别，不受普通嗅探开关、配置中的嗅探端口和进程查找开关限制
+命中后直接选择内置 `DIRECT`，全局模式、订阅规则及入站指定代理均不能覆盖；直连失败时不回退到代理
+这是由 Core 使用系统网络建立直连出口，不会把应用整体排除出 VPN，也不会为目的 IP 添加系统绕过路由
+
+- TCP：按 [BEP 3](https://www.bittorrent.org/beps/bep_0003.html) 精确检查起始的 `0x13` 和 `BitTorrent protocol` 共 20 字节，支持分片到达；在识别完成前不拨号代理
+- UDP Tracker：按 [BEP 15](https://www.bittorrent.org/beps/bep_0015.html) 识别至少 16 字节、协议 ID 为 `0x41727101980` 且 action 为 0 的 connect 请求，允许标准扩展尾部；同一源地址端口与目的地址端口的后续报文继续直连
+- UDP Tracker 使用独立的 NAT 会话，不沿用该源端口此前建立的代理会话；TProxy 回程套接字和会话释放使用同一个隔离键，其他目的地址不继承分类
+- 请求记录通过 `SniffProtocol` 规则标明 `bittorrent` 或 `bittorrent-tracker` 的命中原因
+
+TCP 复用已有预读缓冲，不消费或修改原始报文，只检查前 20 字节；尚未收齐时，额外预读最多等待 200 ms
+之前的普通嗅探若已经等待且没有数据，不再重复等待；首字节不匹配则立即结束检查
+普通嗅探关闭时，原有预读与拨号并行，现在为识别而先预读再拨号，因此服务端先发数据的连接可能增加最多 200 ms 的拨号前等待
+
+UDP Tracker 的活动 NAT 会话保留分类；会话断开后，connect 识别提示最多保留 120 秒，提示缓存最多 4,096 项，网络重置时清理
+不凭独立的 announce、scrape 或响应报文猜测 Tracker 身份，也不把 DHT、uTP、加密或混淆握手视为已识别
+这些未识别流量继续接受现有桌面进程识别和普通分流策略，不能保证所有 BT 流量均可由报文识别
 
 ## 按需识别
 
@@ -64,7 +83,25 @@ Python / Java 自身不会整体直连，普通应用的参数、目录名或 Ja
 - 客户端自行指定远程代理时，本策略不能去除客户端自身的代理协议或配置
 - 现有“BT 下载直连”预设仍可用于规则模式下的 Tracker / PT 域名匹配
 
-## 验证结果
+## 协议策略验证
+
+2026-11-09，Go 1.27.3，构建标签 `with_gvisor,with_mips_low_memory`
+
+- 完整签名前缀、截断、错误字节、UDP 扩展和普通非 BT 报文用例通过
+- TCP 20 字节前缀的全部 19 个分片位置均在关闭普通嗅探、全局代理和入站指定代理下实际选择 DIRECT 拨号，拒绝连接后未尝试代理，预读报文逐字节保留
+- UDP Tracker 在源端口已有代理会话时仍实际选择 DIRECT，首次直连失败后的后续 announce 继续选择 DIRECT
+- 模拟 Android / Windows / macOS / Linux 的三种路由模式均不能覆盖协议直连规则；测试不等于四个平台的实机运行
+- UDP 目的地址和来源隔离、活动会话保留分类、64 个并发流、TProxy 隔离回程缓存用例通过，相关包竞态检查通过
+- Go Core 主模块的完整测试和静态分析通过；Android arm64、Linux amd64 和 Windows amd64 的相关包静态分析通过
+- 未启动应用、未进行真实 BT 下载或设备装机验证
+
+复现协议识别与路由回归：
+
+```sh
+CGO_ENABLED=1 go test -race -count=1 -tags with_gvisor,with_mips_low_memory ./component/sniffer ./component/nat ./constant ./listener/tproxy ./tunnel
+```
+
+## 原有进程策略验证
 
 2026-10-16，Go 1.26.9，构建标签 `with_gvisor,with_mips_low_memory`
 

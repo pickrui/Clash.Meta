@@ -7,7 +7,9 @@
 package tunnel
 
 import (
+	"github.com/metacubex/mihomo/common/lru"
 	"github.com/metacubex/mihomo/component/iface"
+	"github.com/metacubex/mihomo/component/sniffer"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/rules/common"
 )
@@ -47,3 +49,32 @@ func canForceProcessDirect(metadata *C.Metadata, goos string) bool {
 	local, err := iface.IsLocalIp(metadata.SrcIP.Unmap())
 	return err == nil && local
 }
+
+var bittorrentProtocolRules = func() map[string]C.Rule {
+	rules := make(map[string]C.Rule, 2)
+	for _, protocol := range []string{sniffer.BitTorrentProtocol, sniffer.UDPTrackerProtocol} {
+		rule, _ := common.NewSniffProtocol(protocol, "DIRECT")
+		rules[protocol] = rule
+	}
+	return rules
+}()
+
+var trackerFlows = lru.New(lru.WithSize[string, struct{}](4096), lru.WithAge[string, struct{}](120))
+
+func bittorrentPacketKey(packet C.PacketAdapter) string {
+	metadata := packet.Metadata()
+	key := packet.Key() + "\x00bittorrent\x00" + metadata.RemoteAddress()
+	identified := sniffer.IsUDPTrackerConnect(packet.Data())
+	if identified {
+		trackerFlows.Set(key, struct{}{})
+	}
+	active := natTable.Contains(key)
+	_, remembered := trackerFlows.Get(key)
+	if identified || active || remembered {
+		metadata.SniffProtocol = sniffer.UDPTrackerProtocol
+		return key
+	}
+	return packet.Key()
+}
+
+func ClearBitTorrentProtocolHints() { trackerFlows.Clear() }

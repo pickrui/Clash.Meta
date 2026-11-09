@@ -27,6 +27,11 @@ func (t *Table) GetOrCreate(key string, maker func() C.PacketSender) (C.PacketSe
 	return item.PacketSender, loaded
 }
 
+func (t *Table) Contains(key string) bool {
+	_, loaded := t.mapping.Load(key)
+	return loaded
+}
+
 func (t *Table) Delete(key string) {
 	t.mapping.Delete(key)
 }
