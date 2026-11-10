@@ -50,6 +50,7 @@ type Resolver struct {
 	fallbackLazyQuery     bool
 	group                 singleflight.Group[*D.Msg]
 	cache                 dnsCache
+	cacheCeiling          uint32
 	stateMu               sync.RWMutex
 	generation            uint64
 	policy                []dnsPolicy
@@ -170,7 +171,11 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 	q := m.Question[0]
 	domain := msgToDomain(m)
 	msg, expireTime, hit := getMsgFromCache(r.cache, q)
-	if hit && time.Since(expireTime) > maxStaleDNSAge {
+	staleAge := maxStaleDNSAge
+	if r.cacheCeiling != 0 {
+		staleAge = min(staleAge, time.Duration(r.cacheCeiling)*time.Second)
+	}
+	if hit && (time.Since(expireTime) > staleAge || !expireTime.After(time.Now()) && isNegativeResponse(msg, q)) {
 		hit = false
 	}
 	if hit {
@@ -223,7 +228,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 			if cache {
 				r.stateMu.RLock()
 				if r.generation == generation {
-					putMsgToCache(r.cache, q, result)
+					putMsgToCache(r.cache, q, result, r.cacheCeiling)
 				}
 				r.stateMu.RUnlock()
 			}
@@ -543,11 +548,12 @@ func (rs Resolvers) ResetConnection() {
 }
 
 func NewResolverFromClient(client dnsClient) *Resolver {
-	return &Resolver{
-		ipv6:  true,
-		main:  []dnsClient{client},
-		cache: Config{}.newCache(),
-	}
+	return NewResolverFromClientWithTTL(client, 0)
+}
+
+// NewResolverFromClientWithTTL bounds both fresh and stale cache lifetimes.
+func NewResolverFromClientWithTTL(client dnsClient, ceiling uint32) *Resolver {
+	return &Resolver{ipv6: true, main: []dnsClient{client}, cache: Config{}.newCache(), cacheCeiling: ceiling}
 }
 
 func NewResolver(config Config) (rs Resolvers) {

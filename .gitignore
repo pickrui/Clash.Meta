@@ -69,3 +69,6 @@ test/config/cache*
 /transport/snell/v4_test.go
 /transport/snell/v6.go
 /transport/snell/v6_test.go
+/transport/snell/pool_cancellation_test.go
+/dns/managed_dns_contract_test.go
+/dns/testdata/managed_dns_contract.json

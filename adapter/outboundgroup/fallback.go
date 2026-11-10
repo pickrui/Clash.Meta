@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
@@ -18,10 +19,12 @@ type FallbackOption struct{}
 
 type Fallback struct {
 	*GroupBase
-	disableUDP     bool
-	testUrl        string
-	selected       atomic.TypedValue[string]
-	expectedStatus string
+	disableUDP          bool
+	testUrl             string
+	selected            atomic.TypedValue[string]
+	selectionMu         sync.Mutex
+	selectionGeneration uint64
+	expectedStatus      string
 }
 
 func (f *Fallback) Now() string {
@@ -105,13 +108,20 @@ func (f *Fallback) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 
 func (f *Fallback) findAliveProxy(touch bool) C.Proxy {
 	proxies := f.GetProxies(touch)
-	if selected := f.selected.Load(); selected != "" {
+	f.selectionMu.Lock()
+	selected, generation := f.selected.Load(), f.selectionGeneration
+	f.selectionMu.Unlock()
+	if selected != "" {
 		for _, proxy := range proxies {
 			if proxy.Name() == selected {
 				if proxy.AliveForTestUrl(f.testUrl) {
 					return proxy
 				}
-				f.selected.CompareAndSwap(selected, "")
+				f.selectionMu.Lock()
+				if generation == f.selectionGeneration {
+					f.selected.CompareAndSwap(selected, "")
+				}
+				f.selectionMu.Unlock()
 				break
 			}
 		}
@@ -138,20 +148,30 @@ func (f *Fallback) Set(name string) error {
 		return errors.New("proxy not exist")
 	}
 
-	// Probe before storing: a lookup meanwhile would drop a still-dead selection.
+	f.selectionMu.Lock()
+	f.selectionGeneration++
+	generation := f.selectionGeneration
+	f.selectionMu.Unlock()
 	if !p.AliveForTestUrl(f.testUrl) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*time.Duration(5000))
 		defer cancel()
 		expectedStatus, _ := utils.NewUnsignedRanges[uint16](f.expectedStatus)
 		_, _ = p.URLTest(ctx, f.testUrl, expectedStatus)
 	}
-	f.selected.Store(name)
+	f.selectionMu.Lock()
+	if generation == f.selectionGeneration {
+		f.selected.Store(name)
+	}
+	f.selectionMu.Unlock()
 
 	return nil
 }
 
 func (f *Fallback) ForceSet(name string) {
+	f.selectionMu.Lock()
+	f.selectionGeneration++
 	f.selected.Store(name)
+	f.selectionMu.Unlock()
 }
 
 func (f *Fallback) Providers() []P.ProxyProvider {

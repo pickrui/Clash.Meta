@@ -49,15 +49,24 @@ func updateTTL(records []D.RR, ttl uint32) {
 // the returned msg is a copy of the original msg, so it can be modified without affecting the original msg.
 func getMsgFromCache(c dnsCache, q D.Question) (*D.Msg, time.Time, bool) {
 	msg, expireTime, hit := c.GetWithExpire(q.String())
-	if msg != nil {
-		msg = msg.Copy() // never modify the original msg
+	if !hit || msg == nil {
+		return nil, time.Time{}, false
 	}
-	return msg, expireTime, hit
+	return msg.Copy(), expireTime, true
+}
+
+func isNegativeResponse(msg *D.Msg, q D.Question) bool {
+	if msg.Rcode != D.RcodeSuccess {
+		return msg.Rcode == D.RcodeNameError
+	}
+	return !slices.ContainsFunc(msg.Answer, func(rr D.RR) bool {
+		return rr.Header().Class == q.Qclass && (q.Qtype == D.TypeANY || rr.Header().Rrtype == q.Qtype)
+	})
 }
 
 // putMsgToCache puts a dns message into the cache.
 // the msg is copied before being stored in the cache, so it can be modified without affecting the original msg.
-func putMsgToCache(c dnsCache, q D.Question, msg *D.Msg) {
+func putMsgToCache(c dnsCache, q D.Question, msg *D.Msg, ceiling ...uint32) {
 	// skip dns cache for acme challenge
 	if q.Qtype == D.TypeTXT && strings.HasPrefix(q.Name, "_acme-challenge.") {
 		log.Debugln("[DNS] dns cache ignored because of acme challenge for: %s", q.Name)
@@ -79,7 +88,31 @@ func putMsgToCache(c dnsCache, q D.Question, msg *D.Msg) {
 	} else {
 		ttl = minimalTTL(lo.Concat(msg.Answer, msg.Ns, msg.Extra))
 	}
+	if isNegativeResponse(msg, q) {
+		var bound uint32
+		found := false
+		for _, rr := range msg.Ns {
+			if soa, ok := rr.(*D.SOA); ok && soa.Hdr.Class == q.Qclass {
+				value := min(soa.Hdr.Ttl, soa.Minttl)
+				if !found || value < bound {
+					bound = value
+				}
+				found = true
+			}
+		}
+		if found {
+			ttl = min(ttl, bound)
+		} else {
+			ttl = 0
+		}
+	}
+	if len(ceiling) != 0 && ceiling[0] != 0 {
+		ttl = min(ttl, ceiling[0])
+	}
 	if ttl == 0 {
+		if _, _, hit := c.GetWithExpire(q.String()); hit {
+			c.SetWithExpire(q.String(), nil, time.Time{})
+		}
 		return
 	}
 
