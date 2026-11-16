@@ -46,6 +46,6 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -o /tmp/tfo-windows.test.exe 
 ```
 
 Cross-compilation and the portable layout check do not execute Windows socket
-I/O. Run the same suite on Windows with the pinned Go 1.27.3 before claiming that
+I/O. Run the same suite on Windows with the pinned Go 1.27.4 before claiming that
 runtime validation. Retire this replacement when upstream provides a compatible
 fix, retaining the layout guard against subsequent Go patch changes.

@@ -1,10 +1,10 @@
 module github.com/metacubex/mihomo
 
 // Keep the minimum compatible with the standalone LoongArch ABI1 toolchain.
-// FlClash builds pin GOTOOLCHAIN=go1.27.3 independently of this minimum.
+// FlClash builds pin GOTOOLCHAIN=go1.27.4 independently of this minimum.
 go 1.26.0
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/bahlo/generic-list-go v0.2.0
