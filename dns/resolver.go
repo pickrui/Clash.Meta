@@ -29,6 +29,17 @@ type dnsClient interface {
 	ResetConnection()
 }
 
+func (r *Resolver) cacheQuestion(q D.Question) (D.Question, bool) {
+	if len(r.main) == 1 {
+		if client, ok := r.main[0].(interface {
+			CacheQuestion(D.Question) (D.Question, bool)
+		}); ok {
+			return client.CacheQuestion(q)
+		}
+	}
+	return q, true
+}
+
 type dnsCache interface {
 	GetWithExpire(key string) (*D.Msg, time.Time, bool)
 	SetWithExpire(key string, value *D.Msg, expire time.Time)
@@ -168,9 +179,10 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 	if err := r.queryContext().Err(); err != nil {
 		return nil, err
 	}
-	q := m.Question[0]
+	q, cacheable := r.cacheQuestion(m.Question[0])
 	domain := msgToDomain(m)
 	msg, expireTime, hit := getMsgFromCache(r.cache, q)
+	hit = hit && cacheable
 	staleAge := maxStaleDNSAge
 	if r.cacheCeiling != 0 {
 		staleAge = min(staleAge, time.Duration(r.cacheCeiling)*time.Second)
@@ -178,13 +190,38 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 	if hit && (time.Since(expireTime) > staleAge || !expireTime.After(time.Now()) && isNegativeResponse(msg, q)) {
 		hit = false
 	}
+	if hit && r.cacheCeiling != 0 && !expireTime.After(time.Now()) {
+		wait, cancel := context.WithTimeout(ctx, time.Second)
+		fresh, refreshErr := r.exchangeWithoutCache(wait, m)
+		cancel()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if r.queryContext().Err() != nil {
+			return nil, r.queryContext().Err()
+		}
+		if refreshErr == nil {
+			return fresh, nil
+		}
+		msg, expireTime, hit = getMsgFromCache(r.cache, q)
+		if !hit || time.Since(expireTime) > staleAge || !expireTime.After(time.Now()) && isNegativeResponse(msg, q) {
+			return nil, refreshErr
+		}
+	}
 	if hit {
+		if len(r.main) == 1 {
+			if client, ok := r.main[0].(interface{ RecordCacheHit(bool) }); ok {
+				client.RecordCacheHit(!expireTime.After(time.Now()))
+			}
+		}
 		r.traceCacheHit(ctx, q, msg)
 		log.Debugln("[DNS] cache hit %s --> %s, expire at %s", domain, msgToLogString(msg), expireTime.Format("2006-01-02 15:04:05"))
 		now := time.Now()
 		if expireTime.Before(now) {
 			setMsgTTL(msg, uint32(1)) // Continue fetch
-			r.refresh(m)
+			if r.cacheCeiling == 0 {
+				r.refresh(m)
+			}
 		} else {
 			// updating TTL by subtracting common delta time from each DNS record
 			updateMsgTTL(msg, uint32(time.Until(expireTime).Seconds()))
@@ -201,15 +238,22 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		return nil, err
 	}
 	q := m.Question[0]
+	cacheQuestion, cacheable := r.cacheQuestion(q)
 	m = m.Copy()
 	r.stateMu.RLock()
 	generation := r.generation
 	r.stateMu.RUnlock()
 	// An exchange started before ClearAll must not be shared with the new network state.
-	key := strconv.FormatUint(generation, 10) + " " + q.String()
+	key := strconv.FormatUint(generation, 10) + " " + cacheQuestion.String()
+	if !cacheable {
+		key = "uncached " + key
+	}
 
 	retryNum := 0
 	retryMax := 3
+	if r.cacheCeiling != 0 {
+		retryMax = 0
+	}
 	initiator := queryInitiator(ctx)
 	fn := func() (result *D.Msg, err error) {
 		ctx, cancel := context.WithTimeout(parent, resolver.DefaultDNSTimeout)
@@ -225,10 +269,10 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 				return
 			}
 
-			if cache {
+			if cache && cacheable {
 				r.stateMu.RLock()
 				if r.generation == generation {
-					putMsgToCache(r.cache, q, result, r.cacheCeiling)
+					putMsgToCache(r.cache, cacheQuestion, result, r.cacheCeiling)
 				}
 				r.stateMu.RUnlock()
 			}
