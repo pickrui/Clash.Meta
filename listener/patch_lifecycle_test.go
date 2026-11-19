@@ -27,6 +27,9 @@ func TestStopListenerReleasesCustomInboundAndRestarts(t *testing.T) {
 		"socks": func() (C.InboundListener, error) { return inbound.NewSocks(&inbound.SocksOption{BaseOption: options}) },
 		"http":  func() (C.InboundListener, error) { return inbound.NewHTTP(&inbound.HTTPOption{BaseOption: options}) },
 		"mixed": func() (C.InboundListener, error) { return inbound.NewMixed(&inbound.MixedOption{BaseOption: options}) },
+		"anytls": func() (C.InboundListener, error) {
+			return inbound.NewAnyTLS(&inbound.AnyTLSOption{BaseOption: options, AllowInsecure: true})
+		},
 		"sudoku": func() (C.InboundListener, error) {
 			return inbound.NewSudoku(&inbound.SudokuOption{BaseOption: options, Key: "restart-fixture"})
 		},

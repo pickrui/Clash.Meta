@@ -440,11 +440,10 @@ func ReCreateTProxy(port int, tunnel C.Tunnel) {
 	log.Infoln("TProxy server listening at: %s", tproxyListener.Address())
 }
 
-func ReCreateMixed(port int, tunnel C.Tunnel) {
+func ReCreateMixed(port int, tunnel C.Tunnel) (err error) {
 	mixedMux.Lock()
 	defer mixedMux.Unlock()
 
-	var err error
 	defer func() {
 		if err != nil {
 			log.Errorln("Start Mixed(http+socks) server error: %s", err.Error())
@@ -474,26 +473,27 @@ func ReCreateMixed(port int, tunnel C.Tunnel) {
 	}
 
 	if shouldTCPIgnore && shouldUDPIgnore {
-		return
+		return nil
 	}
 
 	if portIsZero(addr) {
-		return
+		return nil
 	}
 
 	mixedListener, err = mixed.New(addr, tunnel)
 	if err != nil {
-		return
+		return err
 	}
 
 	mixedUDPLister, err = socks.NewUDP(addr, tunnel)
 	if err != nil {
 		mixedListener.Close()
 		mixedListener = nil
-		return
+		return err
 	}
 
 	log.Infoln("Mixed(http+socks) proxy listening at: %s", mixedListener.Address())
+	return nil
 }
 
 func ReCreateTun(tunConf LC.Tun, tunnel C.Tunnel) {

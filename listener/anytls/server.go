@@ -30,7 +30,7 @@ import (
 )
 
 type Listener struct {
-	closed    bool
+	closed    atomic.Bool
 	config    LC.AnyTLSServer
 	listeners []net.Listener
 	tlsConfig *tls.Config
@@ -95,6 +95,9 @@ func New(config LC.AnyTLSServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 	if config.JLSConfig.Enable {
 		securityModes = append(securityModes, "jls")
 	}
+	if len(securityModes) == 0 && !config.AllowInsecure {
+		return nil, errors.New("disallow using AnyTLS without certificates/shadow-tls/res-tls/jls/allow-insecure config")
+	}
 	if len(securityModes) > 1 {
 		return nil, errors.New("security modes are mutually exclusive: " + strings.Join(securityModes, ", "))
 	}
@@ -143,11 +146,9 @@ func New(config LC.AnyTLSServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 	}
 
 	for _, addr := range strings.Split(config.Listen, ",") {
-		addr := addr
-
-		//TCP
 		l, err := lc.Listen(context.Background(), "tcp", addr)
 		if err != nil {
+			_ = sl.Close()
 			return nil, err
 		}
 		if shadowTLSBuilder != nil {
@@ -158,16 +159,16 @@ func New(config LC.AnyTLSServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 			l = jlsBuilder.NewListener(l)
 		} else if tlsConfig.GetCertificate != nil {
 			l = tls.NewListener(l, tlsConfig)
-		} else if !config.AllowInsecure {
-			return nil, errors.New("disallow using AnyTLS without certificates/shadow-tls/res-tls/jls/allow-insecure config")
 		}
 		sl.listeners = append(sl.listeners, l)
+	}
 
+	for _, l := range sl.listeners {
 		go func() {
 			for {
 				c, err := l.Accept()
 				if err != nil {
-					if sl.closed {
+					if sl.closed.Load() {
 						break
 					}
 					continue
@@ -181,7 +182,7 @@ func New(config LC.AnyTLSServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 }
 
 func (l *Listener) Close() error {
-	l.closed = true
+	l.closed.Store(true)
 	var retErr error
 	for _, lis := range l.listeners {
 		err := lis.Close()

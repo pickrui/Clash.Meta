@@ -16,6 +16,9 @@ func TestInboundFailedStartReleasesEarlierPorts(t *testing.T) {
 		"socks": func(o I.BaseOption) (C.InboundListener, error) { return I.NewSocks(&I.SocksOption{BaseOption: o}) },
 		"mixed": func(o I.BaseOption) (C.InboundListener, error) { return I.NewMixed(&I.MixedOption{BaseOption: o}) },
 		"redir": func(o I.BaseOption) (C.InboundListener, error) { return I.NewRedir(&I.RedirOption{BaseOption: o}) },
+		"anytls": func(o I.BaseOption) (C.InboundListener, error) {
+			return I.NewAnyTLS(&I.AnyTLSOption{BaseOption: o, AllowInsecure: true})
+		},
 		"sudoku": func(o I.BaseOption) (C.InboundListener, error) {
 			return I.NewSudoku(&I.SudokuOption{BaseOption: o, Key: "failed-start-fixture"})
 		},

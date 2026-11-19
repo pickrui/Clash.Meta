@@ -113,7 +113,6 @@ func (s *Sudoku) Listen(tunnel C.Tunnel) error {
 		return fmt.Errorf("sudoku inbound requires key")
 	}
 
-	var errs []error
 	lc := s.ListenConfig()
 	for _, addr := range strings.Split(s.RawAddress(), ",") {
 		conf := s.serverConf
@@ -121,13 +120,10 @@ func (s *Sudoku) Listen(tunnel C.Tunnel) error {
 
 		l, err := sudoku.New(conf, lc, tunnel, s.Additions()...)
 		if err != nil {
-			errs = append(errs, err)
-			continue
+			_ = s.Close()
+			return err
 		}
 		s.listeners = append(s.listeners, l)
-	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
 	}
 
 	log.Infoln("Sudoku[%s] inbound listening at: %s", s.Name(), s.Address())
@@ -142,10 +138,8 @@ func (s *Sudoku) Close() error {
 			errs = append(errs, err)
 		}
 	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	return nil
+	s.listeners = nil
+	return errors.Join(errs...)
 }
 
 var _ C.InboundListener = (*Sudoku)(nil)
