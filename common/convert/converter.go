@@ -188,7 +188,7 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 			}
 
 			switch network {
-			case "ws":
+			case "ws", "httpupgrade":
 				headers := make(map[string]any)
 				wsOpts := make(map[string]any)
 
@@ -196,6 +196,10 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 
 				wsOpts["path"] = query.Get("path")
 				wsOpts["headers"] = headers
+				if network == "httpupgrade" {
+					trojan["network"] = "ws"
+					wsOpts["v2ray-http-upgrade"] = true
+				}
 
 				trojan["ws-opts"] = wsOpts
 
@@ -353,6 +357,10 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 				headers := make(map[string]any)
 				wsOpts := make(map[string]any)
 				wsOpts["path"] = "/"
+				if network == "httpupgrade" {
+					vmess["network"] = "ws"
+					wsOpts["v2ray-http-upgrade"] = true
+				}
 				if host, ok := values["host"].(string); ok && host != "" {
 					headers["Host"] = host
 				}
@@ -384,10 +392,6 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 				}
 				wsOpts["headers"] = headers
 				vmess["ws-opts"] = wsOpts
-				if network == "httpupgrade" {
-					vmess["network"] = "ws"
-					wsOpts["v2ray-http-upgrade"] = true
-				}
 
 			case "grpc":
 				grpcOpts := make(map[string]any)
