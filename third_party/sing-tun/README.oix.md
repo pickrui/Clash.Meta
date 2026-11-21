@@ -1,6 +1,6 @@
 # Local mips TUN memory profile
 
-Source: github.com/metacubex/sing-tun v0.4.28, copied from the Go module cache with its license, sources and tests retained. Both the mihomo module and FlClash core replace this dependency with this directory.
+Source: github.com/metacubex/sing-tun v0.4.29, copied from the Go module cache with its license, sources and tests retained. Both the mihomo module and FlClash core replace this dependency with this directory.
 
 Under `with_mips_low_memory`, `Mipstack.config` explicitly sets TCP send and receive buffers to 32 KiB initially, each allowed to grow to 128 KiB. This is the socket profile used in the Hako low-memory comparison, alongside the mipstack storage patch documented in `../mipstack/README.oix.md`. Keepalive, routing, MTU and UDP configuration are unchanged. Builds without the dedicated tag use the original mipstack socket defaults.
 
@@ -18,3 +18,5 @@ Updated to v0.4.27 for TUN packet batching, checksum offload, ICMP idle tracking
 Backported ee69e4e0 and f9bc43e7: preserve disabled IPv4 UDP checksums, reject IPv6 zero checksums, normalize computed zero to 0xffff, and keep zero-checksum packets out of GRO even when redundant validation is skipped.
 
 Updated to v0.4.28 for explicit DNS modes and macOS session-owned temporary DNS registration. The application hands off its legacy DNS override before applying an explicit mode. The local stack selector and low-memory profile are unchanged.
+
+Updated to v0.4.29 for Linux auto-route rules: IPv6 include-interface rules jump within the IPv6 priorities, the loopback source rules for the TUN IPv6 addresses come before the other IPv6 rules, an unreachable rule for an address family the kernel lacks is skipped, and an nftables range ending at the top of the address space no longer emits an end marker the kernel rejects. The local stack selector and low-memory profile are unchanged.
