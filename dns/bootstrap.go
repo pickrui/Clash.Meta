@@ -41,7 +41,13 @@ func (b *bootstrapResolver) lookup(ctx context.Context, host string, family int)
 			return r.LookupIP(ctx, host)
 		}
 	}
-	primary, cancel := context.WithTimeout(ctx, time.Second)
+	// The fixed servers get a second, or half of what the caller has left when that
+	// is less: the system resolver behind them must still have time to answer.
+	limit := time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		limit = min(limit, time.Until(deadline)/2)
+	}
+	primary, cancel := context.WithTimeout(ctx, limit)
 	ips, err := lookup(b.Resolver, primary)
 	cancel()
 	if err == nil && len(ips) != 0 {

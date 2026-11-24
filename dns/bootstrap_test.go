@@ -70,6 +70,29 @@ func TestBootstrapFallbackCannotOutliveCaller(t *testing.T) {
 	}
 }
 
+// A caller with a second to spare, as the recovery fetch gives each API host,
+// still reaches the system resolver when the fixed servers stay silent.
+func TestBootstrapLeavesTimeForTheSystemResolver(t *testing.T) {
+	silent, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer silent.Close()
+	fallback := &bootstrapFallbackFixture{}
+	b := NewBootstrapResolver([]string{silent.LocalAddr().String()}, func() resolver.Resolver { return fallback })
+	defer b.ResetConnection()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	started := time.Now()
+	ips, err := b.LookupIP(ctx, "api.fixture.test")
+	if err != nil || len(ips) != 1 || fallback.calls.Load() != 1 {
+		t.Fatalf("ips = %v, err = %v, system lookups = %d", ips, err, fallback.calls.Load())
+	}
+	if elapsed := time.Since(started); elapsed < 400*time.Millisecond || elapsed > 900*time.Millisecond {
+		t.Fatalf("the fixed servers held a one-second lookup for %v", elapsed)
+	}
+}
+
 func TestBootstrapCloseQueriesStopsOwnedQueries(t *testing.T) {
 	r, client := newLifecycleResolver(t)
 	fallback := &bootstrapFallbackFixture{}
